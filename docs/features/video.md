@@ -34,6 +34,29 @@ Click a video result and it opens in the detail drawer with the player
 file. The drawer shows the shot index, timestamp, EXIF/metadata,
 detected faces, and any GPS attached to that shot.
 
+## Local speech transcripts
+
+Speech transcription is opt-in (`enable_speech_transcription: true`). The indexer
+uses the MIT-licensed OpenAI Whisper base model and PyAV to decode audio locally;
+it downloads the pinned ~145 MB model only for an audio-bearing video, and caches
+it under `models_dir/whisper`. Inference runs on CPU on macOS (the bundled PyTorch
+MPS backend lacks an operator Whisper needs) and uses CUDA when configured elsewhere.
+Inference and subsequent transcript searches work offline. Source media is never modified.
+
+Segments, model/revision, language, and per-video processing status are persisted
+in canonical SQLite. Search them with `POST /transcripts/search`:
+
+```json
+{"q":"Find the video where someone says welcome to the park","limit":10}
+```
+
+Each result includes the indexed media ID/path and matching segment text with
+start/end offsets in seconds. Search uses SQLite FTS5 only—it neither opens the
+video nor loads Whisper. Segment text is untrusted plain text and must be escaped
+by any client that renders it. This endpoint is additive; existing visual `/search`
+behavior is unchanged. Failed transcriptions are recorded and retried on a later
+index run; unchanged completed videos are skipped.
+
 ## Deduplication
 
 Without help, a single shot's adjacent keyframes (or near-identical
@@ -83,16 +106,15 @@ list.
 
 ## Limitations
 
-- **Audio is not indexed today.** Speech, music, and ambient sound don't
-  contribute to search. Visual-only matching is what CLIP does.
+- **Speech transcription is opt-in and speech-only.** Music and ambient sound
+  do not become searchable tags, and speaker identity/diarization is not inferred.
 - **Long static shots can over-represent.** A 10-minute fixed-camera
   recording of a sleeping baby still produces only the keyframes the
   shot detector picks, but those keyframes are heavily weighted in the
   search index. If a single video is dominating your results, raising
   the threshold slider usually fixes it.
-- **Captions and ASR are not yet indexed.** A future release will add
-  automatic transcripts so you can search across what's spoken in
-  videos, not just what's visible.
+- **No OCR or generated captions.** Stage 2A adds speech transcripts only;
+  OCR, MCP integration, and other Stage 2 work remain out of scope.
 
 For the indexing pipeline at the architectural level — shot detector,
 GPS extractor, embedding flow — see

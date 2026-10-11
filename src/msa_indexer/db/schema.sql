@@ -205,3 +205,53 @@ CREATE TABLE IF NOT EXISTS file_fingerprint (
 );
 CREATE INDEX IF NOT EXISTS idx_fp_media ON file_fingerprint(media_id);
 CREATE INDEX IF NOT EXISTS idx_fp_seen ON file_fingerprint(source_name, last_seen_scan_id);
+
+-- Local ASR output is canonical SQLite data. FTS5 is a rebuildable, in-database
+-- search index; transcript rows retain media identity and precise media-time spans.
+CREATE TABLE IF NOT EXISTS transcription_state (
+  media_id TEXT PRIMARY KEY,
+  model_name TEXT NOT NULL,
+  model_revision TEXT NOT NULL,
+  runtime_version TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('transcribed', 'no_speech', 'unsupported', 'failed')),
+  language TEXT,
+  segment_count INTEGER NOT NULL DEFAULT 0,
+  error_code TEXT,
+  processed_at TEXT NOT NULL DEFAULT (datetime('now')),
+  FOREIGN KEY (media_id) REFERENCES media(media_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS transcript_segment (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  media_id TEXT NOT NULL,
+  segment_index INTEGER NOT NULL,
+  t_start REAL NOT NULL CHECK (t_start >= 0),
+  t_end REAL NOT NULL CHECK (t_end > t_start),
+  text TEXT NOT NULL,
+  UNIQUE (media_id, segment_index),
+  FOREIGN KEY (media_id) REFERENCES media(media_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_transcript_segment_media_time
+  ON transcript_segment(media_id, t_start);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS transcript_segment_fts USING fts5(
+  text,
+  content='transcript_segment',
+  content_rowid='id',
+  tokenize='unicode61 remove_diacritics 2'
+);
+CREATE TRIGGER IF NOT EXISTS transcript_segment_fts_insert
+AFTER INSERT ON transcript_segment BEGIN
+  INSERT INTO transcript_segment_fts(rowid, text) VALUES (new.id, new.text);
+END;
+CREATE TRIGGER IF NOT EXISTS transcript_segment_fts_delete
+AFTER DELETE ON transcript_segment BEGIN
+  INSERT INTO transcript_segment_fts(transcript_segment_fts, rowid, text)
+    VALUES ('delete', old.id, old.text);
+END;
+CREATE TRIGGER IF NOT EXISTS transcript_segment_fts_update
+AFTER UPDATE OF text ON transcript_segment BEGIN
+  INSERT INTO transcript_segment_fts(transcript_segment_fts, rowid, text)
+    VALUES ('delete', old.id, old.text);
+  INSERT INTO transcript_segment_fts(rowid, text) VALUES (new.id, new.text);
+END;

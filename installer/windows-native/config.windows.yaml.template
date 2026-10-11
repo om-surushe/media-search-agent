@@ -59,6 +59,9 @@ face_store_metadata: true
 
 # ── Video shot detection ──────────────────────────────────────────────────────
 enable_video_shot_detection: true
+# Opt in to local Whisper transcription. The base model downloads only when
+# indexing an audio-bearing video and is cached locally for offline use.
+enable_speech_transcription: false
 shot_detection_threshold: 30.0
 min_shot_length_frames: 15
 keyframes_per_shot: 1

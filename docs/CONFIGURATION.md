@@ -132,6 +132,22 @@ The defaults work well across most consumer video. Lower
 `shot_detection_threshold` for content with subtle cuts; raise it if you're
 seeing too many fragmentary shots.
 
+## Speech transcription
+
+Transcription is opt-in because it adds model storage and CPU/GPU work during video indexing.
+When enabled, the pinned multilingual Whisper base checkpoint (~145 MB) downloads only
+when the indexer first encounters a video with an audio stream, then remains in
+`models_dir/whisper` for offline inference. Original media is only read.
+
+```yaml
+enable_speech_transcription: true
+```
+
+Transcript segments are stored in SQLite and searched through the local API's
+`POST /transcripts/search` endpoint. Search reads SQLite only; it does not load the
+model or decode the source video. The transcript text is untrusted plain text—clients
+must escape it before rendering as HTML or Markdown.
+
 ## Server / API
 
 These settings apply to browser and headless installs (`msa api start`).

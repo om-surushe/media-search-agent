@@ -23,6 +23,7 @@ loguru
 Pillow
 opencv-python-headless  # Headless version is smaller
 pymediainfo  # Indexer video metadata extraction; required by packaged runtime
+av==14.2.0  # Bundled FFmpeg decoding for local speech transcription; macOS 12+ wheels
 
 # EXIF
 # `exifread` is the fallback GPS parser in src/msa_indexer/io/exif.py
@@ -36,6 +37,7 @@ exifread
 # Note: Use --extra-index-url when installing (not here in file)
 torch==2.*      # Will use CPU version if installed with --extra-index-url
 open_clip_torch
+openai-whisper==20250625  # Local Whisper runtime; model weights download lazily on first audio-bearing video
 
 # Web / API
 fastapi==0.115.0

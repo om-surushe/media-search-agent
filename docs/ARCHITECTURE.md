@@ -120,8 +120,10 @@ sequenceDiagram
   UI-->>User: Render grid
 ```
 
-The query path is entirely in-process apart from the Qdrant call (still
+The visual query path is entirely in-process apart from the Qdrant call (still
 in-process because Qdrant is embedded — it just owns its own thread pool).
+Transcript lookup uses the additive `POST /transcripts/search` endpoint and SQLite
+FTS5 directly; it does not load Whisper, decode media, or alter visual `/search`.
 
 ## Indexing flow
 
@@ -137,6 +139,8 @@ graph LR
   SHOT -->|keyframes| EMB
   SHOT -->|keyframes| OBJ
   SHOT -->|keyframes| FACE
+  RAW -->|video audio, when enabled| ASR[OpenAI Whisper base]
+  ASR -->|timestamped segments| SQ
   RAW --> EMB[CLIP embeddings]
   RAW --> OBJ[RT-DETR object detection]
   RAW --> FACE[facenet-pytorch face detection]
@@ -163,8 +167,12 @@ For each file the pipeline:
    - **Images** — CLIP image embedding, RT-DETR objects, facenet-pytorch faces.
    - **Videos** — shot detection (PySceneDetect), then per keyframe: CLIP,
      RT-DETR, facenet-pytorch.
-5. Commits everything to SQLite in batches (every 200 files / 15 s).
-6. Exports the new embeddings + payloads to Qdrant.
+5. When enabled, decodes audio locally and stores Whisper's timestamped speech
+   segments and model/status metadata in SQLite; the pinned base model downloads
+   only when an audio-bearing video is first processed.
+6. Commits SQLite in batches (every 200 files / 15 s).
+7. Exports visual embeddings + payloads to Qdrant. Transcript search remains in
+   SQLite FTS5 and is not copied to Qdrant.
 
 The pipeline is incremental end to end. On the scan side, re-running the
 indexer skips files whose size and modification time are unchanged and
@@ -183,7 +191,7 @@ export watermark.
 
 | Store | Role | On disk |
 |---|---|---|
-| **SQLite** (`media.sqlite`) | Canonical store: media metadata, tags, faces, people, and embeddings as float32 BLOBs. WAL mode for concurrent reads while indexing. | App data dir (see [INSTALL.md](INSTALL.md#what-it-installs-and-where)) |
+| **SQLite** (`media.sqlite`) | Canonical store: media metadata, tags, faces, people, embeddings as float32 BLOBs, transcript segments, and transcription state. Transcript FTS5 is a derived in-database index. WAL mode for concurrent reads while indexing. | App data dir (see [INSTALL.md](INSTALL.md#what-it-installs-and-where)) |
 | **Qdrant** (embedded) | Vector index for nearest-neighbour search across image, video keyframe, and face embeddings. Rebuilt from SQLite on demand. | Same data dir, separate subdirectory |
 | **Thumbnails** | One small JPEG per indexed image, plus face crops. Written once, served by FastAPI. | Same data dir |
 
@@ -193,16 +201,17 @@ SQLite without re-running the model pipeline.
 
 ## Models
 
-All inference is local. First-run downloads pull weights from each model's
-upstream distribution (OpenAI's CDN for CLIP, Hugging Face for RT-DETR,
-the facenet-pytorch GitHub releases for facenet-pytorch); after that the
-app works fully offline.
+All inference is local. Initial provisioning pulls weights from each model's
+upstream distribution (OpenAI's CDN for CLIP and optional Whisper, Hugging Face
+for RT-DETR, and the facenet-pytorch GitHub releases); after a model is cached,
+inference works offline.
 
 | Model | Purpose | License | Source |
 |---|---|---|---|
 | **CLIP** (`ViT-L-14`, OpenAI weights) | Image and text embeddings — the heart of semantic search | MIT | [open_clip_torch](https://github.com/mlfoundations/open_clip) |
 | **RT-DETR** (`PekingU/rtdetr_r18vd`) | Object detection (80 COCO classes) | Apache-2.0 | [Hugging Face](https://huggingface.co/PekingU/rtdetr_r18vd) |
 | **facenet-pytorch** (MTCNN + InceptionResnetV1, VGGFace2 weights) | Face detection and embedding | MIT | [timesler/facenet-pytorch](https://github.com/timesler/facenet-pytorch) |
+| **OpenAI Whisper** (`base`) | Optional local speech transcription with timestamped segments | MIT (code and weights) | [openai/whisper](https://github.com/openai/whisper) |
 
 Model selection is configurable — see [CONFIGURATION.md](CONFIGURATION.md).
 

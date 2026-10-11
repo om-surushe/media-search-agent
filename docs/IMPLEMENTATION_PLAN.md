@@ -1,18 +1,26 @@
 # Implementation plan
 
-This plan is gated. Complete one stage, report actual results, and stop for user acceptance before starting another. Stage 0 is the current audit; no application code or dependencies are changed in that stage.
+This plan is gated. Complete one stage, report actual results, and stop for user acceptance before starting another. Stages 0 and 1 are complete. The current authorized scope is Stage 2A only; stop for acceptance before Stage 2B or MCP work.
 
-## Stage 0 — Audit and architecture (current)
+## Stage 0 — Audit and architecture (complete)
 
 Inspect the checked-out fork, project docs, API, indexing/storage pipeline, schemas/migrations, tests, packaging, and license notices. Record existing capabilities, gaps, risks, minimal integration points, and an isolated development/test workflow in the three Stage 0 documents. Do not run indexing, install dependencies, download models, or alter application files or installed-app data. Stop for approval.
 
-## Stage 1 — Foundation validation
+## Stage 1 — Foundation validation (complete)
 
-On explicit approval, validate the existing checkout/workflow and baseline capabilities using the project's temporary-database fixtures and a small copied test-media fixture. Confirm folder configuration/selection, indexing, structured metadata, search, previews, people filtering, and video shots/timestamps. Use only an isolated dev config and directories; never point tests at the installed index. Fix only demonstrated blockers. Add focused tests, run them, provide exact macOS acceptance steps, and stop for user testing/approval.
+Validated the existing checkout with isolated temporary databases and copied public media fixtures. Configuration, indexing, metadata, search, previews, people filtering, and timestamped video shots passed; Stage 1.5 regression baseline: 1,037 passed, 70 skipped, 23 deselected, 2 xpassed. The installed application database and media were not used.
 
-## Stage 2 — Missing media intelligence
+## Stage 2A — Local speech transcription (implementation complete; acceptance pending)
 
-After Stage 1 acceptance, implement only proven gaps. First candidates are local Whisper speech transcription with timestamped utterances and useful frame/photo OCR; do not infer they are missing solely from empty optional indexes. Check dependency and model licenses and practical offline operation before selecting models. Persist results, extraction state, confidence where supported, and extractor/model versions in backward-compatible SQLite migrations; skip already-current work during incremental indexing. Preserve current visual search, Qdrant, and face-recognition algorithms. Add focused tests and stop for user testing/approval.
+Added opt-in local Whisper transcription for videos: timestamped segments and model/runtime/status metadata persist in SQLite; FTS5 is derived in SQLite; current transcripts skip incrementally; `POST /transcripts/search` is additive. Visual `/search`, media IDs, and Qdrant behavior remain unchanged. OCR, MCP, UI, and Stage 2B were not implemented.
+
+Validation on Apple Silicon/macOS 26.6.2/Python 3.13.5: the pinned OpenAI Whisper base checkpoint downloaded once (145,262,807 bytes; SHA-256 `ed3a0b6b1c0edf879ad9b11b1af5a0e6ab5db9205f891f668f8b0e6c6326e34e`). A generated spoken-dialogue video transcribed to the expected phrase in 1.91 s on CPU with 716.3 MB peak process RSS; a second run was network-denied and searched SQLite successfully. Initial model setup (download + load) took 31.19 s. The source fixture's size, mtime, and SHA-256 were unchanged. A silent video produced `no_speech` without loading the model. Whisper's decoder cannot use this PyTorch MPS build, so macOS transcription deliberately uses CPU.
+
+Focused/regression command: `pytest -q tests/test_transcription.py tests/test_packaged_runtime_requirements.py tests/test_sqlite_store_embeddings.py tests/test_search_browse_api.py tests/test_query_engine.py tests/test_fingerprint_fastpath.py tests/test_config_roundtrip.py tests/test_settings_indexer_api.py tests/test_video_metadata_runtime.py tests/test_indexer_summary.py tests/test_pipeline_batch_commit.py` — 253 passed, 1 skipped, 1 warning. Broader `pytest -q` and `pytest -q -m 'not slow'` attempts timed out; they are not reported as passing. Await user acceptance before starting Stage 2B or MCP work.
+
+## Stage 2B — OCR (not started; requires approval)
+
+Potentially add local frame/photo OCR only after Stage 2A acceptance and explicit authorization. Check model/dependency licensing, local operation, privacy, and incremental persistence before implementation.
 
 ## Stage 3 — MCP integration
 

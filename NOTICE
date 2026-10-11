@@ -56,6 +56,23 @@ License: BSD-3-Clause (with additional patent grant)
 Source:  https://github.com/pytorch/pytorch
 
 -------------------------------------------------------------------------------
+OpenAI Whisper (local speech transcription)
+License: MIT
+Source:  https://github.com/openai/whisper
+Model:   Whisper base checkpoint (MIT)
+Weights: https://openaipublic.azureedge.net/main/whisper/models/ed3a0b6b1c0edf879ad9b11b1af5a0e6ab5db9205f891f668f8b0e6c6326e34e/base.pt
+
+-------------------------------------------------------------------------------
+PyAV / FFmpeg (local audio decoding)
+PyAV license: BSD-3-Clause
+Source:       https://github.com/PyAV-Org/PyAV
+FFmpeg source: https://ffmpeg.org/
+
+PyAV wheels bundle FFmpeg libraries. FFmpeg components are distributed under
+LGPL-2.1-or-later or GPL terms depending on build options; consult the license
+notices shipped with the installed wheel/build.
+
+-------------------------------------------------------------------------------
 FAISS (faiss-cpu)
 License: MIT
 Source:  https://github.com/facebookresearch/faiss

@@ -8,6 +8,7 @@ from fastapi.staticfiles import StaticFiles
 from msa_settings.paths import resolve_for_access, display_path, is_wsl2
 from msa_apps.search_api.schemas import (
     SearchRequest, SearchResponse, SearchItem, VideoShotsResponse, ShotInfo,
+    TranscriptSearchRequest, TranscriptSearchResponse,
     FaceSearchRequest, FaceSearchResponse, FaceSearchMatch,
     PersonOut, PeopleListResponse, PersonCreate, PersonRename, MergeRequest,
     FaceLabelRequest, BulkLabelRequest,
@@ -17,6 +18,7 @@ from msa_apps.search_api.schemas import (
 )
 from msa_apps.search_api.deps import get_query_engine
 from msa_query.storage.db import connect_readonly
+from msa_query.query_engine.transcript_search import search_transcripts as _search_transcripts
 import os
 from loguru import logger
 from typing import Optional, List
@@ -454,6 +456,20 @@ def search(req: SearchRequest, request: Request, tasks: BackgroundTasks, qe = De
         results=[SearchItem(**{**r, "id": str(r["id"])}) for r in results],
         search_id=search_id,
     )
+
+
+@app.post("/transcripts/search", response_model=TranscriptSearchResponse)
+def search_transcripts(req: TranscriptSearchRequest, request: Request):
+    """Full-text search stored speech segments; does not reopen or decode videos."""
+    db_path = Path(_get_config(request).sqlite_path)
+    if not db_path.exists():
+        return TranscriptSearchResponse(results=[])
+    try:
+        results = _search_transcripts(db_path, req.q, req.limit)
+    except Exception as exc:
+        logger.warning("Transcript search failed: {}", type(exc).__name__)
+        raise HTTPException(status_code=500, detail="Transcript search unavailable") from exc
+    return TranscriptSearchResponse(results=results)
 
 
 @app.post("/track/open", status_code=204)

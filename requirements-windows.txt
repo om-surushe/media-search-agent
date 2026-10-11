@@ -24,6 +24,7 @@ pillow-heif
 # video frame extraction. Revisit when upgrading to a NumPy-2-built OpenCV wheel.
 opencv-python-headless==4.9.0.80
 pymediainfo
+av==14.2.0  # Bundled FFmpeg decoding for local speech transcription
 
 # --- EXIF ---
 exifread
@@ -45,6 +46,7 @@ requests
 # load certifi by default. See src/msa_apps/search_api/setup_models.py.
 truststore
 open_clip_torch
+openai-whisper==20250625  # Local Whisper runtime; weights download lazily on first audio-bearing video
 # Object detection — RT-DETR backend (Apache-2.0, default)
 # transformers <5: RT-DETR object detection (RTDetrForObjectDetection/RTDetrImageProcessor,
 # added 4.45). Cap below 5 because the macOS bundle pins torch>=2.4,<2.7 (arm64 wheel

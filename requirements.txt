@@ -14,6 +14,7 @@ loguru
 Pillow
 opencv-python
 pymediainfo
+av==14.2.0  # Bundled FFmpeg decoding for local speech transcription
 
 # exif
 exifread
@@ -21,6 +22,7 @@ exifread
 # embeddings & models
 torch==2.*      # CPU ok; use CUDA build if desired
 open_clip_torch
+openai-whisper==20250625  # Local Whisper runtime
 facenet-pytorch>=2.6.0  # Face detection + embedding (MIT — MTCNN + InceptionResnetV1 VGGFace2)
 # NOTE: install facenet-pytorch AFTER torch, or use --no-deps, to prevent the
 # solver from downgrading the platform-selected CUDA torch build.

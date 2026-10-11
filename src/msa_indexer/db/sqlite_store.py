@@ -1,6 +1,6 @@
 from pathlib import Path
 import sqlite3
-from typing import Iterable, Any, Dict, Optional, List
+from typing import Iterable, Any, Dict, Mapping, Optional, List, Sequence
 import uuid
 from datetime import datetime, timezone
 
@@ -863,14 +863,15 @@ class SQLiteStore:
         return result is not None
     
     def get_processing_status(self, media_id: str) -> dict:
-        """Get processing status flags for a media item.
-        
-        Returns dict with keys: gps_processed, object_detection_done, face_detection_done, embeddings_version
-        Returns empty dict if media not found.
-        """
+        """Get feature-processing status for a media item; empty if missing."""
         result = self.conn.execute(
-            "SELECT gps_processed, object_detection_done, face_detection_done, embeddings_version FROM media WHERE media_id = ?",
-            (media_id,)
+            """
+            SELECT m.gps_processed, m.object_detection_done, m.face_detection_done,
+                   m.embeddings_version, t.status, t.model_name, t.model_revision
+            FROM media m LEFT JOIN transcription_state t ON t.media_id = m.media_id
+            WHERE m.media_id = ?
+            """,
+            (media_id,),
         ).fetchone()
         if not result:
             return {}
@@ -879,8 +880,76 @@ class SQLiteStore:
             "object_detection_done": bool(result[1]),
             "face_detection_done": bool(result[2]),
             "embeddings_version": result[3],
+            "transcription_status": result[4],
+            "transcription_model": result[5],
+            "transcription_revision": result[6],
         }
-    
+
+    def store_transcript(
+        self, media_id: str, *, model_name: str, model_revision: str,
+        runtime_version: str, status: str, language: str | None,
+        segments: Sequence[Mapping[str, float | str]], error_code: str | None = None,
+    ) -> None:
+        """Atomically replace one media item's transcript and processing state."""
+        if status not in {"transcribed", "no_speech", "unsupported"}:
+            raise ValueError(f"Invalid transcription result status: {status}")
+        if status == "transcribed" and not segments:
+            raise ValueError("A transcribed status requires at least one segment")
+        self.conn.execute("SAVEPOINT store_transcript")
+        try:
+            self.conn.execute("DELETE FROM transcript_segment WHERE media_id = ?", (media_id,))
+            self.conn.executemany(
+                """INSERT INTO transcript_segment(media_id, segment_index, t_start, t_end, text)
+                   VALUES (?, ?, ?, ?, ?)""",
+                [
+                    (media_id, i, float(s["start"]), float(s["end"]), str(s["text"]))
+                    for i, s in enumerate(segments)
+                ],
+            )
+            self.conn.execute(
+                """INSERT INTO transcription_state(
+                       media_id, model_name, model_revision, runtime_version, status,
+                       language, segment_count, error_code, processed_at
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+                   ON CONFLICT(media_id) DO UPDATE SET
+                       model_name=excluded.model_name,
+                       model_revision=excluded.model_revision,
+                       runtime_version=excluded.runtime_version,
+                       status=excluded.status,
+                       language=excluded.language,
+                       segment_count=excluded.segment_count,
+                       error_code=excluded.error_code,
+                       processed_at=excluded.processed_at""",
+                (media_id, model_name, model_revision, runtime_version, status,
+                 language, len(segments), error_code),
+            )
+            self.conn.execute("RELEASE SAVEPOINT store_transcript")
+        except Exception:
+            self.conn.execute("ROLLBACK TO SAVEPOINT store_transcript")
+            self.conn.execute("RELEASE SAVEPOINT store_transcript")
+            raise
+        self._maybe_commit()
+
+    def mark_transcription_failed(
+        self, media_id: str, *, model_name: str, model_revision: str,
+        runtime_version: str, error_code: str = "transcription_failed",
+    ) -> None:
+        """Record a failed attempt without destroying a previously stored transcript."""
+        self.conn.execute(
+            """INSERT INTO transcription_state(
+                   media_id, model_name, model_revision, runtime_version,
+                   status, segment_count, error_code, processed_at
+               ) VALUES (?, ?, ?, ?, 'failed', 0, ?, datetime('now'))
+               ON CONFLICT(media_id) DO UPDATE SET
+                   model_name=excluded.model_name,
+                   model_revision=excluded.model_revision,
+                   runtime_version=excluded.runtime_version,
+                   status='failed', error_code=excluded.error_code,
+                   processed_at=excluded.processed_at""",
+            (media_id, model_name, model_revision, runtime_version, error_code),
+        )
+        self._maybe_commit()
+
     def mark_gps_processed(self, media_id: str):
         """Mark that GPS metadata has been extracted for this media."""
         self.conn.execute("UPDATE media SET gps_processed = 1 WHERE media_id = ?", (media_id,))
@@ -1006,8 +1075,9 @@ class SQLiteStore:
         fully processed under the current config. Each value carries the same
         keys as :meth:`get_processing_status` (``gps_processed`` /
         ``object_detection_done`` / ``face_detection_done`` /
-        ``embeddings_version``) PLUS ``has_image_embedding`` and — for videos,
-        which are never stamped complete via ``embeddings_version`` the way
+        ``embeddings_version`` and transcript status/model/revision) PLUS
+        ``has_image_embedding`` and — for videos, which are never stamped
+        complete via ``embeddings_version`` the way
         images are — the keyframe/shot signals the runtime video branch skips
         on: ``has_shots`` (a ``shots`` row exists), ``has_keyframes`` (a
         ``video_keyframes`` row exists), and ``has_unembedded_keyframes`` (a
@@ -1049,8 +1119,10 @@ class SQLiteStore:
                         SELECT 1 FROM video_keyframes vk2
                         LEFT JOIN keyframe_embedding ke ON ke.keyframe_id = vk2.id
                         WHERE vk2.video_id = m.media_id AND ke.keyframe_id IS NULL
-                    )
+                    ),
+                    t.status, t.model_name, t.model_revision
                 FROM media m
+                LEFT JOIN transcription_state t ON t.media_id = m.media_id
                 WHERE m.media_id IN ({placeholders}) AND COALESCE(m.deleted, 0) = 0
                 """,
                 chunk,
@@ -1068,6 +1140,9 @@ class SQLiteStore:
                     "has_shots": bool(row[6]),
                     "has_keyframes": bool(row[7]),
                     "has_unembedded_keyframes": bool(row[8]),
+                    "transcription_status": row[9],
+                    "transcription_model": row[10],
+                    "transcription_revision": row[11],
                 }
         return out
 

@@ -8,7 +8,7 @@ The repository is a Python 3.11+ project with FastAPI backend, React/Vite UI, an
 
 ## A2. Keep SQLite canonical and Qdrant derived
 
-`src/msa_indexer/db/schema.sql` and `SQLiteStore` define the current metadata model. SQLite stores `media.media_id`, paths/source-relative paths, type/MIME, size, timestamps, dimensions/duration, GPS, tags, people/faces, shots/keyframes, and embeddings. Qdrant is an embedded/runtime vector index derived from SQLite; embeddings are also persisted in SQLite. Do not create another canonical metadata store or change index formats without evidence.
+`src/msa_indexer/db/schema.sql` and `SQLiteStore` define the current metadata model. SQLite stores `media.media_id`, paths/source-relative paths, type/MIME, size, timestamps, dimensions/duration, GPS, tags, people/faces, shots/keyframes, embeddings, and (Stage 2A) transcript segments and transcription state. Qdrant is an embedded/runtime vector index derived from SQLite; embeddings are also persisted in SQLite. Transcript FTS5 is an in-database derived index, not a second canonical store. Do not create another canonical metadata store or change index formats without evidence.
 
 Current media identity is SHA-256 of file bytes on the normal path; the `file_fingerprint` mapping supports multi-source paths and a size+mtime fast path that reuses the known ID without hashing. Media can be present under multiple source paths. This is an effective incremental baseline but makes the file fingerprint a stat-based shortcut, not a guarantee against same-size/same-mtime content replacement. Preserve existing semantics unless a validation test shows a product-critical collision/staleness problem.
 
@@ -16,7 +16,7 @@ Current video data is represented through `shots` and `video_keyframes`, with `s
 
 ## A3. Treat speech/OCR as verified gaps, not presumed infrastructure
 
-Video documentation explicitly says audio/transcripts are not indexed. There is no transcription or OCR implementation/dependency located in source or the main requirements. Search code tolerates optional `caption` and `asr` Qdrant collections, and config names those collections, but the indexer/schema do not provide durable transcript/caption/OCR records or an extraction pipeline. Thus these are seams/placeholders, not implemented capabilities. Stage 1 should reconfirm runtime behavior before Stage 2 work.
+Stage 1 reconfirmed that transcripts/OCR were absent. Stage 2A adds opt-in local Whisper speech transcription, durable timestamped SQLite segments, per-media extraction/model state, and FTS5 lookup through the FastAPI backend. Existing optional `caption` and `asr` Qdrant collections remain unused; transcript search does not alter visual search or create a vector store. OCR, MCP, UI changes, and Stage 2B remain out of scope.
 
 The existing feature docs also state CLIP does not OCR text. Rich natural-language scene captions are not produced by the current indexer; current visual semantic embeddings, object labels and video keyframes are not equivalent to verified captions or speech.
 
@@ -34,13 +34,20 @@ Existing local inference is on-device. First-run provisioning downloads runtime/
 
 ## A6. Reuse licenses cautiously
 
-The repository source is MIT-licensed, with third-party notices in `NOTICE`. Existing default CLIP/OpenCLIP, RT-DETR, facenet-pytorch, FastAPI, Qdrant, React, and Tauri components are listed under permissive licenses in the repository notices. InsightFace weights are explicitly non-commercial-use-only and must not enter a commercial product path. Before choosing speech/OCR dependencies or model weights, check the exact code, model-weight, and dataset licenses independently; a permissive library license does not establish that every downloaded weight is commercially compatible. Do not copy SCM/Omni source wholesale.
+The repository source is MIT-licensed, with third-party notices in `NOTICE`. Existing default CLIP/OpenCLIP, RT-DETR, facenet-pytorch, FastAPI, Qdrant, React, and Tauri components are listed under permissive licenses in the repository notices. Stage 2A uses OpenAI Whisper code and base weights under MIT; PyAV/FFmpeg licensing is also noted there. InsightFace weights remain non-commercial-use-only and must not enter a commercial product path. Do not copy SCM/Omni source wholesale.
 
 ## A7. Keep verification isolated and opt-in
 
 Use the repository test fixtures that create temporary SQLite/config paths and copied sample fixtures. The checked-in development `config.yaml` targets checkout-local `index/`, `qdrant/`, `models/`, thumbnails, and logs; the installed macOS app uses separate Application Support locations. Never run an indexer against installed app paths. `tests/conftest.py` can create a temporary UI distribution stub in the checkout during test runs; clean up only test-generated artifacts. Stage 0 did not install packages, download models, run tests, or index files.
 
-## Open questions for Stage 1
+## Stage 2A implementation decisions
+
+- Keep speech transcription opt-in; the multilingual Whisper base checkpoint is ~145 MB and downloads lazily only for audio-bearing videos. Cache it under the configured model directory; inference/search need no network afterward.
+- Pin `openai-whisper==20250625`, `av==14.2.0`, and the OpenAI base checkpoint SHA-256 in code/processing metadata. PyTorch 2.6's MPS backend lacks an operator used by Whisper's decoder, so Apple Silicon uses CPU; CUDA is used when selected on supported systems.
+- Persist transcript segments/state in SQLite and index text with SQLite FTS5 triggers. Keep transcript search separate at `POST /transcripts/search`; do not export transcripts to Qdrant or alter existing visual `/search` responses.
+- A failed reprocess preserves stored segment rows but marks them failed so search omits stale content; a later index run retries it. Successful no-speech/unsupported results are durable incremental states.
+
+## Open questions for Stage 1 (historical)
 
 - Verify on this machine that folder selection/configuration, indexing, search, image/video previews, people filtering, and shot/timestamp retrieval work without touching the installed application.
 - Confirm behavior of supported video seeking/range delivery and whether preview APIs can return only the requested media rather than arbitrary filesystem paths.

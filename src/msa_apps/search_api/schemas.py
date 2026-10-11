@@ -1,5 +1,5 @@
 from typing import Dict, List, Optional
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 class SearchFilters(BaseModel):
     people: Optional[List[str]] = None
     place: Optional[List[str]] = None
@@ -37,6 +37,27 @@ class SearchItem(BaseModel):
 class SearchResponse(BaseModel):
     results: List[SearchItem]
     search_id: Optional[str] = None  # correlates opens back to this search (ADR-009)
+
+class TranscriptSearchRequest(BaseModel):
+    q: str = Field(min_length=1, max_length=512)
+    limit: int = Field(default=20, ge=1, le=100)
+
+class TranscriptSegmentMatch(BaseModel):
+    start: float
+    end: float
+    text: str
+
+class TranscriptVideoMatch(BaseModel):
+    media_id: str
+    path: str
+    status: str
+    language: Optional[str] = None
+    model: str
+    revision: str
+    segments: List[TranscriptSegmentMatch]
+
+class TranscriptSearchResponse(BaseModel):
+    results: List[TranscriptVideoMatch]
 
 class TrackOpenRequest(BaseModel):
     search_id: str

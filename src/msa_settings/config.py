@@ -58,8 +58,9 @@ class IndexerConfig:
     object_confidence_threshold: float = 0.35
     enable_video_object_detection: bool = False
     video_detection_max_frames: int = 10
-    # Video shot detection
+    # Video shot detection and local speech recognition
     enable_video_shot_detection: bool = False
+    enable_speech_transcription: bool = False
     shot_detection_threshold: float = 30.0
     min_shot_length_frames: int = 15
     keyframes_per_shot: int = 1
@@ -171,6 +172,7 @@ class Config:
     enable_video_object_detection: bool = False
     video_detection_max_frames: int = 10
     enable_video_shot_detection: bool = False
+    enable_speech_transcription: bool = False
     shot_detection_threshold: float = 30.0
     min_shot_length_frames: int = 15
     keyframes_per_shot: int = 1

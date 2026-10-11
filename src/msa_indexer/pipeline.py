@@ -26,6 +26,12 @@ from .utils.hashes import sha256_of_file
 from .db.sqlite_store import SQLiteStore, media_path_rebuild_pending
 from .models.embeddings import ClipEmbedder
 from .models.objects import ObjectDetector
+from .models.asr import (
+    LocalWhisperTranscriber,
+    WHISPER_MODEL_NAME,
+    WHISPER_MODEL_REVISION,
+    WHISPER_RUNTIME_VERSION,
+)
 from .db.qdrant_export import (
     export_images_to_qdrant,
     export_video_frames_to_qdrant,
@@ -116,6 +122,14 @@ def _base_needs_flags(status, *, model_version, reprocess_gps, reprocess_objects
     return needs_gps, needs_objects, needs_faces, needs_embeddings
 
 
+def _transcription_needs_processing(status, *, model_name, model_revision) -> bool:
+    return not (
+        status.get("transcription_status") in {"transcribed", "no_speech", "unsupported"}
+        and status.get("transcription_model") == model_name
+        and status.get("transcription_revision") == model_revision
+    )
+
+
 def _video_skip_predicate(*, has_shots, has_keyframes, has_unembedded_keyframes,
                           needs_embeddings, needs_objects, needs_faces,
                           reprocess_embeddings, reprocess_objects) -> bool:
@@ -131,9 +145,9 @@ def _video_skip_predicate(*, has_shots, has_keyframes, has_unembedded_keyframes,
     every keyframe embedded (and, under the historical heuristic that keyframes
     could not exist without their tags, keyframes-present ⇒ object detection done
     — so object work is re-charged only when keyframes are ABSENT). This
-    reproduces the main loop's ``existing_shots and has_keyframes and not
-    (video_needs_embeddings or video_needs_objects or needs_faces)`` decision
-    exactly. Returns True iff the video branch would ``continue`` without work.
+    reproduces the main loop's visual-work skip decision exactly. Transcript
+    status is checked separately by :func:`_transcription_needs_processing`.
+    Returns True iff the existing visual video work can be skipped.
 
     ``needs_embeddings`` / ``needs_objects`` / ``needs_faces`` are the shared
     :func:`_base_needs_flags` outputs; ``reprocess_*`` force the corresponding
@@ -151,7 +165,10 @@ def _video_skip_predicate(*, has_shots, has_keyframes, has_unembedded_keyframes,
 
 
 def _count_phase_expects_free_skip(snap, *, model_version, is_image, is_video,
-                                   objects_enabled, faces_enabled) -> bool:
+                                   objects_enabled, faces_enabled,
+                                   transcription_enabled=False,
+                                   transcription_model=WHISPER_MODEL_NAME,
+                                   transcription_revision=WHISPER_MODEL_REVISION) -> bool:
     """True iff a fingerprint stat-match on this media costs ~0 processing time
     — the only case the count-phase ETA may subtract it as a free skip
     (#208 review, Codex P2).
@@ -168,10 +185,11 @@ def _count_phase_expects_free_skip(snap, *, model_version, is_image, is_video,
     asks for that type — ending the recurring divergence where the count phase
     re-derived a per-type skip rule and drifted from the runtime:
 
-    * **Videos** are never stamped via ``embeddings_version``; completeness is
-      decided by the SHARED :func:`_video_skip_predicate` — the identical helper
-      the main loop's video branch skips on — from keyframe/shot state, NOT the
-      permanently-"stale" ``embeddings_version`` gate. Because that predicate
+    * **Videos** are never stamped via ``embeddings_version``; visual completeness
+      is decided by the SHARED :func:`_video_skip_predicate` from keyframe/shot
+      state, NOT the permanently-"stale" ``embeddings_version`` gate. If speech
+      transcription is enabled, current model/revision state is checked first.
+      Because the visual predicate
       already treats keyframes-present ⇒ object tags done, video object-detection
       enablement never enters here (the runtime does not re-run object detection
       on a video that already has keyframes).
@@ -203,6 +221,10 @@ def _count_phase_expects_free_skip(snap, *, model_version, is_image, is_video,
     if needs_gps:
         return False
     if is_video:
+        if transcription_enabled and _transcription_needs_processing(
+            snap, model_name=transcription_model, model_revision=transcription_revision
+        ):
+            return False
         # Videos: ask the SAME predicate the runtime video branch skips on, from
         # keyframe/shot state — never the image-style embeddings_version gate,
         # which is permanently "stale" for videos (mark_embeddings_done runs only
@@ -518,6 +540,7 @@ def run_index(config, stop_event=None):
     # free skip (a disabled detector does no work even when its *_done flag is
     # 0). Reuses the SAME gate as the detector init below.
     count_model_version = getattr(config, 'model_version', None)
+    transcription_enabled = bool(getattr(config, "enable_speech_transcription", False))
     objects_enabled = _object_detection_enabled(config)
     faces_enabled = bool(getattr(config, 'enable_face_recognition', False))
     # Bulk-load each source's fingerprints AND processing-status snapshot ONCE
@@ -599,6 +622,7 @@ def run_index(config, stop_event=None):
                     is_video=is_video,
                     objects_enabled=objects_enabled,
                     faces_enabled=faces_enabled,
+                    transcription_enabled=transcription_enabled,
                 ):
                     if is_image:
                         expected_image_hits += 1
@@ -750,6 +774,7 @@ def run_index(config, stop_event=None):
     models_dir = getattr(config, 'models_dir', None)
     embedder = ClipEmbedder(config.model_name, config.pretrained, config.device,
                             cache_dir=models_dir)
+    transcriber = None
     logger.info(f"CLIP model ({config.model_name}) running on {get_device_label(config.device)}")
     # Embeddings are stored as BLOBs in the image_embedding /
     # keyframe_embedding / face_embedding tables, written per file
@@ -875,6 +900,10 @@ def run_index(config, stop_event=None):
     processing_wall_time = 0.0
     total_video_duration = 0.0  # Total duration of processed videos (in seconds)
     total_shots = 0  # Total shots detected across all videos
+    transcribed_videos = 0
+    transcript_segments = 0
+    transcription_failures = 0
+    transcription_seconds = 0.0
 
     # §3.3/§3.6 (M-8): fast-path counters + per-run bookkeeping
     fingerprint_hits = 0     # size+mtime matched — media_id reused, no hash
@@ -1084,6 +1113,15 @@ def run_index(config, stop_event=None):
                 reprocess_faces=bool(getattr(config, 'reprocess_faces', False)),
                 reprocess_embeddings=bool(getattr(config, 'reprocess_embeddings', False)),
             )
+            needs_transcription = (
+                ext in VIDEO_EXT
+                and bool(getattr(config, "enable_speech_transcription", False))
+                and _transcription_needs_processing(
+                    status,
+                    model_name=WHISPER_MODEL_NAME,
+                    model_revision=WHISPER_MODEL_REVISION,
+                )
+            )
 
             # Stage 3 upgrade-path backfill: a pre-Stage-3 DB has the
             # status flags set above but no rows in the new embedding
@@ -1103,7 +1141,9 @@ def run_index(config, stop_event=None):
 
             # Optimization: Skip files that don't need ANY processing
             # This only helps when no reprocessing flags are set (normal incremental indexing)
-            if media_exists and not (needs_gps or needs_objects or needs_faces or needs_embeddings):
+            if media_exists and not (
+                needs_gps or needs_objects or needs_faces or needs_embeddings or needs_transcription
+            ):
                 log.info("Skipping - no processing needed")
                 skipped_count += 1
                 skipped_up_to_date_count += 1
@@ -1203,6 +1243,51 @@ def run_index(config, stop_event=None):
                 )
                 fp_pending = None
         
+            transcription_processed = False
+            transcription_status = None
+            if needs_transcription:
+                transcription_processed = True
+                transcription_start = time.perf_counter()
+                try:
+                    if transcriber is None:
+                        transcriber = LocalWhisperTranscriber(
+                            Path(models_dir or "models"), getattr(config, "device", "cpu")
+                        )
+                    transcript = transcriber.transcribe(p)
+                    db.store_transcript(
+                        media_id,
+                        model_name=WHISPER_MODEL_NAME,
+                        model_revision=WHISPER_MODEL_REVISION,
+                        runtime_version=WHISPER_RUNTIME_VERSION,
+                        status=transcript.status,
+                        language=transcript.language,
+                        segments=list(transcript.segments),
+                        error_code=transcript.error_code,
+                    )
+                    transcription_status = transcript.status
+                    transcript_segments += len(transcript.segments)
+                    if transcript.status == "transcribed":
+                        transcribed_videos += 1
+                except Exception as exc:
+                    error_code = f"transcription_failed:{type(exc).__name__}"
+                    db.mark_transcription_failed(
+                        media_id,
+                        model_name=WHISPER_MODEL_NAME,
+                        model_revision=WHISPER_MODEL_REVISION,
+                        runtime_version=WHISPER_RUNTIME_VERSION,
+                        error_code=error_code,
+                    )
+                    transcription_status = "failed"
+                    transcription_failures += 1
+                    log.warning("Speech transcription failed; status saved (error_code={})", error_code)
+                transcription_seconds += time.perf_counter() - transcription_start
+                log.info(
+                    "Speech transcription status={} segments={} elapsed_s={:.2f}",
+                    transcription_status,
+                    len(transcript.segments) if transcription_status != "failed" else 0,
+                    time.perf_counter() - transcription_start,
+                )
+
             # Process images (embeddings, object detection, face detection)
             if ext in IMAGE_EXT:
                 # Load image if needed for any processing stage
@@ -1363,17 +1448,26 @@ def run_index(config, stop_event=None):
                     log.debug(f"Video skip check: existing_shots={bool(existing_shots)} has_keyframes={has_keyframes} video_is_free_skip={video_is_free_skip} needs_faces={needs_faces}")
 
                     # If shots and keyframes exist, and no processing is needed, skip the video
-                    if video_is_free_skip:
+                    if video_is_free_skip and not transcription_processed:
                         log.info("Skipping - no processing needed")
                         skipped_count += 1
                         skipped_up_to_date_count += 1
                         continue
 
+                    # An existing video can need only ASR. Keep its completed visual
+                    # index untouched rather than decoding keyframes a second time.
+                    if video_is_free_skip:
+                        shots = []
+                        is_synthetic = False
+                        processed_shot_count = 0
+
                     # Timing variables for video processing breakdown
                     scene_detect_time = 0.0
                     other_ops_time = 0.0
                     
-                    if existing_shots:
+                    if video_is_free_skip:
+                        pass
+                    elif existing_shots:
                         log.debug(f"Using existing shots from database count={len(existing_shots)}")
                         shots = [(s['t_start'], s['t_end']) for s in existing_shots]
                         is_synthetic = False  # Already stored
@@ -1602,6 +1696,8 @@ def run_index(config, stop_event=None):
                         parts = []
                         if processed_gps is not None:
                             parts.append("gps" if processed_gps else "gps=none")
+                        if transcription_processed:
+                            parts.append(f"transcript={transcription_status}")
                         if processed_shot_count > 0:
                             parts.append(f"shot={processed_shot_count}")
                         if processed_embedding:
@@ -2015,6 +2111,10 @@ def run_index(config, stop_event=None):
         missing_marked=missing_marked,
         tombstoned=tombstoned,
         resurrected=resurrected,
+        transcribed_videos=transcribed_videos,
+        transcript_segments=transcript_segments,
+        transcription_failures=transcription_failures,
+        transcription_seconds=round(transcription_seconds, 3),
     )
     _emit_indexer_summary(**complete_summary)
 
