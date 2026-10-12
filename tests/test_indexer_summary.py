@@ -684,3 +684,54 @@ def test_stale_qdrant_state_triggers_export_even_without_local_changes(tmp_path,
 # SQLite as BLOBs in image_embedding / keyframe_embedding /
 # face_embedding tables per file, and the per-batch commit's rollback
 # behavior is exercised by the pipeline's commit-failure try/except path.
+
+
+def test_disabled_shot_detection_uses_synthetic_full_video_fallback(tmp_path, monkeypatch):
+    import hashlib
+    import sqlite3
+
+    from msa_indexer import pipeline
+
+    source = tmp_path / "videos"
+    source.mkdir()
+    video = source / "clip.mp4"
+    video.write_bytes(b"video fixture")
+    media_id = hashlib.sha256(video.read_bytes()).hexdigest()
+    db_path = tmp_path / "index.sqlite"
+
+    monkeypatch.setattr(pipeline, "ClipEmbedder", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(pipeline, "get_video_meta", lambda *_args, **_kwargs: {"duration": 5.0})
+    monkeypatch.setattr(pipeline, "write_video_thumbnail", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(pipeline, "extract_keyframes_from_shot", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(pipeline, "_load_historical_perf", lambda _path: (0.0, 0.0, 0.0))
+    monkeypatch.setattr(pipeline, "_emit_indexer_summary", lambda **_payload: None)
+    monkeypatch.setattr(pipeline, "get_qdrant_export_version", lambda: None)
+    monkeypatch.setattr(pipeline, "record_qdrant_export_version", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(pipeline, "_do_qdrant_export", lambda *_args, **_kwargs: None)
+
+    config = SimpleNamespace(
+        sqlite_path=str(db_path),
+        faiss_path=tmp_path / "vectors.faiss",
+        face_faiss_path=tmp_path / "faces.faiss",
+        thumb_dir=tmp_path / "thumbnails",
+        face_thumb_dir=tmp_path / "face-thumbnails",
+        log_dir=tmp_path / "logs",
+        model_name="ViT-L-14",
+        pretrained="openai",
+        model_version="test-v1",
+        device="cpu",
+        enable_object_detection=False,
+        enable_face_recognition=False,
+        enable_video_shot_detection=False,
+        incremental=SimpleNamespace(fingerprint_enabled=False, deletion_sweep=False),
+        media_sources=[SimpleNamespace(name="videos", path=str(source), enabled=True)],
+    )
+
+    pipeline.run_index(config)
+
+    with sqlite3.connect(db_path) as conn:
+        shot = conn.execute(
+            "SELECT t_start, t_end, is_synthetic FROM shots WHERE video_id = ?",
+            (media_id,),
+        ).fetchone()
+    assert shot == (0.0, 5.0, 1)

@@ -130,7 +130,8 @@ keyframes_per_shot: 1
 
 The defaults work well across most consumer video. Lower
 `shot_detection_threshold` for content with subtle cuts; raise it if you're
-seeing too many fragmentary shots.
+seeing too many fragmentary shots. When detection is disabled, videos with
+known duration use the existing synthetic full-video shot fallback.
 
 ## Speech transcription
 

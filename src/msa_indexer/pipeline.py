@@ -20,7 +20,6 @@ from .io.video import (
     sample_video_gps_at_timestamp,
     should_extract_video_gps_track,
 )
-from .io.shot_detection import detect_shots
 from .io.thumbnails import write_thumbnail, write_video_thumbnail, write_face_thumbnail
 from .utils.hashes import sha256_of_file
 from .db.sqlite_store import SQLiteStore, media_path_rebuild_pending
@@ -859,11 +858,12 @@ def run_index(config, stop_event=None):
     # Scene detector (shot detection) info
     # PySceneDetect uses OpenCV and runs on CPU
     # Skip initialization if image_only mode (not needed for images)
+    shot_detector = None
     if getattr(config, 'image_only', False):
         logger.info("Scene detector SKIPPED (image_only mode - not needed for images)")
     elif hasattr(config, 'enable_video_shot_detection') and config.enable_video_shot_detection:
         try:
-            from .io.shot_detection import detect_shots, ContentDetector
+            from .io.shot_detection import detect_shots as shot_detector, ContentDetector
             # Check if PySceneDetect is available
             if ContentDetector is not None:
                 shot_threshold = getattr(config, 'shot_detection_threshold', 30.0)
@@ -1474,16 +1474,19 @@ def run_index(config, stop_event=None):
                         processed_shot_count = len(existing_shots)
                         # No scene detection time since we're using existing shots
                     else:
-                        # Run shot detection for videos
-                        log.debug("Starting shot detection for video")
-                        scene_detect_start = time.perf_counter()
-                        shots = detect_shots(
-                            p,
-                            threshold=float(getattr(config, 'shot_detection_threshold', 30.0)),
-                            min_scene_len=int(getattr(config, 'min_shot_length_frames', 15)),
-                        )
-                        scene_detect_time = time.perf_counter() - scene_detect_start
-                        log.debug(f"Shot detection complete count={len(shots)} time={scene_detect_time:.2f}s")
+                        # Disabled or unavailable detection uses the existing
+                        # synthetic full-video shot fallback below.
+                        shots = []
+                        if shot_detector is not None:
+                            log.debug("Starting shot detection for video")
+                            scene_detect_start = time.perf_counter()
+                            shots = shot_detector(
+                                p,
+                                threshold=float(getattr(config, 'shot_detection_threshold', 30.0)),
+                                min_scene_len=int(getattr(config, 'min_shot_length_frames', 15)),
+                            )
+                            scene_detect_time = time.perf_counter() - scene_detect_start
+                            log.debug(f"Shot detection complete count={len(shots)} time={scene_detect_time:.2f}s")
                         
                         is_synthetic = False
                         if not shots:
