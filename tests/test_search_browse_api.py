@@ -377,3 +377,24 @@ class TestSearchDateBackfill:
         assert results[0]["date"] == "2023-06-15T10:00:00", (
             f"date not backfilled from SQLite, got {results[0]['date']!r}"
         )
+
+
+@pytest.mark.parametrize(
+    ("extension", "expected_mime"),
+    [(".mp4", "video/mp4"), (".webm", "video/webm")],
+)
+def test_video_file_uses_format_specific_mime(client, db, tmp_path, extension, expected_mime):
+    media_id = f"mime-test-{extension[1:]}"
+    media_path = tmp_path / f"fixture{extension}"
+    media_path.write_bytes(b"video fixture")
+    with sqlite3.connect(db) as conn:
+        conn.execute(
+            "INSERT INTO media(media_id, path, mime) VALUES (?, ?, ?)",
+            (media_id, str(media_path), expected_mime),
+        )
+
+    response = client.get(f"/videos/{media_id}")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == expected_mime
+    assert response.content == b"video fixture"

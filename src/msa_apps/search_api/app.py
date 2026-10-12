@@ -795,6 +795,8 @@ def get_video(media_id: str, request: Request):
     authorisation boundary for this local-first application.
     """
     try:
+        import mimetypes
+
         S = _get_config(request)
         db_path = Path(S.sqlite_path)
         if not db_path.exists():
@@ -820,8 +822,9 @@ def get_video(media_id: str, request: Request):
             file_path = Path(resolve_for_access(db_path_str)).resolve()
         if not file_path.exists():
             raise HTTPException(status_code=404, detail="File not found on disk")
-        # Let Starlette serve the file; Range requests are handled at client level (full file otherwise)
-        return FileResponse(str(file_path), media_type="video/mp4")
+        # MIME follows the indexed file's extension (e.g. MP4 vs WebM).
+        media_type = mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
+        return FileResponse(str(file_path), media_type=media_type)
     except HTTPException:
         raise
     except Exception as e:
