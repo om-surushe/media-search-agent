@@ -404,14 +404,17 @@ ps eww -p "$API_PID" -o command= | grep -oE \
 ```
 
 These diagnostics can contain personal paths; keep their output local. Before
-restarting the API, preserve its active config/data/log environment and the
-caption variables. From the repository root, in that same development shell,
-relaunch with the existing development Python and environment:
+restarting the API, preserve its active config/data/log environment. The
+caption worker uses a development-owned Python runtime, not the separately
+installed app's bundled interpreter. From the repository root, in that same
+development shell, relaunch with the stable worker venv and existing offline
+model cache:
 
 ```bash
-: "${MSA_CAPTION_PYTHON:?Restore the active isolated MLX interpreter}"
-: "${MSA_CAPTION_CACHE_DIR:?Restore the active local model cache}"
-export MSA_CAPTION_PYTHON MSA_CAPTION_CACHE_DIR
+export MSA_CAPTION_PYTHON="$HOME/.local/share/local-media-intelligence/caption-worker-3.12/bin/python"
+export MSA_CAPTION_CACHE_DIR="$HOME/Library/Caches/LocalMediaIntelligence-Stage4A1/hf-home/hub"
+export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 HF_DATASETS_OFFLINE=1
+# The worker strips macOS's inherited __PYVENV_LAUNCHER__; keep the API env intact.
 export PYTHONPATH="$PWD/src${PYTHONPATH:+:$PYTHONPATH}"
 python -m uvicorn msa_apps.search_api.app:app --host 127.0.0.1 --port 8502 --reload
 ```

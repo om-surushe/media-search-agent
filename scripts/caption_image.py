@@ -14,6 +14,7 @@ import sqlite3
 import subprocess
 import sys
 import signal
+import tempfile
 import threading
 import time
 from datetime import datetime, timezone
@@ -23,7 +24,9 @@ from typing import Protocol
 _SOURCE_DIR = Path(__file__).resolve().parents[1] / "src"
 if str(_SOURCE_DIR) not in sys.path:
     sys.path.insert(0, str(_SOURCE_DIR))
-from msa_indexer.captioning import MODEL_ID, PROMPT_VERSION
+from msa_indexer.captioning import (
+    MODEL_ID, PROMPT_VERSION, VIDEO_SCENE_PROMPT_VERSION,
+)
 
 SQLITE_HEADER = b"SQLite format 3\x00"
 PROMPT = (
@@ -32,13 +35,20 @@ PROMPT = (
     "framing, foreground objects, and background. Use only visual evidence; do "
     "not guess identity, emotion, exact location, relationships, or causes."
 )
+VIDEO_SCENE_PROMPT = (
+    "Describe only what is visibly present in this single video frame. Include "
+    "the visible subjects and objects, observable action, setting and background, "
+    "and spatial relationships or interactions. Do not infer identities, exact "
+    "locations, dialogue, intentions, causes, motion, events outside this frame, "
+    "or what happens between frames."
+)
 
 
 class CaptionProvider(Protocol):
     model_load_seconds: float
     generation_seconds: float
 
-    def caption(self, image_path: Path, max_tokens: int) -> str: ...
+    def caption(self, image_path: Path, max_tokens: int, prompt: str = PROMPT) -> str: ...
 
     def close(self) -> None: ...
 
@@ -74,12 +84,12 @@ class SmolVLM2Provider:
         self.metal_peak_load_bytes = mx.get_peak_memory()
         self.metal_active_after_load_bytes = mx.get_active_memory()
 
-    def caption(self, image_path: Path, max_tokens: int) -> str:
+    def caption(self, image_path: Path, max_tokens: int, prompt: str = PROMPT) -> str:
         self._mx.reset_peak_memory()
         started = time.perf_counter()
         images = [str(image_path)]
         prompt = self._apply_chat_template(
-            self._processor, self._model.config, PROMPT, num_images=len(images)
+            self._processor, self._model.config, prompt, num_images=len(images)
         )
         result = self._generate(
             self._model,
@@ -268,6 +278,166 @@ def _caption_all_missing(args) -> int:
     return 1 if status == "failed" else 0
 
 
+def _caption_video_scenes(args) -> int:
+    from msa_indexer.db.sqlite_store import SQLiteStore
+
+    database = args.database.expanduser().resolve(strict=True)
+    with database.open("rb") as db_file:
+        if db_file.read(16) != SQLITE_HEADER:
+            raise ValueError(f"Not an existing SQLite database: {database}")
+    roots = [root.expanduser().resolve(strict=True) for root in args.source_root]
+    if not roots or any(not root.is_dir() for root in roots):
+        raise ValueError("At least one existing --source-root directory is required")
+
+    stop_requested = threading.Event()
+    signal.signal(signal.SIGTERM, lambda *_: stop_requested.set())
+
+    def cancellation_requested() -> bool:
+        if args.stop_file is not None and args.stop_file.exists():
+            stop_requested.set()
+        return stop_requested.is_set()
+
+    store = SQLiteStore(database, create_if_missing=False)
+    provider: CaptionProvider | None = None
+    started = time.monotonic()
+    generated = failed = 0
+    current_error = None
+    try:
+        schema_path = Path(__file__).resolve().parents[1] / "src/msa_indexer/db/schema.sql"
+        store.init_schema_no_migrations(schema_path)
+        candidates, total, skipped = store.get_video_scene_caption_candidates(
+            MODEL_ID, VIDEO_SCENE_PROMPT_VERSION, args.video_id or None,
+        )
+        _emit_batch_event(
+            event="started", status="running", total=total, generated=0,
+            skipped=skipped, failed=0, elapsed_seconds=0.0,
+        )
+        if cancellation_requested():
+            status = "cancelled"
+        elif not candidates:
+            status = "complete"
+        else:
+            try:
+                os.environ.update({
+                    "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1",
+                    "HF_HUB_DISABLE_TELEMETRY": "1",
+                })
+                from huggingface_hub import snapshot_download
+                from msa_indexer.io.video import extract_frame_at_timestamp
+
+                model_path = Path(snapshot_download(
+                    MODEL_ID, cache_dir=str(args.cache_dir), local_files_only=True
+                ))
+                provider = SmolVLM2Provider(model_path)
+            except Exception as exc:
+                failed = len(candidates)
+                detail = str(exc).replace(str(args.cache_dir), "<caption cache>")
+                current_error = (
+                    f"Could not load {MODEL_ID} from the offline cache "
+                    f"({type(exc).__name__}: {detail[:200]})."
+                )
+                _emit_batch_event(event="error", message=current_error)
+                for candidate in candidates:
+                    try:
+                        store.store_video_scene_caption(
+                            candidate["video_id"], candidate["keyframe_id"], candidate["timestamp"],
+                            caption=None, model_id=MODEL_ID,
+                            prompt_version=VIDEO_SCENE_PROMPT_VERSION,
+                            generated_at_utc=datetime.now(timezone.utc).isoformat(), status="failed",
+                        )
+                    except Exception:
+                        pass
+                status = "failed"
+            else:
+                path_by_video: dict[str, Path] = {}
+                hashes: dict[str, str] = {}
+                status = "complete"
+                for position, candidate in enumerate(candidates, start=1):
+                    if cancellation_requested():
+                        status = "cancelled"
+                        break
+                    video_id = str(candidate["video_id"])
+                    path: Path | None = None
+                    frame = None
+                    temp_path: Path | None = None
+                    try:
+                        if not SQLiteStore.is_valid_media_id(video_id):
+                            raise ValueError("invalid indexed video ID")
+                        path = path_by_video.get(video_id)
+                        if path is None:
+                            media = store.conn.execute(
+                                "SELECT path, mime, deleted FROM media WHERE media_id=?", (video_id,)
+                            ).fetchone()
+                            if media is None or media[2] or not str(media[1] or "").lower().startswith("video/"):
+                                raise ValueError("indexed video is no longer available")
+                            path = Path(media[0]).expanduser().resolve(strict=True)
+                            if path != Path(candidate["path"]).expanduser().resolve(strict=True):
+                                raise ValueError("indexed video path changed")
+                            if not _inside_roots(path, roots) or not path.is_file():
+                                raise ValueError("indexed video is outside configured media roots")
+                            if len(video_id) == 64:
+                                with path.open("rb") as video_file:
+                                    hashes[video_id] = hashlib.file_digest(video_file, "sha256").hexdigest()
+                                if hashes[video_id] != video_id.lower():
+                                    raise ValueError("indexed video content changed")
+                            path_by_video[video_id] = path
+                        frame = extract_frame_at_timestamp(path, float(candidate["timestamp"]))
+                        if frame is None:
+                            raise ValueError("could not decode the indexed keyframe timestamp")
+                        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as temp_file:
+                            temp_path = Path(temp_file.name)
+                        frame.convert("RGB").save(temp_path, format="JPEG", quality=95)
+                        caption = provider.caption(
+                            temp_path, args.max_tokens, prompt=VIDEO_SCENE_PROMPT,
+                        )
+                        store.store_video_scene_caption(
+                            video_id, int(candidate["keyframe_id"]), float(candidate["timestamp"]),
+                            caption=caption, model_id=MODEL_ID,
+                            prompt_version=VIDEO_SCENE_PROMPT_VERSION,
+                            generated_at_utc=datetime.now(timezone.utc).isoformat(),
+                        )
+                        generated += 1
+                    except Exception as exc:
+                        failed += 1
+                        detail = str(exc).replace(str(path), "<indexed video>") if path else str(exc)
+                        current_error = f"{type(exc).__name__}: {detail[:200]}"
+                        try:
+                            store.store_video_scene_caption(
+                                video_id, int(candidate["keyframe_id"]), float(candidate["timestamp"]),
+                                caption=None, model_id=MODEL_ID,
+                                prompt_version=VIDEO_SCENE_PROMPT_VERSION,
+                                generated_at_utc=datetime.now(timezone.utc).isoformat(), status="failed",
+                            )
+                        except Exception:
+                            pass
+                        _emit_batch_event(event="image_error", media_id=video_id, message=current_error)
+                    finally:
+                        if frame is not None:
+                            frame.close()
+                        if temp_path is not None:
+                            temp_path.unlink(missing_ok=True)
+                    _emit_batch_event(
+                        event="progress", status="running", total=total,
+                        generated=generated, skipped=skipped, failed=failed,
+                        current=position, current_media_id=video_id,
+                        elapsed_seconds=time.monotonic() - started,
+                        error=current_error,
+                    )
+                if failed:
+                    status = "failed"
+    finally:
+        if provider is not None:
+            provider.close()
+        store.close()
+
+    _emit_batch_event(
+        event="summary", status=status, total=total, generated=generated,
+        skipped=skipped, failed=failed, elapsed_seconds=time.monotonic() - started,
+        **({"error": current_error} if current_error else {}),
+    )
+    return 1 if status == "failed" else 0
+
+
 def _rss_bytes() -> int | None:
     try:
         result = subprocess.run(
@@ -305,6 +475,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("image", type=Path, nargs="?", help="local image file (use a disposable copy)")
     parser.add_argument("--all-missing", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--video-scenes", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--video-id", action="append", default=[], help=argparse.SUPPRESS)
     parser.add_argument("--source-root", type=Path, action="append", default=[], help=argparse.SUPPRESS)
     parser.add_argument("--stop-file", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--cache-dir", type=Path, required=True, help="local Hugging Face cache directory")
@@ -315,20 +487,24 @@ def main() -> int:
 
     if args.max_tokens < 1:
         parser.error("--max-tokens must be positive")
-    if args.all_missing:
+    if args.all_missing or args.video_scenes:
+        if args.all_missing and args.video_scenes:
+            parser.error("--all-missing and --video-scenes are mutually exclusive")
         if args.image is not None or args.database is None or args.media_id is not None:
-            parser.error("--all-missing requires --database and forbids an image and --media-id")
+            parser.error("caption batch modes require --database and do not accept an image or --media-id")
+        if args.video_id and not args.video_scenes:
+            parser.error("--video-id is only valid with --video-scenes")
         try:
             args.cache_dir = args.cache_dir.expanduser().resolve(strict=True)
             if not args.cache_dir.is_dir():
                 raise ValueError("--cache-dir must be a local directory")
-            return _caption_all_missing(args)
+            return _caption_video_scenes(args) if args.video_scenes else _caption_all_missing(args)
         except Exception as exc:
             _emit_batch_event(event="error", message=f"{type(exc).__name__}: {exc}")
             _emit_batch_event(
                 event="summary", status="failed", total=0, generated=0,
                 skipped=0, failed=0, elapsed_seconds=0.0,
-                error="Caption worker could not enumerate indexed images; verify the index and source paths.",
+                error="Caption worker could not enumerate indexed media; verify the index and source paths.",
             )
             return 1
     if args.image is None:

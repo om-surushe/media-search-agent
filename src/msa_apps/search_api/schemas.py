@@ -315,6 +315,17 @@ class ImageCaptionOut(BaseModel):
     status: Literal["completed", "failed"]
 
 
+class VideoSceneCaptionOut(BaseModel):
+    video_id: str
+    keyframe_id: int
+    timestamp: float
+    caption: Optional[str] = None
+    model_id: str
+    prompt_version: str
+    generated_at_utc: str
+    status: Literal["completed", "failed"]
+
+
 class SceneDescriptionOut(BaseModel):
     start: float
     end: float
@@ -328,6 +339,7 @@ class SceneDescriptionOut(BaseModel):
 class AssetDescriptionsOut(BaseModel):
     image_caption: DescriptionOut
     image_captions: List[ImageCaptionOut] = Field(default_factory=list)
+    video_scene_captions: List[VideoSceneCaptionOut] = Field(default_factory=list)
     video_summary: DescriptionOut
     scenes: List[SceneDescriptionOut] = Field(default_factory=list)
 

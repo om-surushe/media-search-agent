@@ -108,6 +108,7 @@ export function MediaDetailDrawer({ item, onClose, searchId }: MediaDetailDrawer
   const objectState = intelligence?.pipeline_status.find(stage => stage.pipeline === 'object_detection')
   const faceState = intelligence?.pipeline_status.find(stage => stage.pipeline === 'face_detection')
   const imageCaptions = intelligence?.descriptions.image_captions ?? []
+  const videoSceneCaptions = intelligence?.descriptions.video_scene_captions ?? []
 
   // Reset lightbox when item changes
   useEffect(() => {
@@ -377,6 +378,28 @@ export function MediaDetailDrawer({ item, onClose, searchId }: MediaDetailDrawer
                   {intelligence.media.type === 'video' && <div>
                     <h3 className="text-xs font-medium text-zinc-600 dark:text-zinc-300 mb-1">Shots & keyframes · {intelligence.total_shots} shots · {intelligence.total_keyframes} keyframes</h3>
                     <div className="space-y-1">{intelligence.keyframes.map(k => <button key={k.id} type="button" aria-pressed={selectedKeyframeId === k.id} className={cn('block text-left text-xs rounded px-1 -mx-1 hover:underline', selectedKeyframeId === k.id ? 'bg-indigo-100 text-indigo-800 dark:bg-indigo-950 dark:text-indigo-200' : 'text-indigo-600 dark:text-indigo-300')} onClick={() => selectKeyframe(k.id, k.timestamp)}>{k.timestamp.toFixed(1)}s · shot {k.shot_index + 1}{k.tags.length ? ` · ${k.tags.join(', ')}` : ''}{k.place ? ` · ${k.place}` : ''}</button>)}</div>
+                  </div>}
+                  {intelligence.media.type === 'video' && <div>
+                    <h3 className="text-xs font-medium text-zinc-600 dark:text-zinc-300 mb-1">Visual Scene Descriptions</h3>
+                    {videoSceneCaptions.length === 0 ? (
+                      <p className="text-xs text-zinc-500">No visual scene descriptions available.</p>
+                    ) : (
+                      <div className="space-y-2">
+                        {videoSceneCaptions.map(scene => (
+                          <article key={`${scene.keyframe_id}-${scene.model_id}-${scene.prompt_version}`} className="rounded-lg bg-slate-50 dark:bg-zinc-800/60 px-3 py-2">
+                            <button
+                              type="button"
+                              aria-label={`Seek to scene at ${scene.timestamp.toFixed(1)} seconds`}
+                              aria-pressed={selectedKeyframeId === scene.keyframe_id}
+                              onClick={() => selectKeyframe(scene.keyframe_id, scene.timestamp)}
+                              className={cn('text-xs tabular-nums hover:underline', selectedKeyframeId === scene.keyframe_id ? 'text-indigo-800 dark:text-indigo-200' : 'text-indigo-600 dark:text-indigo-300')}
+                            >{scene.timestamp.toFixed(1)}s</button>
+                            <p className="mt-1 text-sm leading-relaxed text-zinc-700 dark:text-zinc-200">{scene.caption ?? 'Caption generation failed for this frame.'}</p>
+                            <p className="mt-2 text-[11px] text-zinc-400 break-all">{scene.model_id} · {scene.prompt_version} · {formatDate(scene.generated_at_utc)} · {scene.status}</p>
+                          </article>
+                        ))}
+                      </div>
+                    )}
                   </div>}
                   <div>
                     <h3 className="text-xs font-medium text-zinc-600 dark:text-zinc-300 mb-1">Face detections · {intelligence.face_count}</h3>

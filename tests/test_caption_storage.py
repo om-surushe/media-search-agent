@@ -7,6 +7,7 @@ import sqlite3
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -179,6 +180,125 @@ def test_caption_candidates_include_prior_images_and_skip_only_completed(store, 
     assert total == 2
     assert skipped == 1
     assert [row["media_id"] for row in candidates] == [second_id]
+
+
+def test_video_scene_captions_are_keyframe_versioned_retryable_and_incremental(store, tmp_path):
+    video_path = tmp_path / "clip.mp4"
+    video_path.write_bytes(b"indexed video")
+    video_id = hashlib.sha256(video_path.read_bytes()).hexdigest()
+    store.upsert_media({
+        "media_id": video_id, "path": str(video_path),
+        "source_name": "caption-test", "rel_path": video_path.name,
+        "size_bytes": video_path.stat().st_size, "mime": "video/mp4",
+    })
+    store.add_keyframes(video_id, [
+        {"shot_index": 0, "kf_index": 0, "timestamp": 2.5, "shot_start": 0, "shot_end": 5},
+        {"shot_index": 1, "kf_index": 0, "timestamp": 7.5, "shot_start": 5, "shot_end": 10},
+    ])
+    first_id = store.get_keyframe_id(video_id, 0, 0)
+    second_id = store.get_keyframe_id(video_id, 1, 0)
+    assert first_id and second_id
+
+    store.store_video_scene_caption(
+        video_id, first_id, 2.5, caption="A person stands beside a blue car.",
+        model_id="mlx/model-a", prompt_version="scene-v1",
+        generated_at_utc="2026-10-14T10:00:00+00:00",
+    )
+    store.store_video_scene_caption(
+        video_id, first_id, 2.5, caption="A person is next to a blue car.",
+        model_id="mlx/model-b", prompt_version="scene-v1",
+        generated_at_utc="2026-10-14T10:01:00+00:00",
+    )
+    store.store_video_scene_caption(
+        video_id, second_id, 7.5, caption=None,
+        model_id="mlx/model-a", prompt_version="scene-v1",
+        generated_at_utc="2026-10-14T10:02:00+00:00", status="failed",
+    )
+
+    candidates, total, skipped = store.get_video_scene_caption_candidates("mlx/model-a", "scene-v1")
+    assert total == 2 and skipped == 1
+    assert [row["keyframe_id"] for row in candidates] == [second_id]
+    assert store.get_video_scene_caption_candidates("mlx/model-a", "scene-v2")[2] == 0
+
+    store.store_video_scene_caption(
+        video_id, second_id, 7.5, caption="A person opens the car door.",
+        model_id="mlx/model-a", prompt_version="scene-v1",
+        generated_at_utc="2026-10-14T10:03:00+00:00",
+    )
+    rows = store.conn.execute(
+        "SELECT keyframe_id, timestamp, caption, model_id, prompt_version, status "
+        "FROM video_scene_caption ORDER BY keyframe_id, model_id"
+    ).fetchall()
+    assert len(rows) == 3
+    assert rows[-1] == (second_id, 7.5, "A person opens the car door.", "mlx/model-a", "scene-v1", "completed")
+    with pytest.raises(ValueError, match="timestamp"):
+        store.store_video_scene_caption(
+            video_id, first_id, 9.0, caption="Wrong frame.", model_id="mlx/model-a",
+            prompt_version="scene-v1", generated_at_utc="2026-10-14T10:04:00+00:00",
+        )
+
+
+def test_video_scene_worker_reuses_one_provider_and_skips_completed_keyframes(store, tmp_path, monkeypatch, capsys):
+    import huggingface_hub
+    from PIL import Image
+
+    source_root = tmp_path / "videos"
+    source_root.mkdir()
+    video_path = source_root / "clip.mp4"
+    video_path.write_bytes(b"indexed video")
+    video_id = hashlib.sha256(video_path.read_bytes()).hexdigest()
+    store.upsert_media({
+        "media_id": video_id, "path": str(video_path),
+        "source_name": "caption-test", "rel_path": video_path.name,
+        "size_bytes": video_path.stat().st_size, "mime": "video/mp4",
+    })
+    store.add_keyframes(video_id, [
+        {"shot_index": 0, "kf_index": 0, "timestamp": 2.5, "shot_start": 0, "shot_end": 5},
+        {"shot_index": 1, "kf_index": 0, "timestamp": 7.5, "shot_start": 5, "shot_end": 10},
+    ])
+    store.commit()
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    script = import_caption_script()
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", lambda *_a, **_kw: str(cache))
+    seen = []
+
+    class FakeProvider:
+        loads = 0
+        def __init__(self, _path):
+            type(self).loads += 1
+        def caption(self, _image, _max_tokens, prompt):
+            seen.append(prompt)
+            return f"Visible scene {len(seen)}."
+        def close(self):
+            pass
+
+    monkeypatch.setattr(script, "SmolVLM2Provider", FakeProvider)
+    import msa_indexer.io.video as video
+    monkeypatch.setattr(video, "extract_frame_at_timestamp", lambda _path, _time: Image.new("RGB", (4, 4), "white"))
+    args = SimpleNamespace(
+        database=store.path, source_root=[source_root], cache_dir=cache,
+        stop_file=None, video_id=[video_id], max_tokens=80,
+    )
+
+    assert script._caption_video_scenes(args) == 0
+    rows = store.conn.execute(
+        "SELECT timestamp, caption, status FROM video_scene_caption ORDER BY timestamp"
+    ).fetchall()
+    assert rows == [(2.5, "Visible scene 1.", "completed"), (7.5, "Visible scene 2.", "completed")]
+    assert len(set(seen)) == 1 and "single video frame" in seen[0]
+    assert FakeProvider.loads == 1
+
+    assert script._caption_video_scenes(args) == 0
+    assert FakeProvider.loads == 1
+    assert '"generated":0' in capsys.readouterr().out
+
+    stop_file = tmp_path / "stop-captioning"
+    stop_file.write_text("stop")
+    args.stop_file = stop_file
+    assert script._caption_video_scenes(args) == 0
+    assert FakeProvider.loads == 1
+    assert '"status":"cancelled"' in capsys.readouterr().out
 
 
 def test_persistence_helper_rejects_missing_or_wrong_database_and_mismatched_image(store, tmp_path):
@@ -394,6 +514,44 @@ def test_batch_caption_failure_is_reported_and_releases_model(store, tmp_path, m
     assert events[-1]["failed"] == 1
     assert "injected failure" in events[-1]["error"]
     assert FakeProvider.closed
+
+
+def test_caption_worker_does_not_inherit_parent_python_launcher(store, tmp_path, monkeypatch):
+    import io
+    import threading
+    from msa_indexer import captioning
+
+    media_root = tmp_path / "media"
+    media_root.mkdir()
+    cache = tmp_path / "hub"
+    (cache / f"models--{captioning.MODEL_ID.replace('/', '--')}" / "snapshots" / "rev").mkdir(parents=True)
+    monkeypatch.setenv("MSA_CAPTION_PYTHON", sys.executable)
+    monkeypatch.setenv("MSA_CAPTION_CACHE_DIR", str(cache))
+    monkeypatch.setenv("__PYVENV_LAUNCHER__", "/protected-app/python")
+    captured = {}
+    output = "\n".join(json.dumps(event) for event in [
+        {"event": "started", "status": "running", "total": 0},
+        {"event": "summary", "status": "complete", "total": 0, "generated": 0, "skipped": 0, "failed": 0},
+    ]) + "\n"
+
+    class FakeProcess:
+        stdout = io.StringIO(output)
+        def poll(self): return 0
+        def wait(self): return 0
+
+    def fake_popen(_command, **kwargs):
+        captured.update(kwargs)
+        return FakeProcess()
+
+    monkeypatch.setattr(captioning.subprocess, "Popen", fake_popen)
+    config = SimpleNamespace(
+        sqlite_path=store.path, media_source_override=None,
+        media_sources=[SimpleNamespace(enabled=True, path=str(media_root))],
+    )
+    result = captioning.run_video_scene_captioning_worker(config, threading.Event(), lambda _event: None)
+
+    assert result["status"] == "complete"
+    assert "__PYVENV_LAUNCHER__" not in captured["env"]
 
 
 def test_caption_runtime_validation_requires_a_cached_model_and_isolated_python(tmp_path):

@@ -29,6 +29,7 @@ from msa_apps.search_api.schemas import (
     AssetDescriptionsOut,
     DescriptionOut,
     ImageCaptionOut,
+    VideoSceneCaptionOut,
 )
 from msa_apps.search_api.deps import get_query_engine
 from msa_query.storage.db import connect_readonly
@@ -966,6 +967,23 @@ def get_asset_intelligence(media_id: str, request: Request):
             prompt_version=row["prompt_version"],
             generated_at_utc=row["generated_at_utc"], status=row["status"],
         ) for row in stored_captions]
+        try:
+            scene_rows = conn.execute(
+                """SELECT video_id, keyframe_id, timestamp, caption, model_id,
+                          prompt_version, generated_at_utc, status
+                   FROM video_scene_caption WHERE video_id=?
+                   ORDER BY timestamp, keyframe_id, model_id, prompt_version""",
+                (media_id,),
+            ).fetchall()
+        except Exception as exc:
+            import sqlite3 as _sqlite3
+            if not isinstance(exc, _sqlite3.OperationalError) or "no such table: video_scene_caption" not in str(exc).lower():
+                raise
+            scene_rows = []
+        video_scene_captions = [VideoSceneCaptionOut(
+            video_id=row[0], keyframe_id=row[1], timestamp=row[2], caption=row[3],
+            model_id=row[4], prompt_version=row[5], generated_at_utc=row[6], status=row[7],
+        ) for row in scene_rows]
         latest_caption = max(
             stored_captions,
             key=lambda row: (row["generated_at_utc"], row["model_id"], row["prompt_version"]),
@@ -982,6 +1000,7 @@ def get_asset_intelligence(media_id: str, request: Request):
             )
         descriptions = AssetDescriptionsOut(
             image_caption=image_description, image_captions=image_captions,
+            video_scene_captions=video_scene_captions,
             video_summary=DescriptionOut(status="not_generated"), scenes=[],
         )
         return AssetIntelligenceResponse(
@@ -2244,6 +2263,7 @@ class _IndexerStart(_BaseModel):
     processing_order: Literal["default", "fastest", "newest", "oldest"] = "default"
     object_detection_enabled: Optional[bool] = None
     image_captions_enabled: bool = False
+    video_scene_captions_enabled: bool = False
 
 
 def _config_path(request: Request) -> str:
@@ -2269,6 +2289,7 @@ def indexer_start(request: Request, body: Optional[_IndexerStart] = None):
             processing_order=body.processing_order if body else "default",
             object_detection_enabled=body.object_detection_enabled if body else None,
             image_captions_enabled=body.image_captions_enabled if body else False,
+            video_scene_captions_enabled=body.video_scene_captions_enabled if body else False,
         )
         return result
     except ValueError as e:

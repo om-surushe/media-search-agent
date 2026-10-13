@@ -28,6 +28,15 @@ const mockIntelligence = {
 
 const videoIntelligence = {
   ...mockIntelligence,
+  descriptions: {
+    ...mockIntelligence.descriptions,
+    video_scene_captions: [{
+      video_id: 'vid-01', keyframe_id: 2, timestamp: 36.5,
+      caption: 'A person walks beside a parked car.', model_id: 'mlx/smolvlm',
+      prompt_version: 'stage4b-video-scene-v1', generated_at_utc: '2026-10-14T10:00:00+00:00',
+      status: 'completed' as const,
+    }],
+  },
   media: { ...mockIntelligence.media, id: 'vid-01', type: 'video', mime: 'video/mp4', filename: 'clip.mp4', duration: 40 },
   keyframes: [
     { id: 1, shot_index: 0, kf_index: 0, timestamp: 2.6, tags: [], place: null },
@@ -119,6 +128,39 @@ describe('MediaDetailDrawer', () => {
     await video.play()
     expect(play).toHaveBeenCalledOnce()
     expect(currentTime).toBe(36.5)
+  })
+
+  it('shows scene captions with provenance and seeks to their paused keyframe', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve({ ok: true, json: () => Promise.resolve(videoIntelligence) })))
+    const { container } = wrap(<MediaDetailDrawer item={videoItem} onClose={vi.fn()} />)
+    expect(await screen.findByText('Visual Scene Descriptions')).toBeInTheDocument()
+    expect(screen.getByText('A person walks beside a parked car.')).toBeInTheDocument()
+    expect(screen.getByText(/mlx\/smolvlm · stage4b-video-scene-v1/)).toBeInTheDocument()
+    const seek = screen.getByRole('button', { name: 'Seek to scene at 36.5 seconds' })
+    const video = container.querySelector('video')!
+    let currentTime = 0
+    Object.defineProperty(video, 'readyState', { configurable: true, value: 1 })
+    Object.defineProperty(video, 'currentTime', { configurable: true, get: () => currentTime, set: value => { currentTime = value } })
+    const pause = vi.spyOn(video, 'pause').mockImplementation(() => {})
+    const play = vi.spyOn(video, 'play').mockResolvedValue(undefined)
+
+    await userEvent.click(seek)
+    expect(currentTime).toBe(36.5)
+    expect(seek).toHaveAttribute('aria-pressed', 'true')
+    expect(pause).toHaveBeenCalled()
+    expect(play).not.toHaveBeenCalled()
+  })
+
+  it('shows an empty visual scene state for videos without captions', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve({
+      ok: true,
+      json: () => Promise.resolve({
+        ...videoIntelligence,
+        descriptions: { ...videoIntelligence.descriptions, video_scene_captions: [] },
+      }),
+    })))
+    wrap(<MediaDetailDrawer item={videoItem} onClose={vi.fn()} />)
+    expect(await screen.findByText('No visual scene descriptions available.')).toBeInTheDocument()
   })
 
   it('shows an alert when seeking the selected keyframe throws', async () => {

@@ -182,6 +182,24 @@ CREATE TABLE IF NOT EXISTS video_keyframes (
 
 CREATE INDEX IF NOT EXISTS idx_vkf_video ON video_keyframes(video_id);
 
+-- One versioned visual caption per existing video keyframe.
+CREATE TABLE IF NOT EXISTS video_scene_caption (
+  video_id TEXT NOT NULL,
+  keyframe_id INTEGER NOT NULL,
+  timestamp REAL NOT NULL CHECK (timestamp >= 0),
+  caption TEXT,
+  model_id TEXT NOT NULL,
+  prompt_version TEXT NOT NULL,
+  generated_at_utc TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('completed', 'failed')),
+  CHECK (status != 'completed' OR (caption IS NOT NULL AND length(trim(caption)) > 0)),
+  PRIMARY KEY (keyframe_id, model_id, prompt_version),
+  FOREIGN KEY (video_id) REFERENCES media(media_id) ON DELETE CASCADE,
+  FOREIGN KEY (keyframe_id) REFERENCES video_keyframes(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_video_scene_caption_video_time
+  ON video_scene_caption(video_id, timestamp);
+
 CREATE TABLE IF NOT EXISTS index_state (
   singleton_id INTEGER PRIMARY KEY CHECK (singleton_id = 1),
   index_version_seq INTEGER NOT NULL DEFAULT 0,

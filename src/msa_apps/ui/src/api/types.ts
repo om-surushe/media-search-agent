@@ -143,6 +143,16 @@ export interface AssetIntelligence {
       generated_at_utc: string
       status: 'completed' | 'failed'
     }>
+    video_scene_captions: Array<{
+      video_id: string
+      keyframe_id: number
+      timestamp: number
+      caption: string | null
+      model_id: string
+      prompt_version: string
+      generated_at_utc: string
+      status: 'completed' | 'failed'
+    }>
     video_summary: { status: string; text: string | null; model_name: string | null }
     scenes: Array<{ start: number; end: number; text: string | null; status: string; model_name: string | null; model_revision?: string | null; generated_at?: string | null }>
   }

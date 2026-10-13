@@ -188,6 +188,7 @@ class IndexerManager:
         self, config_path: str, venv_bin: str, processing_order: str = "default",
         object_detection_enabled: bool | None = None,
         image_captions_enabled: bool = False,
+        video_scene_captions_enabled: bool = False,
     ) -> Dict[str, Any]:
         import subprocess
 
@@ -197,7 +198,7 @@ class IndexerManager:
         with self._lock:
             if self._status == "running":
                 raise RuntimeError("Indexer is already running")
-            if image_captions_enabled:
+            if image_captions_enabled or video_scene_captions_enabled:
                 from msa_indexer.captioning import validate_captioning_runtime
                 validate_captioning_runtime()
 
@@ -225,6 +226,8 @@ class IndexerManager:
                 )
             if image_captions_enabled:
                 cmd.append("--enable-image-captions")
+            if video_scene_captions_enabled:
+                cmd.append("--enable-video-scene-captions")
             cmd.append("--no-console-log")
             logger.info(f"Starting indexer run {run_id}: {' '.join(cmd)}")
 

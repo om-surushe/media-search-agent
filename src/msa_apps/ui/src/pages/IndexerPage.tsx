@@ -72,6 +72,7 @@ export function IndexerPage() {
   const [processingOrder, setProcessingOrder] = useState<ProcessingOrder>('default')
   const [objectDetectionOverride, setObjectDetectionOverride] = useState<boolean | null>(null)
   const [imageCaptionsEnabled, setImageCaptionsEnabled] = useState(false)
+  const [videoSceneCaptionsEnabled, setVideoSceneCaptionsEnabled] = useState(false)
   const logRef = useRef<HTMLDivElement>(null)
   const prevStatusRef = useRef<string | null>(null)
 
@@ -90,8 +91,8 @@ export function IndexerPage() {
   })
 
   const startMutation = useMutation({
-    mutationFn: (options: { processingOrder: ProcessingOrder; objectDetectionEnabled: boolean; imageCaptionsEnabled: boolean }) =>
-      startIndexer(options.processingOrder, options.objectDetectionEnabled, options.imageCaptionsEnabled),
+    mutationFn: (options: { processingOrder: ProcessingOrder; objectDetectionEnabled: boolean; imageCaptionsEnabled: boolean; videoSceneCaptionsEnabled: boolean }) =>
+      startIndexer(options.processingOrder, options.objectDetectionEnabled, options.imageCaptionsEnabled, options.videoSceneCaptionsEnabled),
   })
   const stopMutation  = useMutation({ mutationFn: stopIndexer  })
 
@@ -248,7 +249,7 @@ export function IndexerPage() {
             </button>
           ) : (
             <button
-              onClick={() => startMutation.mutate({ processingOrder, objectDetectionEnabled, imageCaptionsEnabled })}
+              onClick={() => startMutation.mutate({ processingOrder, objectDetectionEnabled, imageCaptionsEnabled, videoSceneCaptionsEnabled })}
               disabled={!hasSources || modelConfigLoading || modelConfigError || startMutation.isPending || (startMutation.isSuccess && !isRunning)}
               className="flex items-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-sm rounded-md transition-colors disabled:opacity-50"
             >
@@ -274,6 +275,19 @@ export function IndexerPage() {
           </label>
           <div className="pl-6 text-xs text-zinc-500 dark:text-zinc-400">
             Offline SmolVLM2 captioning for photos only. Completed captions are skipped; model runs sequentially.
+          </div>
+          <label className="flex items-center gap-2 text-sm text-zinc-700 dark:text-zinc-200">
+            <input
+              type="checkbox"
+              aria-label="AI Video Scene Captions"
+              checked={videoSceneCaptionsEnabled}
+              disabled={captionControlDisabled}
+              onChange={event => setVideoSceneCaptionsEnabled(event.target.checked)}
+            />
+            AI Video Scene Captions
+          </label>
+          <div className="pl-6 text-xs text-zinc-500 dark:text-zinc-400">
+            Caption existing video keyframes offline. Completed scenes are skipped; frames are captioned sequentially.
           </div>
         </div>
         {modelConfigError && (
@@ -352,6 +366,30 @@ export function IndexerPage() {
               </div>
             </div>
           </div>
+        )}
+
+        {summary?.video_scene_captioning && (
+          <section aria-live="polite" className="bg-white dark:bg-zinc-900 rounded-lg p-3 space-y-2">
+            <div className="text-sm font-medium text-zinc-900 dark:text-zinc-100">AI Video Scene Captions</div>
+            {isRunning && summary.video_scene_captioning.status === 'running' && summary.video_scene_captioning.current != null && (
+              <div className="text-xs text-zinc-500 dark:text-zinc-400">
+                Captioning scene {summary.video_scene_captioning.current} of {formatCount(summary.video_scene_captioning.total)}…
+              </div>
+            )}
+            <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs">
+              <div className="text-zinc-500 dark:text-zinc-400">Generated</div>
+              <div className="text-right tabular-nums">{formatCount(summary.video_scene_captioning.generated)}</div>
+              <div className="text-zinc-500 dark:text-zinc-400">Skipped (already complete)</div>
+              <div className="text-right tabular-nums">{formatCount(summary.video_scene_captioning.skipped)}</div>
+              <div className="text-zinc-500 dark:text-zinc-400">Failed</div>
+              <div className="text-right tabular-nums">{formatCount(summary.video_scene_captioning.failed)}</div>
+              <div className="text-zinc-500 dark:text-zinc-400">Elapsed</div>
+              <div className="text-right tabular-nums">{formatDuration(summary.video_scene_captioning.elapsed_seconds)}</div>
+            </div>
+            {summary.video_scene_captioning.error && (
+              <div role="alert" className="text-xs text-red-600 dark:text-red-400">{summary.video_scene_captioning.error}</div>
+            )}
+          </section>
         )}
 
         {summary?.captioning && (

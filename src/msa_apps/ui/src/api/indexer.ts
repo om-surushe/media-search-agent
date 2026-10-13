@@ -11,8 +11,21 @@ export interface IndexerStatus {
 }
 
 export interface IndexerRunSummary {
-  phase?: 'counting' | 'analyzing' | 'processing' | 'exporting' | 'captioning' | 'captioning_error' | 'export_blocked' | 'complete' | 'commit_stats'
+  phase?: 'counting' | 'analyzing' | 'processing' | 'exporting' | 'captioning' | 'captioning_error' | 'scene_captioning' | 'scene_captioning_error' | 'export_blocked' | 'complete' | 'commit_stats'
   captioning?: {
+    model_id: string
+    prompt_version: string
+    status: 'starting' | 'running' | 'complete' | 'failed' | 'cancelled'
+    total: number
+    generated: number
+    skipped: number
+    failed: number
+    elapsed_seconds: number
+    current?: number
+    current_media_id?: string
+    error?: string
+  }
+  video_scene_captioning?: {
     model_id: string
     prompt_version: string
     status: 'starting' | 'running' | 'complete' | 'failed' | 'cancelled'
@@ -79,14 +92,17 @@ export async function startIndexer(
   processingOrder: ProcessingOrder = 'default',
   objectDetectionEnabled?: boolean,
   imageCaptionsEnabled = false,
+  videoSceneCaptionsEnabled = false,
 ): Promise<void> {
   const body: {
     processing_order: ProcessingOrder
     object_detection_enabled?: boolean
     image_captions_enabled?: boolean
+    video_scene_captions_enabled?: boolean
   } = { processing_order: processingOrder }
   if (objectDetectionEnabled !== undefined) body.object_detection_enabled = objectDetectionEnabled
   if (imageCaptionsEnabled) body.image_captions_enabled = true
+  if (videoSceneCaptionsEnabled) body.video_scene_captions_enabled = true
   const res = await fetch(apiUrl('/indexer/start'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },

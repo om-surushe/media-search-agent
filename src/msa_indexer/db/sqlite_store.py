@@ -1,5 +1,6 @@
 from pathlib import Path
 import mimetypes
+import math
 import sqlite3
 from typing import Iterable, Any, Dict, Mapping, Optional, List, Sequence
 import uuid
@@ -1087,6 +1088,103 @@ class SQLiteStore:
             (model_id, prompt_version),
         ).fetchall()
         return ([{"media_id": row[0], "path": row[1]} for row in rows], total, skipped)
+
+    def get_video_scene_caption_candidates(
+        self, model_id: str, prompt_version: str, video_ids: Sequence[str] | None = None
+    ) -> tuple[list[dict[str, Any]], int, int]:
+        """Return existing keyframes without a completed caption variant."""
+        params: list[Any] = [model_id, prompt_version]
+        scope = ""
+        if video_ids is not None:
+            if not video_ids:
+                return [], 0, 0
+            scope = f" AND m.media_id IN ({','.join('?' for _ in video_ids)})"
+            params.extend(video_ids)
+        base = """m.deleted = 0 AND lower(COALESCE(m.mime, '')) LIKE 'video/%'"""
+        scoped = base + scope
+        total = self.conn.execute(
+            f"""SELECT COUNT(*) FROM video_keyframes k JOIN media m ON m.media_id=k.video_id
+                WHERE {scoped}""", params[2:]
+        ).fetchone()[0]
+        completed = self.conn.execute(
+            f"""SELECT COUNT(*) FROM video_keyframes k JOIN media m ON m.media_id=k.video_id
+                WHERE {scoped} AND EXISTS (
+                    SELECT 1 FROM video_scene_caption c
+                    WHERE c.keyframe_id=k.id AND c.model_id=?
+                      AND c.prompt_version=? AND c.status='completed'
+                )""", [*params[2:], model_id, prompt_version]
+        ).fetchone()[0]
+        rows = self.conn.execute(
+            f"""SELECT k.id, k.video_id, k.timestamp, k.shot_index, k.kf_index, m.path
+                FROM video_keyframes k JOIN media m ON m.media_id=k.video_id
+                WHERE {scoped} AND NOT EXISTS (
+                    SELECT 1 FROM video_scene_caption c
+                    WHERE c.keyframe_id=k.id AND c.model_id=?
+                      AND c.prompt_version=? AND c.status='completed'
+                )
+                ORDER BY k.video_id, k.timestamp, k.shot_index, k.kf_index""",
+            [*params[2:], model_id, prompt_version],
+        ).fetchall()
+        fields = ("keyframe_id", "video_id", "timestamp", "shot_index", "kf_index", "path")
+        return [dict(zip(fields, row)) for row in rows], int(total), int(completed)
+
+    def store_video_scene_caption(
+        self, video_id: str, keyframe_id: int, timestamp: float, *,
+        caption: str | None, model_id: str, prompt_version: str,
+        generated_at_utc: str, status: str = "completed",
+    ) -> None:
+        """Upsert one video/keyframe/model/prompt result without touching embeddings."""
+        if not self.is_valid_media_id(video_id):
+            raise ValueError("Invalid video media_id")
+        if not isinstance(keyframe_id, int) or keyframe_id < 1:
+            raise ValueError("keyframe_id must be a positive integer")
+        if not math.isfinite(float(timestamp)) or float(timestamp) < 0:
+            raise ValueError("timestamp must be a finite non-negative number")
+        if status not in {"completed", "failed"}:
+            raise ValueError(f"Invalid video scene caption status: {status}")
+        if status == "completed" and (not isinstance(caption, str) or not caption.strip()):
+            raise ValueError("completed scene caption must contain text")
+        if status == "failed" and caption is not None:
+            raise ValueError("failed scene caption must not contain text")
+        if not model_id.strip() or not prompt_version.strip():
+            raise ValueError("model_id and prompt_version must be non-empty")
+        try:
+            generated_at = datetime.fromisoformat(generated_at_utc.replace("Z", "+00:00"))
+        except (AttributeError, ValueError) as exc:
+            raise ValueError("generated_at_utc must be an ISO-8601 timestamp") from exc
+        if generated_at.tzinfo is None:
+            raise ValueError("generated_at_utc must include a timezone")
+        generated_at_utc = generated_at.astimezone(timezone.utc).isoformat()
+        row = self.conn.execute(
+            """SELECT m.mime, m.deleted, k.timestamp FROM media m
+               JOIN video_keyframes k ON k.video_id=m.media_id
+               WHERE m.media_id=? AND k.id=?""", (video_id, keyframe_id)
+        ).fetchone()
+        if row is None or row[1] or not str(row[0] or "").lower().startswith("video/"):
+            raise ValueError("No live indexed video keyframe matches this scene caption")
+        if not math.isclose(float(row[2]), float(timestamp), abs_tol=1e-6):
+            raise ValueError("timestamp does not match the indexed keyframe")
+
+        self.conn.execute("SAVEPOINT store_video_scene_caption")
+        try:
+            self.conn.execute(
+                """INSERT INTO video_scene_caption(
+                       video_id, keyframe_id, timestamp, caption, model_id,
+                       prompt_version, generated_at_utc, status
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(keyframe_id, model_id, prompt_version) DO UPDATE SET
+                       video_id=excluded.video_id, timestamp=excluded.timestamp,
+                       caption=excluded.caption, generated_at_utc=excluded.generated_at_utc,
+                       status=excluded.status""",
+                (video_id, keyframe_id, float(timestamp), caption.strip() if caption else None,
+                 model_id, prompt_version, generated_at_utc, status),
+            )
+            self.conn.execute("RELEASE SAVEPOINT store_video_scene_caption")
+        except Exception:
+            self.conn.execute("ROLLBACK TO SAVEPOINT store_video_scene_caption")
+            self.conn.execute("RELEASE SAVEPOINT store_video_scene_caption")
+            raise
+        self._maybe_commit()
 
     def mark_transcription_failed(
         self, media_id: str, *, model_name: str, model_revision: str,

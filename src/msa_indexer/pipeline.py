@@ -2561,6 +2561,49 @@ def run_index(config, stop_event=None):
             "phase": "export_blocked" if export_blocked else "complete",
         })
 
+    if getattr(config, "video_scene_captions_enabled", False):
+        from .captioning import (
+            MODEL_ID, VIDEO_SCENE_PROMPT_VERSION, CaptioningError,
+            run_video_scene_captioning_worker,
+        )
+        import threading
+
+        if stop_event is None:
+            stop_event = threading.Event()
+        scene_captioning = {
+            "model_id": MODEL_ID, "prompt_version": VIDEO_SCENE_PROMPT_VERSION,
+            "status": "cancelled" if stop_event.is_set() else "starting",
+            "total": 0, "generated": 0, "skipped": 0, "failed": 0,
+            "elapsed_seconds": 0.0,
+        }
+        if not stop_event.is_set():
+            def publish_video_scenes(update):
+                scene_captioning.update(update["video_scene_captioning"])
+                _emit_indexer_summary(**{
+                    **complete_summary, **update,
+                    **({"phase": "export_blocked"} if export_blocked else {}),
+                })
+
+            try:
+                scene_captioning.update(
+                    run_video_scene_captioning_worker(
+                        config, stop_event, publish_video_scenes,
+                    )
+                )
+            except CaptioningError as exc:
+                scene_captioning.update(status="failed", error=str(exc))
+                complete_summary["video_scene_captioning"] = scene_captioning
+                _emit_indexer_summary(**{
+                    **complete_summary,
+                    "phase": "export_blocked" if export_blocked else "scene_captioning_error",
+                })
+                raise
+        complete_summary["video_scene_captioning"] = scene_captioning
+        _emit_indexer_summary(**{
+            **complete_summary,
+            "phase": "export_blocked" if export_blocked else "complete",
+        })
+
 
 def _sqlite_pre_stage3_shape(sqlite_path: Path) -> bool:
     """True when the DB matches the pre-Stage-3 upgrade shape: live media

@@ -213,10 +213,48 @@ describe('IndexerPage', () => {
       })))
     })
 
-    it('disables the caption option while indexing', async () => {
+    it('keeps video scene captions off by default and enables them for the selected run', async () => {
+      renderPage()
+      const captions = await screen.findByRole('checkbox', { name: /ai video scene captions/i })
+      expect(captions).not.toBeChecked()
+      await userEvent.click(captions)
+      await userEvent.click(screen.getByRole('button', { name: /run indexer/i }))
+      await waitFor(() => expect(vi.mocked(fetch)).toHaveBeenCalledWith('/indexer/start', expect.objectContaining({
+        body: JSON.stringify({
+          processing_order: 'default', object_detection_enabled: false,
+          video_scene_captions_enabled: true,
+        }),
+      })))
+    })
+
+    it('disables caption options while indexing', async () => {
       MockWebSocket.pendingMessage = runningUpdate
       renderPage()
       expect(await screen.findByRole('checkbox', { name: /ai image captions/i })).toBeDisabled()
+      expect(screen.getByRole('checkbox', { name: /ai video scene captions/i })).toBeDisabled()
+    })
+
+    it('shows video scene caption progress and counts from the run summary', async () => {
+      MockWebSocket.pendingMessage = {
+        type: 'update',
+        status: {
+          status: 'running', run_id: 'abc123', started_at: null, finished_at: null,
+          elapsed_seconds: 42, return_code: null,
+          summary: {
+            phase: 'scene_captioning', video_scene_captioning: {
+              model_id: 'mlx-community/SmolVLM2-500M-Video-Instruct-mlx',
+              prompt_version: 'stage4b-video-scene-v1', status: 'running',
+              total: 3, generated: 1, skipped: 1, failed: 0,
+              elapsed_seconds: 12, current: 2,
+            },
+          },
+        },
+        log: [],
+      }
+      renderPage()
+      expect(await screen.findByText('Captioning scene 2 of 3…')).toBeTruthy()
+      expect(screen.getAllByText('AI Video Scene Captions')).toHaveLength(2)
+      expect(screen.getByText('Generated').parentElement).toHaveTextContent('Generated1')
     })
 
     it('shows caption progress and errors from the run summary', async () => {

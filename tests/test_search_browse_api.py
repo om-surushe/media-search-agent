@@ -413,6 +413,51 @@ class TestAssetIntelligence:
             ('A black dog at a fence.', 'model-b'),
         ]
 
+    def test_video_scene_captions_include_timestamp_and_provenance_in_order(self, client, db):
+        with sqlite3.connect(db) as conn:
+            first = conn.execute(
+                "SELECT id, timestamp FROM video_keyframes WHERE video_id='id_vid_01'"
+            ).fetchone()
+            later_timestamp = first[1] + 100.0
+            conn.execute(
+                """INSERT INTO video_keyframes(
+                       video_id, shot_index, kf_index, timestamp, shot_start, shot_end
+                   ) VALUES ('id_vid_01', 1, 0, ?, ?, ?)""",
+                (later_timestamp, later_timestamp - 5, later_timestamp + 5),
+            )
+            second_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+            conn.executemany(
+                """INSERT INTO video_scene_caption(
+                       video_id, keyframe_id, timestamp, caption, model_id,
+                       prompt_version, generated_at_utc, status
+                   ) VALUES ('id_vid_01', ?, ?, ?, ?, 'scene-v1', ?, 'completed')""",
+                [
+                    (second_id, later_timestamp, "A person enters the room.", "model-b", "2026-10-14T10:02:00+00:00"),
+                    (first[0], first[1], "A person waits by a door.", "model-a", "2026-10-14T10:01:00+00:00"),
+                ],
+            )
+
+        with sqlite3.connect(db) as observer:
+            before = observer.execute("PRAGMA data_version").fetchone()[0]
+            response = client.get("/media/id_vid_01/intelligence")
+            after = observer.execute("PRAGMA data_version").fetchone()[0]
+        assert response.status_code == 200, response.text
+        rows = response.json()["descriptions"]["video_scene_captions"]
+        assert [row["timestamp"] for row in rows] == sorted(row["timestamp"] for row in rows)
+        assert [row["caption"] for row in rows] == ["A person waits by a door.", "A person enters the room."]
+        assert rows[0]["keyframe_id"] == first[0]
+        assert (rows[0]["model_id"], rows[0]["prompt_version"], rows[0]["status"]) == (
+            "model-a", "scene-v1", "completed",
+        )
+        assert before == after
+
+    def test_missing_video_scene_caption_table_is_empty_for_older_database(self, client, db):
+        with sqlite3.connect(db) as conn:
+            conn.execute("DROP TABLE video_scene_caption")
+        response = client.get("/media/id_vid_01/intelligence")
+        assert response.status_code == 200, response.text
+        assert response.json()["descriptions"]["video_scene_captions"] == []
+
     def test_missing_caption_table_is_empty_for_older_database(self, client, db):
         with sqlite3.connect(db) as conn:
             conn.execute('DROP TABLE image_caption')

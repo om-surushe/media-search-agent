@@ -13,6 +13,7 @@ from typing import Callable
 
 MODEL_ID = "mlx-community/SmolVLM2-500M-Video-Instruct-mlx"
 PROMPT_VERSION = "stage4a2-caption-v1"
+VIDEO_SCENE_PROMPT_VERSION = "stage4b-video-scene-v1"
 
 
 class CaptioningError(ValueError):
@@ -70,26 +71,45 @@ def _source_roots(config) -> list[Path]:
 
 
 def run_captioning_worker(
-    config,
-    stop_event,
-    on_progress: Callable[[dict], None],
+    config, stop_event, on_progress: Callable[[dict], None],
 ) -> dict:
-    """Run one sequential, offline worker and forward its compact JSON progress events."""
+    return _run_captioning_worker(config, stop_event, on_progress)
+
+
+def run_video_scene_captioning_worker(
+    config, stop_event, on_progress: Callable[[dict], None],
+    video_ids: list[str] | None = None,
+) -> dict:
+    return _run_captioning_worker(
+        config, stop_event, on_progress, video_scenes=True, video_ids=video_ids,
+    )
+
+
+def _run_captioning_worker(
+    config, stop_event, on_progress: Callable[[dict], None], *,
+    video_scenes: bool = False, video_ids: list[str] | None = None,
+) -> dict:
+    """Run the isolated offline worker and forward compact progress events."""
     python, cache, worker = validate_captioning_runtime()
     database = Path(config.sqlite_path).expanduser().resolve(strict=True)
     if not database.is_file():
         raise CaptioningError(f"Captioning requires an existing SQLite index: {database}")
     roots = _source_roots(config)
     command = [
-        str(python), str(worker), "--all-missing", "--database", str(database),
-        "--cache-dir", str(cache),
+        str(python), str(worker), "--video-scenes" if video_scenes else "--all-missing",
+        "--database", str(database), "--cache-dir", str(cache),
     ]
+    if video_ids is not None:
+        for video_id in video_ids:
+            command.extend(("--video-id", video_id))
     for root in roots:
         command.extend(("--source-root", str(root)))
     if os.environ.get("MSA_INDEXER_STOP_FILE"):
         command.extend(("--stop-file", os.environ["MSA_INDEXER_STOP_FILE"]))
 
     env = os.environ.copy()
+    # macOS sets this for its parent venv; it can override MSA_CAPTION_PYTHON.
+    env.pop("__PYVENV_LAUNCHER__", None)
     env.update({
         "HF_HUB_OFFLINE": "1",
         "TRANSFORMERS_OFFLINE": "1",
@@ -121,8 +141,11 @@ def run_captioning_worker(
 
     reader = threading.Thread(target=read_events, name="caption-worker-output", daemon=True)
     reader.start()
+    progress_key = "video_scene_captioning" if video_scenes else "captioning"
+    phase = "scene_captioning" if video_scenes else "captioning"
     state = {
-        "model_id": MODEL_ID, "prompt_version": PROMPT_VERSION,
+        "model_id": MODEL_ID,
+        "prompt_version": VIDEO_SCENE_PROMPT_VERSION if video_scenes else PROMPT_VERSION,
         "status": "starting", "total": 0, "generated": 0, "skipped": 0,
         "failed": 0, "elapsed_seconds": 0.0,
     }
@@ -134,7 +157,7 @@ def run_captioning_worker(
     started = time.monotonic()
 
     def publish() -> None:
-        on_progress({"phase": "captioning", "captioning": dict(state)})
+        on_progress({"phase": phase, progress_key: dict(state)})
 
     try:
         while not reader_done or process.poll() is None:
