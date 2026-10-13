@@ -135,6 +135,13 @@ export interface AssetIntelligence {
   }
   descriptions: {
     image_caption: { status: string; text: string | null; model_name: string | null }
+    image_captions?: Array<{
+      caption: string
+      model_id: string
+      prompt_version: string
+      generated_at_utc: string
+      status: 'completed' | 'failed'
+    }>
     video_summary: { status: string; text: string | null; model_name: string | null }
     scenes: Array<{ start: number; end: number; text: string | null; status: string; model_name: string | null; model_revision?: string | null; generated_at?: string | null }>
   }

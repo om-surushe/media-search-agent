@@ -16,7 +16,7 @@ function wrap(ui: React.ReactElement) {
 
 const mockIntelligence = {
   media: { id: 'img-01', type: 'image', mime: 'image/jpeg', filename: 'beach.jpg', source_name: 'fixture', source_folder: 'photos', path: '/photos/beach.jpg', size_bytes: 1024, width: 10, height: 20, duration: null, captured_at: null, added_at: null, filesystem_mtime: null, camera: null, lens: null, gps_lat: null, gps_lon: null, gps_sensitive: false, hash_blake3: null, fingerprints: [] },
-  descriptions: { image_caption: { status: 'not_generated', text: null, model_name: null }, video_summary: { status: 'not_generated', text: null, model_name: null }, scenes: [] },
+  descriptions: { image_caption: { status: 'not_generated', text: null, model_name: null }, image_captions: [], video_summary: { status: 'not_generated', text: null, model_name: null }, scenes: [] },
   pipeline_status: [
     { pipeline: 'face_detection', status: 'disabled', evidence: 'current_config', configured_enabled: false, model_name: null, model_revision: null, started_at: null, completed_at: null, error_type: null },
     { pipeline: 'object_detection', status: 'not_processed', evidence: 'current_config', configured_enabled: true, model_name: null, model_revision: null, started_at: null, completed_at: null, error_type: null },
@@ -139,6 +139,45 @@ describe('MediaDetailDrawer', () => {
     expect(await screen.findByText('Object detection')).toBeInTheDocument()
     expect(screen.getByText('not processed')).toBeInTheDocument()
     expect(screen.getByText('Image caption: not generated yet.')).toBeInTheDocument()
+  })
+
+  it('shows every stored caption with provenance and keeps other inspector sections read-only', async () => {
+    const payload = {
+      ...mockIntelligence,
+      descriptions: {
+        ...mockIntelligence.descriptions,
+        image_caption: { status: 'available', text: 'Newest caption.', model_name: 'mlx/model-b' },
+        image_captions: [
+          { caption: 'A dog is behind a fence.', model_id: 'mlx/model-a', prompt_version: 'prompt-v1', generated_at_utc: '2026-10-14T10:00:00+00:00', status: 'completed' as const },
+          { caption: 'Newest caption.', model_id: 'mlx/model-b', prompt_version: 'prompt-v2', generated_at_utc: '2026-10-14T10:01:00+00:00', status: 'completed' as const },
+        ],
+      },
+      faces: [{ face_id: 'img-01:f0', bbox: [0.1, 0.2, 0.3, 0.4], confidence: 0.99, person_id: null, person_name: null, identity_status: 'unknown', gender: null, age: null, shot_index: null, kf_index: null, timestamp: null, thumbnail_url: null, embedding: { present: false, count: 0, dimensions: null, model: null, created_at: null } }],
+      face_count: 1,
+      objects: [{ label: 'dog', confidence: 0.95, bbox: null, evidence: 'stored_label_only', shot_index: null, kf_index: null, timestamp: null }],
+      object_label_count: 1,
+      objects_evidence: 'stored_label_only',
+      transcript: { status: 'transcribed', model_name: 'whisper-local', model_revision: null, runtime_version: null, language: 'en', processed_at: null, error_code: null, segments: [{ id: 1, segment_index: 0, start: 0, end: 1, text: 'existing transcript' }], total_segments: 1 },
+    }
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve({ ok: true, json: () => Promise.resolve(payload) })))
+    wrap(<MediaDetailDrawer item={baseItem} onClose={vi.fn()} />)
+
+    expect(await screen.findByText('A dog is behind a fence.')).toBeInTheDocument()
+    expect(screen.getByText('Newest caption.')).toBeInTheDocument()
+    expect(screen.getByText('mlx/model-a')).toBeInTheDocument()
+    expect(screen.getByText('prompt-v2')).toBeInTheDocument()
+    expect(screen.getAllByText('completed')).toHaveLength(2)
+    expect(screen.getAllByText(/2026/).length).toBeGreaterThan(0)
+    expect(screen.getByText('dog · 95.0%')).toBeInTheDocument()
+    expect(screen.getByText('Face detections · 1')).toBeInTheDocument()
+    expect(screen.getByText('existing transcript')).toBeInTheDocument()
+    const calls = (fetch as unknown as { mock: { calls: [RequestInfo | URL, RequestInit?][] } }).mock.calls
+    expect(calls.every(([, options]) => !options?.method || options.method === 'GET')).toBe(true)
+  })
+
+  it('shows the empty AI Description state when no captions are stored', async () => {
+    wrap(<MediaDetailDrawer item={baseItem} onClose={vi.fn()} />)
+    expect(await screen.findByText('No AI description generated yet.')).toBeInTheDocument()
   })
 
   it('keeps the page interactive on desktop and uses a full-screen mobile modal', () => {

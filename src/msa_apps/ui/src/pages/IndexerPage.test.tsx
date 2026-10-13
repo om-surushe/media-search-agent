@@ -200,6 +200,49 @@ describe('IndexerPage', () => {
       })))
     })
 
+    it('keeps captions off by default and enables them only for the selected run', async () => {
+      renderPage()
+      const captions = await screen.findByRole('checkbox', { name: /ai image captions/i })
+      expect(captions).not.toBeChecked()
+      await userEvent.click(captions)
+      await userEvent.click(screen.getByRole('button', { name: /run indexer/i }))
+      await waitFor(() => expect(vi.mocked(fetch)).toHaveBeenCalledWith('/indexer/start', expect.objectContaining({
+        body: JSON.stringify({
+          processing_order: 'default', object_detection_enabled: false, image_captions_enabled: true,
+        }),
+      })))
+    })
+
+    it('disables the caption option while indexing', async () => {
+      MockWebSocket.pendingMessage = runningUpdate
+      renderPage()
+      expect(await screen.findByRole('checkbox', { name: /ai image captions/i })).toBeDisabled()
+    })
+
+    it('shows caption progress and errors from the run summary', async () => {
+      MockWebSocket.pendingMessage = {
+        type: 'update',
+        status: {
+          status: 'running', run_id: 'abc123', started_at: null, finished_at: null,
+          elapsed_seconds: 42, return_code: null,
+          summary: {
+            phase: 'captioning', captioning: {
+              model_id: 'mlx-community/SmolVLM2-500M-Video-Instruct-mlx',
+              prompt_version: 'stage4a2-caption-v1', status: 'running',
+              total: 2, generated: 1, skipped: 0, failed: 1,
+              elapsed_seconds: 12, current: 2, error: 'Invalid image',
+            },
+          },
+        },
+        log: [],
+      }
+      renderPage()
+      expect(await screen.findByText('Captioning image 2 of 2…')).toBeTruthy()
+      expect(screen.getByText('Invalid image')).toBeTruthy()
+      expect(screen.getByText('Generated')).toBeTruthy()
+      expect(screen.getByText('Failed')).toBeTruthy()
+    })
+
     it('disables Object Detection while indexing', async () => {
       MockWebSocket.pendingMessage = runningUpdate
       renderPage()

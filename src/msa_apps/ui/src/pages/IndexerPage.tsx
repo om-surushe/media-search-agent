@@ -71,6 +71,7 @@ export function IndexerPage() {
   const [logExpanded, setLogExpanded] = useState(false)
   const [processingOrder, setProcessingOrder] = useState<ProcessingOrder>('default')
   const [objectDetectionOverride, setObjectDetectionOverride] = useState<boolean | null>(null)
+  const [imageCaptionsEnabled, setImageCaptionsEnabled] = useState(false)
   const logRef = useRef<HTMLDivElement>(null)
   const prevStatusRef = useRef<string | null>(null)
 
@@ -89,8 +90,8 @@ export function IndexerPage() {
   })
 
   const startMutation = useMutation({
-    mutationFn: (options: { processingOrder: ProcessingOrder; objectDetectionEnabled: boolean }) =>
-      startIndexer(options.processingOrder, options.objectDetectionEnabled),
+    mutationFn: (options: { processingOrder: ProcessingOrder; objectDetectionEnabled: boolean; imageCaptionsEnabled: boolean }) =>
+      startIndexer(options.processingOrder, options.objectDetectionEnabled, options.imageCaptionsEnabled),
   })
   const stopMutation  = useMutation({ mutationFn: stopIndexer  })
 
@@ -116,6 +117,7 @@ export function IndexerPage() {
   const isRunning = status === 'running'
   const objectDetectionEnabled = objectDetectionOverride ?? modelConfig?.effective?.object_detection_enabled ?? false
   const detectionControlDisabled = isRunning || startMutation.isPending || startMutation.isSuccess || modelConfigLoading || modelConfigError
+  const captionControlDisabled = isRunning || startMutation.isPending || startMutation.isSuccess
   const runOrder = statusInfo?.summary?.processing_order
 
   useEffect(() => {
@@ -246,7 +248,7 @@ export function IndexerPage() {
             </button>
           ) : (
             <button
-              onClick={() => startMutation.mutate({ processingOrder, objectDetectionEnabled })}
+              onClick={() => startMutation.mutate({ processingOrder, objectDetectionEnabled, imageCaptionsEnabled })}
               disabled={!hasSources || modelConfigLoading || modelConfigError || startMutation.isPending || (startMutation.isSuccess && !isRunning)}
               className="flex items-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-sm rounded-md transition-colors disabled:opacity-50"
             >
@@ -258,6 +260,21 @@ export function IndexerPage() {
 
         <div className="text-xs text-zinc-500 dark:text-zinc-400">
           Object Detection applies to photos and video keyframes for this run only.
+        </div>
+        <div className="space-y-1">
+          <label className="flex items-center gap-2 text-sm text-zinc-700 dark:text-zinc-200">
+            <input
+              type="checkbox"
+              aria-label="AI Image Captions"
+              checked={imageCaptionsEnabled}
+              disabled={captionControlDisabled}
+              onChange={event => setImageCaptionsEnabled(event.target.checked)}
+            />
+            AI Image Captions
+          </label>
+          <div className="pl-6 text-xs text-zinc-500 dark:text-zinc-400">
+            Offline SmolVLM2 captioning for photos only. Completed captions are skipped; model runs sequentially.
+          </div>
         </div>
         {modelConfigError && (
           <div role="alert" className="text-xs text-red-500 dark:text-red-400">
@@ -335,6 +352,30 @@ export function IndexerPage() {
               </div>
             </div>
           </div>
+        )}
+
+        {summary?.captioning && (
+          <section aria-live="polite" className="bg-white dark:bg-zinc-900 rounded-lg p-3 space-y-2">
+            <div className="text-sm font-medium text-zinc-900 dark:text-zinc-100">AI Image Captions</div>
+            {isRunning && summary.captioning.status === 'running' && summary.captioning.current != null && (
+              <div className="text-xs text-zinc-500 dark:text-zinc-400">
+                Captioning image {summary.captioning.current} of {formatCount(summary.captioning.total)}…
+              </div>
+            )}
+            <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs">
+              <div className="text-zinc-500 dark:text-zinc-400">Generated</div>
+              <div className="text-right tabular-nums">{formatCount(summary.captioning.generated)}</div>
+              <div className="text-zinc-500 dark:text-zinc-400">Skipped (already complete)</div>
+              <div className="text-right tabular-nums">{formatCount(summary.captioning.skipped)}</div>
+              <div className="text-zinc-500 dark:text-zinc-400">Failed</div>
+              <div className="text-right tabular-nums">{formatCount(summary.captioning.failed)}</div>
+              <div className="text-zinc-500 dark:text-zinc-400">Elapsed</div>
+              <div className="text-right tabular-nums">{formatDuration(summary.captioning.elapsed_seconds)}</div>
+            </div>
+            {summary.captioning.error && (
+              <div role="alert" className="text-xs text-red-600 dark:text-red-400">{summary.captioning.error}</div>
+            )}
+          </section>
         )}
 
         {status === 'complete' && summary && (

@@ -107,6 +107,7 @@ export function MediaDetailDrawer({ item, onClose, searchId }: MediaDetailDrawer
 
   const objectState = intelligence?.pipeline_status.find(stage => stage.pipeline === 'object_detection')
   const faceState = intelligence?.pipeline_status.find(stage => stage.pipeline === 'face_detection')
+  const imageCaptions = intelligence?.descriptions.image_captions ?? []
 
   // Reset lightbox when item changes
   useEffect(() => {
@@ -384,9 +385,33 @@ export function MediaDetailDrawer({ item, onClose, searchId }: MediaDetailDrawer
                   {intelligence.media.type === 'video' && intelligence.shots.length > 0 && <div className="text-[11px] text-zinc-400">{intelligence.shots.map(s => `Shot ${s.shot_index + 1}: ${s.start.toFixed(1)}–${s.end.toFixed(1)}s${s.is_synthetic ? ' (synthetic)' : ''}`).join(' · ')}</div>}
                   {intelligence.media.type === 'image' && <div className="text-xs text-zinc-500">Object detection evidence: {intelligence.objects_evidence}. {intelligence.stored_tags.length ? `Stored tags: ${intelligence.stored_tags.join(', ')}` : 'No stored tags.'}</div>}
                   {intelligence.media.fingerprints.length > 0 && <div className="text-[11px] text-zinc-400 break-all"><div>Indexed source paths</div>{intelligence.media.fingerprints.map((f, index) => <div key={`${f.source_name}-${f.relative_path}-${index}`}>{f.source_name}/{f.relative_path} · {new Intl.NumberFormat().format(f.size_bytes)} bytes · {formatDate(f.filesystem_mtime)}</div>)}</div>}
+                  {intelligence.media.type === 'image' && <div>
+                    <h3 className="text-xs font-medium text-zinc-600 dark:text-zinc-300 mb-1">AI Description</h3>
+                    {imageCaptions.length === 0 ? (
+                      <p className="text-xs text-zinc-500">No AI description generated yet.</p>
+                    ) : (
+                      <div className="space-y-2">
+                        {imageCaptions.map(caption => (
+                          <article key={JSON.stringify([caption.model_id, caption.prompt_version])} className="rounded-lg bg-slate-50 dark:bg-zinc-800/60 px-3 py-2 min-w-0">
+                            <p className="text-sm leading-relaxed whitespace-pre-wrap break-words text-zinc-700 dark:text-zinc-200">{caption.caption}</p>
+                            <dl className="mt-2 grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1 text-[11px]">
+                              <dt className="text-zinc-500">Model</dt>
+                              <dd className="min-w-0 break-all text-right text-zinc-600 dark:text-zinc-300">{caption.model_id}</dd>
+                              <dt className="text-zinc-500">Prompt version</dt>
+                              <dd className="min-w-0 break-all text-right text-zinc-600 dark:text-zinc-300">{caption.prompt_version}</dd>
+                              <dt className="text-zinc-500">Generated</dt>
+                              <dd className="text-right text-zinc-600 dark:text-zinc-300">{formatDate(caption.generated_at_utc)}</dd>
+                              <dt className="text-zinc-500">Status</dt>
+                              <dd className="text-right text-zinc-600 dark:text-zinc-300">{caption.status}</dd>
+                            </dl>
+                          </article>
+                        ))}
+                      </div>
+                    )}
+                  </div>}
                   <div>
                     <h3 className="text-xs font-medium text-zinc-600 dark:text-zinc-300 mb-1">Visual descriptions</h3>
-                    <p className="text-xs text-zinc-500">Image caption: {intelligence.descriptions.image_caption.status === 'not_generated' ? 'not generated yet.' : intelligence.descriptions.image_caption.text ?? intelligence.descriptions.image_caption.status}</p>
+                    {imageCaptions.length === 0 && <p className="text-xs text-zinc-500">Image caption: {intelligence.descriptions.image_caption.status === 'not_generated' ? 'not generated yet.' : intelligence.descriptions.image_caption.text ?? intelligence.descriptions.image_caption.status}</p>}
                     {intelligence.media.type === 'video' && <p className="text-xs text-zinc-500">Video summary: {intelligence.descriptions.video_summary.status === 'not_generated' ? 'not generated yet.' : intelligence.descriptions.video_summary.text ?? intelligence.descriptions.video_summary.status}</p>}
                     {intelligence.descriptions.scenes.map((scene, index) => <p key={index} className="text-xs text-zinc-500">Scene {index + 1} · {scene.start.toFixed(1)}–{scene.end.toFixed(1)}s: {scene.text ?? scene.status}</p>)}
                   </div>

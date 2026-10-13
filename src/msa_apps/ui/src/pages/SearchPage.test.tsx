@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { MemoryRouter } from 'react-router-dom'
 import { SearchPage } from './SearchPage'
@@ -73,6 +73,39 @@ afterEach(() => {
 // ── Tests ──────────────────────────────────────────────────────────────────
 
 describe('SearchPage', () => {
+  it('opens the shared drawer and displays stored AI caption provenance', async () => {
+    const payload = {
+      media: { id: 'captioned-image', type: 'image', mime: 'image/jpeg', filename: 'dog.jpg', source_name: 'fixture', source_folder: 'photos', path: '/tmp/dog.jpg', size_bytes: 12, width: 2, height: 2, duration: null, captured_at: null, added_at: null, filesystem_mtime: null, camera: null, lens: null, gps_lat: null, gps_lon: null, place: null, gps_processed: false, gps_data_mode: null, gps_sensitive: false, hash_blake3: null, fingerprints: [] },
+      descriptions: { image_caption: { status: 'available', text: 'A black dog at a fence.', model_name: 'mlx/model' }, image_captions: [{ caption: 'A black dog at a fence.', model_id: 'mlx/model', prompt_version: 'caption-v1', generated_at_utc: '2026-10-14T10:00:00+00:00', status: 'completed' }], video_summary: { status: 'not_generated', text: null, model_name: null }, scenes: [] },
+      pipeline_status: [],
+      embeddings: { image: { present: false, count: 0, dimensions: null, model: null, created_at: null }, keyframes: { present: false, count: 0, dimensions: null, model: null, created_at: null } },
+      faces: [], face_count: 0, objects: [], object_label_count: 0, objects_evidence: 'none', stored_tags: [], shots: [], total_shots: 0, keyframes: [], total_keyframes: 0,
+      transcript: { status: 'unsupported', model_name: null, model_revision: null, runtime_version: null, language: null, processed_at: null, error_code: null, segments: [], total_segments: 0 },
+    }
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      const body = url === '/search' ? {
+        results: [{ id: 'captioned-image', path: '/tmp/dog.jpg', thumbnail: null, score: 0.91, tags: [], type: null, timestamp: null, shot_id: null, date: null, gps_lat: null, gps_lon: null, place: null, why: '' }],
+        search_id: null,
+      } : url.includes('/intelligence') ? payload : []
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(body) })
+    }))
+    const { container } = renderPage()
+    fireEvent.change(screen.getByPlaceholderText(/describe what you're looking for/i), { target: { value: 'dog' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Search' }))
+    await screen.findByRole('button', { name: '' })
+    const mediaButton = container.querySelector('button img[src*="captioned-image"]')?.closest('button')
+    expect(mediaButton).not.toBeNull()
+    fireEvent.click(mediaButton!)
+
+    expect(await screen.findByText('A black dog at a fence.')).toBeInTheDocument()
+    expect(screen.getByText('mlx/model')).toBeInTheDocument()
+    expect(screen.getByText('caption-v1')).toBeInTheDocument()
+    const calls = (fetch as unknown as { mock: { calls: [RequestInfo | URL, RequestInit?][] } }).mock.calls
+    expect(calls.some(([url]) => String(url).includes('/media/captioned-image/intelligence'))).toBe(true)
+    expect(calls.some(([url]) => String(url) === '/track/open')).toBe(false)
+  })
+
   describe('indexer phase-aware banner (M-8/S-2)', () => {
     it('does not show a banner when indexer is idle', async () => {
       MockWebSocket.pendingMessage = idleUpdate

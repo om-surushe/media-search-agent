@@ -11,7 +11,20 @@ export interface IndexerStatus {
 }
 
 export interface IndexerRunSummary {
-  phase?: 'counting' | 'analyzing' | 'processing' | 'exporting' | 'complete' | 'commit_stats'
+  phase?: 'counting' | 'analyzing' | 'processing' | 'exporting' | 'captioning' | 'captioning_error' | 'export_blocked' | 'complete' | 'commit_stats'
+  captioning?: {
+    model_id: string
+    prompt_version: string
+    status: 'starting' | 'running' | 'complete' | 'failed' | 'cancelled'
+    total: number
+    generated: number
+    skipped: number
+    failed: number
+    elapsed_seconds: number
+    current?: number
+    current_media_id?: string
+    error?: string
+  }
   processing_order?: ProcessingOrder
   total_found?: number
   already_indexed?: number
@@ -65,11 +78,15 @@ export type ProcessingOrder = 'default' | 'fastest' | 'newest' | 'oldest'
 export async function startIndexer(
   processingOrder: ProcessingOrder = 'default',
   objectDetectionEnabled?: boolean,
+  imageCaptionsEnabled = false,
 ): Promise<void> {
-  const body: { processing_order: ProcessingOrder; object_detection_enabled?: boolean } = {
-    processing_order: processingOrder,
-  }
+  const body: {
+    processing_order: ProcessingOrder
+    object_detection_enabled?: boolean
+    image_captions_enabled?: boolean
+  } = { processing_order: processingOrder }
   if (objectDetectionEnabled !== undefined) body.object_detection_enabled = objectDetectionEnabled
+  if (imageCaptionsEnabled) body.image_captions_enabled = true
   const res = await fetch(apiUrl('/indexer/start'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
