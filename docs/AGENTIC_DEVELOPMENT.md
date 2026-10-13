@@ -373,6 +373,75 @@ choices earned their place:
   no half-finished work bleeding between branches, no stash-juggling when
   context-switching.
 
+### Faster day-to-day loop
+
+The canonical local development UI is <http://127.0.0.1:5175>; its API is
+<http://127.0.0.1:8502>. For visible end-to-end acceptance, reuse these running
+development services before creating another staging stack. Automated tests
+must still follow the isolation rules in `AGENTS.md`: temporary databases and
+configs, copied fixtures, and no access to the installed personal app's state.
+
+Identify the active database and model locations from the API rather than
+copying a temporary path into notes or scripts:
+
+```bash
+curl -fsS http://127.0.0.1:8502/diagnostics | python3 -c '
+import json, sys
+p = json.load(sys.stdin)
+for key in ("config_file", "sqlite_path", "models_dir", "log_dir"):
+    print(f"{key}={p.get(key)}")
+'
+```
+
+`models_dir` is the app-configured model directory. SmolVLM2's offline Hugging
+Face cache is separately selected by `MSA_CAPTION_CACHE_DIR`; inspect only the
+active development API process for the caption runtime settings:
+
+```bash
+API_PID="$(lsof -nP -t -iTCP:8502 -sTCP:LISTEN | head -n 1)"
+ps eww -p "$API_PID" -o command= | grep -oE \
+  'MSA_(CONFIG_PATH|DATA_DIR|CACHE_DIR|LOG_DIR|CAPTION_PYTHON|CAPTION_CACHE_DIR)=[^[:space:]]+'
+```
+
+These diagnostics can contain personal paths; keep their output local. Before
+restarting the API, preserve its active config/data/log environment and the
+caption variables. From the repository root, in that same development shell,
+relaunch with the existing development Python and environment:
+
+```bash
+: "${MSA_CAPTION_PYTHON:?Restore the active isolated MLX interpreter}"
+: "${MSA_CAPTION_CACHE_DIR:?Restore the active local model cache}"
+export MSA_CAPTION_PYTHON MSA_CAPTION_CACHE_DIR
+export PYTHONPATH="$PWD/src${PYTHONPATH:+:$PYTHONPATH}"
+python -m uvicorn msa_apps.search_api.app:app --host 127.0.0.1 --port 8502 --reload
+```
+
+Fast focused checks during captioning changes (run from the repository root):
+
+```bash
+PYTHONPATH=src .venv/bin/python -m pytest -q \
+  tests/test_caption_storage.py tests/test_indexer_manager.py \
+  tests/test_settings_indexer_api.py tests/test_search_browse_api.py \
+  tests/test_indexer_summary.py tests/test_cmd_index_stop.py
+
+cd src/msa_apps/ui
+npm test -- src/pages/IndexerPage.test.tsx \
+  src/components/media/MediaDetailDrawer.test.tsx \
+  src/pages/BrowsePage.test.tsx src/pages/SearchPage.test.tsx
+npm run build
+```
+
+Known unrelated failure in the existing fingerprint/ETA tests:
+`tests/test_fingerprint_fastpath.py::TestIncrementalEta::test_rolling_estimate_drops_after_mostly_hit_batch`
+currently fails with `AssertionError: expected a rolling re-estimate at a
+commit boundary` (`rolling` is empty). Do not expand captioning iterations to
+rerun the full suite or fold an ETA fix into unrelated work; track it separately.
+
+For future coding sessions, prioritize visible end-to-end functionality, reuse
+the running development environment, avoid duplicate staging setups, and use
+focused tests while iterating. These speed defaults supplement—never weaken—the
+media, database, and environment-isolation requirements in `AGENTS.md`.
+
 ---
 
 ## Further reading
