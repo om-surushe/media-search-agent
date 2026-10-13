@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline, one-image SmolVLM2 captioning proof of concept."""
+"""Offline SmolVLM2 image-captioning proof of concept and indexer worker."""
 from __future__ import annotations
 
 import argparse
@@ -13,13 +13,18 @@ import resource
 import sqlite3
 import subprocess
 import sys
+import signal
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Protocol
 
-MODEL_ID = "mlx-community/SmolVLM2-500M-Video-Instruct-mlx"
-PROMPT_VERSION = "stage4a2-caption-v1"
+_SOURCE_DIR = Path(__file__).resolve().parents[1] / "src"
+if str(_SOURCE_DIR) not in sys.path:
+    sys.path.insert(0, str(_SOURCE_DIR))
+from msa_indexer.captioning import MODEL_ID, PROMPT_VERSION
+
 SQLITE_HEADER = b"SQLite format 3\x00"
 PROMPT = (
     "Write a detailed factual caption in 2–3 sentences and at least 30 words. "
@@ -104,9 +109,6 @@ class SmolVLM2Provider:
 
 def _open_caption_store(database_path: Path, media_id: str, image_path: Path):
     """Open an existing DB only and ensure the image matches its indexed ID."""
-    src = Path(__file__).resolve().parents[1] / "src"
-    if str(src) not in sys.path:
-        sys.path.insert(0, str(src))
     from msa_indexer.db.sqlite_store import SQLiteStore
 
     if not SQLiteStore.is_valid_media_id(media_id):
@@ -134,6 +136,136 @@ def _open_caption_store(database_path: Path, media_id: str, image_path: Path):
     except Exception:
         store.close()
         raise
+
+
+def _emit_batch_event(**event) -> None:
+    print(json.dumps(event, separators=(",", ":")), flush=True)
+
+
+def _inside_roots(path: Path, roots: list[Path]) -> bool:
+    for root in roots:
+        try:
+            path.relative_to(root)
+            return True
+        except ValueError:
+            pass
+    return False
+
+
+def _caption_all_missing(args) -> int:
+    from msa_indexer.db.sqlite_store import SQLiteStore
+
+    database = args.database.expanduser().resolve(strict=True)
+    with database.open("rb") as db_file:
+        if db_file.read(16) != SQLITE_HEADER:
+            raise ValueError(f"Not an existing SQLite database: {database}")
+    roots = [root.expanduser().resolve(strict=True) for root in args.source_root]
+    if not roots or any(not root.is_dir() for root in roots):
+        raise ValueError("At least one existing --source-root directory is required")
+
+    stop_requested = threading.Event()
+    signal.signal(signal.SIGTERM, lambda *_: stop_requested.set())
+
+    def cancellation_requested() -> bool:
+        if args.stop_file is not None and args.stop_file.exists():
+            stop_requested.set()
+        return stop_requested.is_set()
+    store = SQLiteStore(database, create_if_missing=False)
+    provider: CaptionProvider | None = None
+    started = time.monotonic()
+    generated = failed = 0
+    current_error = None
+    try:
+        schema_path = Path(__file__).resolve().parents[1] / "src/msa_indexer/db/schema.sql"
+        store.init_schema_no_migrations(schema_path)
+        candidates, total, skipped = store.get_image_caption_candidates(MODEL_ID, PROMPT_VERSION)
+        _emit_batch_event(
+            event="started", status="running", total=total, generated=0, skipped=skipped,
+            failed=0, elapsed_seconds=0.0,
+        )
+        if cancellation_requested():
+            status = "cancelled"
+        elif not candidates:
+            status = "complete"
+        else:
+            try:
+                os.environ["HF_HUB_OFFLINE"] = "1"
+                os.environ["TRANSFORMERS_OFFLINE"] = "1"
+                os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
+                from huggingface_hub import snapshot_download
+
+                model_path = Path(snapshot_download(
+                    MODEL_ID, cache_dir=str(args.cache_dir), local_files_only=True
+                ))
+                provider = SmolVLM2Provider(model_path)
+            except Exception as exc:
+                failed = len(candidates)
+                current_error = (
+                    f"Could not load {MODEL_ID} from the offline cache "
+                    f"({type(exc).__name__}); verify MSA_CAPTION_CACHE_DIR."
+                )
+                _emit_batch_event(event="error", message=current_error)
+                status = "failed"
+            else:
+                status = "complete"
+                for position, candidate in enumerate(candidates, start=1):
+                    if cancellation_requested():
+                        status = "cancelled"
+                        break
+                    media_id = candidate["media_id"]
+                    path = None
+                    try:
+                        if not SQLiteStore.is_valid_media_id(media_id):
+                            raise ValueError("invalid indexed media ID")
+                        media = store.get_image_caption_media(media_id)
+                        if media is None:
+                            raise ValueError("indexed image is no longer available")
+                        path = Path(media["path"]).expanduser().resolve(strict=True)
+                        if path != Path(candidate["path"]).expanduser().resolve(strict=True):
+                            raise ValueError("indexed image path changed")
+                        if not _inside_roots(path, roots) or not path.is_file():
+                            raise ValueError("indexed image is outside configured media roots")
+                        if len(media_id) == 64:
+                            with path.open("rb") as image_file:
+                                if hashlib.file_digest(image_file, "sha256").hexdigest() != media_id.lower():
+                                    raise ValueError("indexed image content changed")
+                        from PIL import Image
+                        with Image.open(path) as image:
+                            image.verify()
+                        caption = provider.caption(path, args.max_tokens)
+                        store.store_image_caption(
+                            media_id, caption=caption, model_id=MODEL_ID,
+                            prompt_version=PROMPT_VERSION,
+                            generated_at_utc=datetime.now(timezone.utc).isoformat(),
+                        )
+                        generated += 1
+                    except Exception as exc:
+                        failed += 1
+                        message = str(exc).replace(str(path) if path is not None else "", "<indexed image>")
+                        current_error = f"{type(exc).__name__}: {message[:240]}"
+                        _emit_batch_event(
+                            event="image_error", media_id=media_id, message=current_error,
+                        )
+                    _emit_batch_event(
+                        event="progress", status="running", total=total,
+                        generated=generated, skipped=skipped, failed=failed,
+                        current=position, current_media_id=media_id,
+                        elapsed_seconds=time.monotonic() - started,
+                        error=current_error,
+                    )
+                if failed:
+                    status = "failed"
+    finally:
+        if provider is not None:
+            provider.close()
+        store.close()
+
+    _emit_batch_event(
+        event="summary", status=status, total=total, generated=generated,
+        skipped=skipped, failed=failed, elapsed_seconds=time.monotonic() - started,
+        **({"error": current_error} if current_error else {}),
+    )
+    return 1 if status == "failed" else 0
 
 
 def _rss_bytes() -> int | None:
@@ -171,19 +303,43 @@ def _mib(value: int | None) -> str:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("image", type=Path, help="local image file (use a disposable copy)")
+    parser.add_argument("image", type=Path, nargs="?", help="local image file (use a disposable copy)")
+    parser.add_argument("--all-missing", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--source-root", type=Path, action="append", default=[], help=argparse.SUPPRESS)
+    parser.add_argument("--stop-file", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--cache-dir", type=Path, required=True, help="local Hugging Face cache directory")
     parser.add_argument("--max-tokens", type=int, default=160)
     parser.add_argument("--database", type=Path, help="existing SQLite DB; enables caption persistence")
     parser.add_argument("--media-id", help="existing indexed image ID; requires --database")
     args = parser.parse_args()
 
+    if args.max_tokens < 1:
+        parser.error("--max-tokens must be positive")
+    if args.all_missing:
+        if args.image is not None or args.database is None or args.media_id is not None:
+            parser.error("--all-missing requires --database and forbids an image and --media-id")
+        try:
+            args.cache_dir = args.cache_dir.expanduser().resolve(strict=True)
+            if not args.cache_dir.is_dir():
+                raise ValueError("--cache-dir must be a local directory")
+            return _caption_all_missing(args)
+        except Exception as exc:
+            _emit_batch_event(event="error", message=f"{type(exc).__name__}: {exc}")
+            _emit_batch_event(
+                event="summary", status="failed", total=0, generated=0,
+                skipped=0, failed=0, elapsed_seconds=0.0,
+                error="Caption worker could not enumerate indexed images; verify the index and source paths.",
+            )
+            return 1
+    if args.image is None:
+        parser.error("image is required unless --all-missing is used")
+    if args.source_root:
+        parser.error("--source-root is only valid with --all-missing")
+
     image_path = args.image.expanduser().resolve(strict=True)
     cache_dir = args.cache_dir.expanduser().resolve(strict=True)
     if not image_path.is_file() or not cache_dir.is_dir():
         parser.error("image must be a file and --cache-dir must be a local directory")
-    if args.max_tokens < 1:
-        parser.error("--max-tokens must be positive")
     if (args.database is None) != (args.media_id is None):
         parser.error("--database and --media-id must be supplied together")
 

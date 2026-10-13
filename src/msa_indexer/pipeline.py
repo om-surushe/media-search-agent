@@ -2523,6 +2523,44 @@ def run_index(config, stop_event=None):
         # stays the terminal summary (§3.4).
         _emit_indexer_summary(**complete_summary)
 
+    if getattr(config, "image_captions_enabled", False):
+        from .captioning import (
+            MODEL_ID, PROMPT_VERSION, CaptioningError, run_captioning_worker,
+        )
+        import threading
+
+        if stop_event is None:
+            stop_event = threading.Event()
+        captioning = {
+            "model_id": MODEL_ID, "prompt_version": PROMPT_VERSION,
+            "status": "cancelled" if stop_event.is_set() else "starting",
+            "total": 0, "generated": 0, "skipped": 0, "failed": 0,
+            "elapsed_seconds": 0.0,
+        }
+        if not stop_event.is_set():
+            def publish_captioning(update):
+                captioning.update(update["captioning"])
+                _emit_indexer_summary(**{
+                    **complete_summary, **update,
+                    **({"phase": "export_blocked"} if export_blocked else {}),
+                })
+
+            try:
+                captioning.update(run_captioning_worker(config, stop_event, publish_captioning))
+            except CaptioningError as exc:
+                captioning.update(status="failed", error=str(exc))
+                complete_summary["captioning"] = captioning
+                _emit_indexer_summary(**{
+                    **complete_summary,
+                    "phase": "export_blocked" if export_blocked else "captioning_error",
+                })
+                raise
+        complete_summary["captioning"] = captioning
+        _emit_indexer_summary(**{
+            **complete_summary,
+            "phase": "export_blocked" if export_blocked else "complete",
+        })
+
 
 def _sqlite_pre_stage3_shape(sqlite_path: Path) -> bool:
     """True when the DB matches the pre-Stage-3 upgrade shape: live media

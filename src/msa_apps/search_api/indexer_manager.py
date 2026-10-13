@@ -187,6 +187,7 @@ class IndexerManager:
     def start(
         self, config_path: str, venv_bin: str, processing_order: str = "default",
         object_detection_enabled: bool | None = None,
+        image_captions_enabled: bool = False,
     ) -> Dict[str, Any]:
         import subprocess
 
@@ -196,6 +197,9 @@ class IndexerManager:
         with self._lock:
             if self._status == "running":
                 raise RuntimeError("Indexer is already running")
+            if image_captions_enabled:
+                from msa_indexer.captioning import validate_captioning_runtime
+                validate_captioning_runtime()
 
             run_id = uuid.uuid4().hex[:8]
             try:
@@ -219,6 +223,8 @@ class IndexerManager:
                     "--object-detection" if object_detection_enabled
                     else "--no-object-detection"
                 )
+            if image_captions_enabled:
+                cmd.append("--enable-image-captions")
             cmd.append("--no-console-log")
             logger.info(f"Starting indexer run {run_id}: {' '.join(cmd)}")
 

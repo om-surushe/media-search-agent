@@ -1,5 +1,5 @@
 from typing import Dict, List, Literal, Optional
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 class SearchFilters(BaseModel):
     people: Optional[List[str]] = None
     place: Optional[List[str]] = None
@@ -304,6 +304,16 @@ class DescriptionOut(BaseModel):
     generated_at: Optional[str] = None
 
 
+class ImageCaptionOut(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
+
+    caption: str
+    model_id: str
+    prompt_version: str
+    generated_at_utc: str
+    status: Literal["completed", "failed"]
+
+
 class SceneDescriptionOut(BaseModel):
     start: float
     end: float
@@ -316,6 +326,7 @@ class SceneDescriptionOut(BaseModel):
 
 class AssetDescriptionsOut(BaseModel):
     image_caption: DescriptionOut
+    image_captions: List[ImageCaptionOut] = Field(default_factory=list)
     video_summary: DescriptionOut
     scenes: List[SceneDescriptionOut] = Field(default_factory=list)
 

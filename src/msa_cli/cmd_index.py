@@ -65,6 +65,7 @@ Examples:
     )
     run.add_argument("--export-to-qdrant", action="store_true",
                      help="Force export to Qdrant after indexing, even if nothing changed")
+    run.add_argument("--enable-image-captions", action="store_true", help=argparse.SUPPRESS)
     run.add_argument("--log-level",
                      choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
                      default=None, help="Logging level (default: from config)")
@@ -214,6 +215,8 @@ def handle(args: argparse.Namespace) -> None:
             cli_params.append(f"media_source_override={args.media_source_override}")
         if getattr(args, "export_to_qdrant", False):
             cli_params.append("export_to_qdrant=true")
+        if getattr(args, "enable_image_captions", False):
+            cli_params.append("image_captions_enabled=true")
         if getattr(args, "image_only", False):
             cli_params.append("image_only=true")
         if getattr(args, "video_only", False):
@@ -252,6 +255,7 @@ def handle(args: argparse.Namespace) -> None:
         cfg.reprocess_faces = args.reprocess_faces or args.reprocess_all
         cfg.reprocess_embeddings = args.reprocess_embeddings or args.reprocess_all
         cfg.export_to_qdrant = getattr(args, "export_to_qdrant", False)
+        cfg.image_captions_enabled = getattr(args, "enable_image_captions", False)
         cfg.image_only = getattr(args, "image_only", False)
         cfg.video_only = getattr(args, "video_only", False)
         cfg.processing_order = getattr(args, "processing_order", "default")
@@ -265,6 +269,13 @@ def handle(args: argparse.Namespace) -> None:
         if getattr(args, "dry_run", False):
             run_dry_run(cfg)
         else:
+            if cfg.image_captions_enabled:
+                from msa_indexer.captioning import validate_captioning_runtime
+                try:
+                    validate_captioning_runtime()
+                except Exception as exc:
+                    logger.error("AI Image Captions cannot start: {}", exc)
+                    sys.exit(2)
             from msa_settings import acquire_instance_lock, release_instance_lock
             lock_path = Path(cfg.index_dir).parent / "msa-indexer.lock"
             acquire_instance_lock(lock_path, "Media Search Agent Indexer")

@@ -499,10 +499,12 @@ class TestIndexerStatus:
         )
         response = client.post("/indexer/start", json={
             "processing_order": "newest", "object_detection_enabled": True,
+            "image_captions_enabled": True,
         })
         assert response.status_code == 200
         assert captured["processing_order"] == "newest"
         assert captured["object_detection_enabled"] is True
+        assert captured["image_captions_enabled"] is True
 
     def test_start_defaults_for_legacy_empty_request(self, client, monkeypatch):
         from msa_apps.search_api.app import indexer_manager
@@ -516,6 +518,7 @@ class TestIndexerStatus:
         response = client.post("/indexer/start")
         assert response.status_code == 200
         assert captured["processing_order"] == "default"
+        assert captured["image_captions_enabled"] is False
 
     def test_start_rejects_invalid_processing_order(self, client):
         response = client.post("/indexer/start", json={"processing_order": "random"})

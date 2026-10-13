@@ -356,6 +356,66 @@ class TestAssetIntelligence:
         assert data['pipeline_status'][0]['evidence'] == 'current_config'
         assert data['descriptions']['image_caption']['status'] == 'not_generated'
 
+    def test_returns_stored_caption_variants_read_only(self, client, db):
+        with sqlite3.connect(db) as conn:
+            conn.executemany(
+                """INSERT INTO image_caption(
+                       media_id, caption, model_id, prompt_version, generated_at_utc, status
+                   ) VALUES (?,?,?,?,?,'completed')""",
+                [
+                    ('id_img_01', 'A black dog at a fence.', 'model-b', 'prompt-v1', '2026-10-14T10:01:00+00:00'),
+                    ('id_img_01', 'A dog looking through a fence.', 'model-a', 'prompt-v2', '2026-10-14T10:00:00+00:00'),
+                ],
+            )
+            conn.commit()
+
+        with sqlite3.connect(db) as observer:
+            before = observer.execute('PRAGMA data_version').fetchone()[0]
+            response = client.get('/media/id_img_01/intelligence')
+            after = observer.execute('PRAGMA data_version').fetchone()[0]
+            rows = observer.execute(
+                'SELECT caption, model_id FROM image_caption WHERE media_id=? ORDER BY model_id',
+                ('id_img_01',),
+            ).fetchall()
+
+        assert response.status_code == 200, response.text
+        data = response.json()
+        captions = data['descriptions']['image_captions']
+        assert [(c['model_id'], c['prompt_version']) for c in captions] == [
+            ('model-a', 'prompt-v2'), ('model-b', 'prompt-v1'),
+        ]
+        assert captions[0] == {
+            'caption': 'A dog looking through a fence.',
+            'model_id': 'model-a',
+            'prompt_version': 'prompt-v2',
+            'generated_at_utc': '2026-10-14T10:00:00+00:00',
+            'status': 'completed',
+        }
+        assert data['descriptions']['image_caption'] == {
+            'status': 'available',
+            'text': 'A black dog at a fence.',
+            'model_name': 'model-b',
+            'model_revision': None,
+            'generated_at': '2026-10-14T10:01:00+00:00',
+        }
+        assert data['media']['filename'] == 'beach.heic'
+        assert data['faces'][0]['identity_status'] == 'known'
+        assert data['objects_evidence'] == 'none'
+        assert before == after
+        assert rows == [
+            ('A dog looking through a fence.', 'model-a'),
+            ('A black dog at a fence.', 'model-b'),
+        ]
+
+    def test_missing_caption_table_is_empty_for_older_database(self, client, db):
+        with sqlite3.connect(db) as conn:
+            conn.execute('DROP TABLE image_caption')
+        response = client.get('/media/id_img_01/intelligence')
+        assert response.status_code == 200, response.text
+        data = response.json()
+        assert data['descriptions']['image_captions'] == []
+        assert data['descriptions']['image_caption']['status'] == 'not_generated'
+
     def test_stale_disabled_status_reopens_when_config_is_enabled(self, client, db):
         with sqlite3.connect(db) as conn:
             conn.execute(

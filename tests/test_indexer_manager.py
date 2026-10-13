@@ -55,6 +55,36 @@ def test_start_does_not_force_export_to_qdrant(tmp_path, monkeypatch):
     ]
 
 
+def test_start_enables_image_captions_only_when_requested(tmp_path, monkeypatch):
+    from msa_apps.search_api import indexer_manager as mod
+
+    monkeypatch.setattr(mod.IndexerManager, "_restore_from_pid_file", lambda self: None)
+    monkeypatch.setattr(mod.IndexerManager, "_handoff_watcher_loop", lambda self: None, raising=False)
+    _isolate_run_dir(monkeypatch, tmp_path)
+    manager = mod.IndexerManager()
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("media_sources: []\n")
+    venv_bin = tmp_path / ".venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    (venv_bin / ("msa.exe" if sys.platform == "win32" else "msa")).touch()
+    fake_thread = MagicMock()
+    fake_thread.start = MagicMock()
+
+    with (
+        patch("msa_settings.load_config", return_value=SimpleNamespace(log_dir=tmp_path / "logs")),
+        patch("msa_query.storage.qdrant_client.close_shared_client"),
+        patch("msa_indexer.captioning.validate_captioning_runtime") as validate_runtime,
+        patch("subprocess.Popen", return_value=MagicMock(pid=12345)) as mock_popen,
+        patch("threading.Thread", return_value=fake_thread),
+    ):
+        manager.start(
+            str(config_path), str(venv_bin), image_captions_enabled=True,
+        )
+
+    assert "--enable-image-captions" in mock_popen.call_args.args[0]
+    validate_runtime.assert_called_once_with()
+
+
 def test_start_uses_python_module_when_msa_entrypoint_is_missing(tmp_path, monkeypatch):
     from msa_apps.search_api import indexer_manager as mod
 

@@ -468,6 +468,56 @@ def test_complete_summary_counts_up_to_date_videos(tmp_path, monkeypatch):
         assert key in complete, f"complete payload missing {key}"
 
 
+def test_caption_stage_runs_after_indexing_and_preserves_index_summary(tmp_path, monkeypatch):
+    from contextlib import nullcontext
+    from msa_indexer import pipeline
+    from msa_indexer import captioning
+
+    summaries = []
+    monkeypatch.setattr(pipeline, "resolve_for_access", lambda p: p)
+    _patch_walk(monkeypatch, pipeline, [])
+    monkeypatch.setattr(pipeline, "SQLiteStore", _FakeSQLiteStore)
+    monkeypatch.setattr(pipeline, "ClipEmbedder", _FakeClipEmbedder)
+    monkeypatch.setattr(pipeline, "_load_historical_perf", lambda _p: (1.0, 30.0, 5.0))
+    monkeypatch.setattr(pipeline, "_emit_indexer_summary", lambda **payload: summaries.append(payload))
+    monkeypatch.setattr(pipeline, "get_qdrant_export_version", lambda: None)
+    monkeypatch.setattr(pipeline, "record_qdrant_export_version", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(pipeline, "_do_qdrant_export", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(pipeline.qdrant_handoff, "handoff_window", lambda **_kwargs: nullcontext())
+    calls = []
+
+    def caption_worker(_config, _stop_event, on_progress):
+        calls.append(True)
+        on_progress({"phase": "captioning", "captioning": {
+            "status": "running", "total": 2, "generated": 1,
+            "skipped": 0, "failed": 0, "elapsed_seconds": 1,
+        }})
+        return {
+            "status": "complete", "total": 2, "generated": 2,
+            "skipped": 0, "failed": 0, "elapsed_seconds": 2,
+        }
+
+    monkeypatch.setattr(captioning, "run_captioning_worker", caption_worker)
+    config = SimpleNamespace(
+        sqlite_path=str(tmp_path / "test.db"), faiss_path=tmp_path / "test.faiss",
+        face_faiss_path=tmp_path / "test-face.faiss", thumb_dir=tmp_path / "thumbs",
+        face_thumb_dir=tmp_path / "face-thumbs", log_dir=tmp_path / "logs",
+        model_name="ViT-L-14", pretrained="openai", model_version="test-v1",
+        device="cpu", enable_object_detection=False, enable_face_recognition=False,
+        processing_order="default", image_captions_enabled=True,
+        media_sources=[SimpleNamespace(name="photos", path=str(tmp_path), enabled=True)],
+    )
+
+    pipeline.run_index(config)
+
+    assert calls == [True]
+    assert any(row["phase"] == "captioning" for row in summaries)
+    terminal = summaries[-1]
+    assert terminal["phase"] == "complete"
+    assert terminal["captioning"]["status"] == "complete"
+    assert terminal["total_found"] == 0
+
+
 def test_noop_run_skips_qdrant_export_by_default(tmp_path, monkeypatch):
     from msa_indexer import pipeline
 

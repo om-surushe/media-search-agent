@@ -28,6 +28,7 @@ from msa_apps.search_api.schemas import (
     TranscriptSegmentOut,
     AssetDescriptionsOut,
     DescriptionOut,
+    ImageCaptionOut,
 )
 from msa_apps.search_api.deps import get_query_engine
 from msa_query.storage.db import connect_readonly
@@ -957,8 +958,30 @@ def get_asset_intelligence(media_id: str, request: Request):
             runtime_version=runtime_version, language=language, processed_at=processed_at,
             error_code=error_code, segments=segments, total_segments=segment_total,
         )
+        from msa_indexer.db.sqlite_store import SQLiteStore
+
+        stored_captions = SQLiteStore.read_image_captions(conn, media_id)
+        image_captions = [ImageCaptionOut(
+            caption=row["caption"], model_id=row["model_id"],
+            prompt_version=row["prompt_version"],
+            generated_at_utc=row["generated_at_utc"], status=row["status"],
+        ) for row in stored_captions]
+        latest_caption = max(
+            stored_captions,
+            key=lambda row: (row["generated_at_utc"], row["model_id"], row["prompt_version"]),
+            default=None,
+        )
+        image_description = DescriptionOut(status="not_generated")
+        if latest_caption:
+            completed = latest_caption["status"] == "completed"
+            image_description = DescriptionOut(
+                status="available" if completed else "unavailable",
+                text=latest_caption["caption"] if completed else None,
+                model_name=latest_caption["model_id"],
+                generated_at=latest_caption["generated_at_utc"],
+            )
         descriptions = AssetDescriptionsOut(
-            image_caption=DescriptionOut(status="not_generated"),
+            image_caption=image_description, image_captions=image_captions,
             video_summary=DescriptionOut(status="not_generated"), scenes=[],
         )
         return AssetIntelligenceResponse(
@@ -2220,6 +2243,7 @@ class _SourceAdd(_BaseModel):
 class _IndexerStart(_BaseModel):
     processing_order: Literal["default", "fastest", "newest", "oldest"] = "default"
     object_detection_enabled: Optional[bool] = None
+    image_captions_enabled: bool = False
 
 
 def _config_path(request: Request) -> str:
@@ -2244,8 +2268,11 @@ def indexer_start(request: Request, body: Optional[_IndexerStart] = None):
             venv_bin=_venv_bin(),
             processing_order=body.processing_order if body else "default",
             object_detection_enabled=body.object_detection_enabled if body else None,
+            image_captions_enabled=body.image_captions_enabled if body else False,
         )
         return result
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
     except RuntimeError as e:
         raise HTTPException(status_code=409, detail=str(e))
     except Exception as e:

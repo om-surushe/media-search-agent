@@ -1018,25 +1018,75 @@ class SQLiteStore:
             raise
         self._maybe_commit()
 
+    def get_image_captions(self, media_id: str) -> list[dict[str, str]]:
+        """Read all stored caption variants in a stable model/prompt order."""
+        if not self.is_valid_media_id(media_id):
+            raise ValueError("Invalid media_id; expected SHA-256 hex or canonical UUID")
+        return self.read_image_captions(self.conn, media_id)
+
+    @staticmethod
+    def read_image_captions(
+        conn: sqlite3.Connection, media_id: str
+    ) -> list[dict[str, str]]:
+        """Read captions using an existing connection; tolerate pre-caption schemas."""
+        try:
+            rows = conn.execute(
+                """SELECT media_id, caption, model_id, prompt_version,
+                          generated_at_utc, status
+                   FROM image_caption WHERE media_id = ?
+                   ORDER BY model_id COLLATE BINARY, prompt_version COLLATE BINARY""",
+                (media_id,),
+            ).fetchall()
+        except sqlite3.OperationalError as exc:
+            if "no such table: image_caption" in str(exc).lower():
+                return []
+            raise
+        fields = (
+            "media_id", "caption", "model_id", "prompt_version",
+            "generated_at_utc", "status",
+        )
+        return [dict(zip(fields, row)) for row in rows]
+
     def get_image_caption(
         self, media_id: str, model_id: str, prompt_version: str
-    ) -> dict | None:
+    ) -> dict[str, str] | None:
         """Read one stored image caption variant."""
         if not self.is_valid_media_id(media_id):
             raise ValueError("Invalid media_id; expected SHA-256 hex or canonical UUID")
-        row = self.conn.execute(
-            """SELECT media_id, caption, model_id, prompt_version,
-                      generated_at_utc, status
-               FROM image_caption
-               WHERE media_id = ? AND model_id = ? AND prompt_version = ?""",
-            (media_id, model_id, prompt_version),
-        ).fetchone()
-        if row is None:
-            return None
-        return dict(zip(
-            ("media_id", "caption", "model_id", "prompt_version", "generated_at_utc", "status"),
-            row,
-        ))
+        return next((caption for caption in self.get_image_captions(media_id)
+                     if caption["model_id"] == model_id
+                     and caption["prompt_version"] == prompt_version), None)
+
+    def get_image_caption_candidates(
+        self, model_id: str, prompt_version: str
+    ) -> tuple[list[dict[str, str]], int, int]:
+        """Return live images without a completed caption plus total and completed counts."""
+        total = self.conn.execute(
+            """SELECT COUNT(*) FROM media
+               WHERE deleted = 0 AND lower(COALESCE(mime, '')) LIKE 'image/%'"""
+        ).fetchone()[0]
+        skipped = self.conn.execute(
+            """SELECT COUNT(*) FROM media m
+               WHERE m.deleted = 0 AND lower(COALESCE(m.mime, '')) LIKE 'image/%'
+                 AND EXISTS (
+                     SELECT 1 FROM image_caption c
+                     WHERE c.media_id = m.media_id AND c.model_id = ?
+                       AND c.prompt_version = ? AND c.status = 'completed'
+                 )""",
+            (model_id, prompt_version),
+        ).fetchone()[0]
+        rows = self.conn.execute(
+            """SELECT m.media_id, m.path FROM media m
+               WHERE m.deleted = 0 AND lower(COALESCE(m.mime, '')) LIKE 'image/%'
+                 AND NOT EXISTS (
+                     SELECT 1 FROM image_caption c
+                     WHERE c.media_id = m.media_id AND c.model_id = ?
+                       AND c.prompt_version = ? AND c.status = 'completed'
+                 )
+               ORDER BY m.media_id""",
+            (model_id, prompt_version),
+        ).fetchall()
+        return ([{"media_id": row[0], "path": row[1]} for row in rows], total, skipped)
 
     def mark_transcription_failed(
         self, media_id: str, *, model_name: str, model_revision: str,

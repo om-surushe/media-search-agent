@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import json
 import sqlite3
 import sys
 from datetime import datetime, timezone
@@ -151,6 +152,35 @@ def test_existing_db_migration_only_adds_caption_table(store, tmp_path):
     assert store.conn.execute("SELECT COUNT(*) FROM image_caption").fetchone()[0] == 0
 
 
+def test_caption_candidates_include_prior_images_and_skip_only_completed(store, tmp_path):
+    (tmp_path / "first").mkdir()
+    (tmp_path / "second").mkdir()
+    _, first_id = add_image(store, tmp_path / "first", b"first")
+    _, second_id = add_image(store, tmp_path / "second", b"second")
+    store.store_image_caption(
+        first_id, caption="Already done", model_id="mlx/model",
+        prompt_version="caption-v1", generated_at_utc="2026-10-14T10:00:00+00:00",
+    )
+    store.conn.execute(
+        """INSERT INTO image_caption(
+               media_id, caption, model_id, prompt_version, generated_at_utc, status
+           ) VALUES (?, 'Failed prior attempt', 'mlx/model', 'caption-v1', '2026-10-14T10:00:00+00:00', 'failed')""",
+        (second_id,),
+    )
+    video_id = hashlib.sha256(b"video-candidate").hexdigest()
+    store.upsert_media({
+        "media_id": video_id, "path": str(tmp_path / "clip.mp4"),
+        "source_name": "caption-test", "rel_path": "clip.mp4",
+        "size_bytes": 5, "mime": "video/mp4",
+    })
+
+    candidates, total, skipped = store.get_image_caption_candidates("mlx/model", "caption-v1")
+
+    assert total == 2
+    assert skipped == 1
+    assert [row["media_id"] for row in candidates] == [second_id]
+
+
 def test_persistence_helper_rejects_missing_or_wrong_database_and_mismatched_image(store, tmp_path):
     image_path, media_id = add_image(store, tmp_path)
     script = import_caption_script()
@@ -230,6 +260,171 @@ def test_script_remains_print_only_without_persistence_options(tmp_path, monkeyp
     assert seen["model_id"] == script.MODEL_ID
     assert seen["local_files_only"] is True
     assert FakeProvider.closed == [True]
+
+
+def _add_real_caption_image(store, source_root, filename):
+    from PIL import Image
+
+    path = source_root / filename
+    Image.new("RGB", (8, 8), "white" if filename == "one.jpg" else "black").save(path)
+    media_id = hashlib.sha256(path.read_bytes()).hexdigest()
+    store.upsert_media({
+        "media_id": media_id, "path": str(path), "source_name": "caption-test",
+        "rel_path": filename, "size_bytes": path.stat().st_size, "mime": "image/jpeg",
+    })
+    return path, media_id
+
+
+def _run_batch_script(script, store, source_root, cache, monkeypatch, *, stop_file=None):
+    args = [
+        "caption_image.py", "--all-missing", "--database", str(store.path),
+        "--cache-dir", str(cache), "--source-root", str(source_root),
+    ]
+    if stop_file is not None:
+        args.extend(("--stop-file", str(stop_file)))
+    monkeypatch.setattr(sys, "argv", args)
+    return script.main()
+
+
+def test_batch_captions_previous_images_once_then_skips_completed(store, tmp_path, monkeypatch, capsys):
+    import huggingface_hub
+
+    source_root = tmp_path / "photos"
+    source_root.mkdir()
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    _, media_id = _add_real_caption_image(store, source_root, "one.jpg")
+    script = import_caption_script()
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", lambda *_a, **_kw: str(cache))
+
+    class FakeProvider:
+        created = 0
+        closed = 0
+
+        def __init__(self, _path):
+            type(self).created += 1
+
+        def caption(self, _path, _max_tokens):
+            return "A factual caption of the visible scene."
+
+        def close(self):
+            type(self).closed += 1
+
+    monkeypatch.setattr(script, "SmolVLM2Provider", FakeProvider)
+    assert _run_batch_script(script, store, source_root, cache, monkeypatch) == 0
+    first_events = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert first_events[-1]["status"] == "complete"
+    assert first_events[-1]["generated"] == 1
+    assert store.get_image_caption(media_id, script.MODEL_ID, script.PROMPT_VERSION)["caption"].startswith("A factual")
+    assert FakeProvider.created == FakeProvider.closed == 1
+
+    def should_not_load(*_args, **_kwargs):
+        raise AssertionError("completed captions must skip model loading")
+
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", should_not_load)
+    assert _run_batch_script(script, store, source_root, cache, monkeypatch) == 0
+    second_events = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert second_events[-1]["generated"] == 0
+    assert second_events[-1]["skipped"] == 1
+    assert FakeProvider.created == FakeProvider.closed == 1
+
+
+def test_batch_caption_cancellation_finishes_current_image_and_releases_model(store, tmp_path, monkeypatch, capsys):
+    import huggingface_hub
+
+    source_root = tmp_path / "photos"
+    source_root.mkdir()
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    _add_real_caption_image(store, source_root, "one.jpg")
+    _add_real_caption_image(store, source_root, "two.jpg")
+    stop_file = tmp_path / "stop"
+    script = import_caption_script()
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", lambda *_a, **_kw: str(cache))
+
+    class FakeProvider:
+        closed = False
+
+        def __init__(self, _path):
+            pass
+
+        def caption(self, _path, _max_tokens):
+            stop_file.write_text("stop")
+            return "Caption completed before stop."
+
+        def close(self):
+            type(self).closed = True
+
+    monkeypatch.setattr(script, "SmolVLM2Provider", FakeProvider)
+    assert _run_batch_script(script, store, source_root, cache, monkeypatch, stop_file=stop_file) == 0
+    events = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert events[-1]["status"] == "cancelled"
+    assert events[-1]["generated"] == 1
+    assert FakeProvider.closed
+    assert store.conn.execute("SELECT COUNT(*) FROM image_caption").fetchone()[0] == 1
+
+
+def test_batch_caption_failure_is_reported_and_releases_model(store, tmp_path, monkeypatch, capsys):
+    import huggingface_hub
+
+    source_root = tmp_path / "photos"
+    source_root.mkdir()
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    _add_real_caption_image(store, source_root, "one.jpg")
+    script = import_caption_script()
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", lambda *_a, **_kw: str(cache))
+
+    class FakeProvider:
+        closed = False
+
+        def __init__(self, _path):
+            pass
+
+        def caption(self, _path, _max_tokens):
+            raise RuntimeError("injected failure")
+
+        def close(self):
+            type(self).closed = True
+
+    monkeypatch.setattr(script, "SmolVLM2Provider", FakeProvider)
+    assert _run_batch_script(script, store, source_root, cache, monkeypatch) == 1
+    events = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert events[-1]["status"] == "failed"
+    assert events[-1]["failed"] == 1
+    assert "injected failure" in events[-1]["error"]
+    assert FakeProvider.closed
+
+
+def test_caption_runtime_validation_requires_a_cached_model_and_isolated_python(tmp_path):
+    from msa_indexer.captioning import (
+        CaptioningError, MODEL_ID, validate_captioning_runtime,
+    )
+
+    target = tmp_path / "caption-python-target"
+    target.write_text("#!/bin/sh\\nexit 0\\n")
+    target.chmod(0o755)
+    bin_dir = tmp_path / "venv" / "bin"
+    bin_dir.mkdir(parents=True)
+    python = bin_dir / "python"
+    python.symlink_to(target)
+    cache = tmp_path / "hub"
+    snapshots = cache / f"models--{MODEL_ID.replace('/', '--')}" / "snapshots"
+    snapshot = snapshots / "local-revision"
+    snapshot.mkdir(parents=True)
+    env = {"MSA_CAPTION_PYTHON": str(python), "MSA_CAPTION_CACHE_DIR": str(cache)}
+
+    assert validate_captioning_runtime(env) == (
+        python, cache.resolve(), SCRIPT_PATH,
+    )
+    assert validate_captioning_runtime(env)[0].is_symlink()
+    (snapshot / "placeholder").write_text("cached")
+    (snapshot / "placeholder").unlink()
+    snapshot.rmdir()
+    with pytest.raises(CaptioningError, match="will not download"):
+        validate_captioning_runtime(env)
+    with pytest.raises(CaptioningError, match="MSA_CAPTION_PYTHON"):
+        validate_captioning_runtime({})
 
 
 def test_safe_store_open_does_not_create_missing_database(tmp_path):
