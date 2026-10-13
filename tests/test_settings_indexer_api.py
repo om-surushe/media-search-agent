@@ -488,7 +488,7 @@ class TestConfigSourcesBomConfig:
 # ── GET /indexer/status ───────────────────────────────────────────────────────
 
 class TestIndexerStatus:
-    def test_start_passes_selected_processing_order(self, client, monkeypatch):
+    def test_start_passes_selected_processing_order_and_detection_override(self, client, monkeypatch):
         from msa_apps.search_api.app import indexer_manager
 
         captured = {}
@@ -497,9 +497,12 @@ class TestIndexerStatus:
             "start",
             lambda **kwargs: captured.update(kwargs) or {"status": "running"},
         )
-        response = client.post("/indexer/start", json={"processing_order": "newest"})
+        response = client.post("/indexer/start", json={
+            "processing_order": "newest", "object_detection_enabled": True,
+        })
         assert response.status_code == 200
         assert captured["processing_order"] == "newest"
+        assert captured["object_detection_enabled"] is True
 
     def test_start_defaults_for_legacy_empty_request(self, client, monkeypatch):
         from msa_apps.search_api.app import indexer_manager
@@ -557,7 +560,7 @@ class TestModelConfigGet:
 
     def test_top_level_keys(self, client):
         body = client.get("/config/model").json()
-        for key in ("readonly", "editable", "defaults"):
+        for key in ("readonly", "editable", "defaults", "effective"):
             assert key in body, f"missing key: {key}"
 
     def test_readonly_fields(self, client):
@@ -574,6 +577,10 @@ class TestModelConfigGet:
             "face_min_size", "face_store_metadata",
         ):
             assert key in ed, f"missing editable key: {key}"
+
+    def test_effective_object_detection_setting(self, client):
+        body = client.get("/config/model").json()
+        assert body["effective"]["object_detection_enabled"] is False
 
     def test_defaults_match_editable_keys(self, client):
         body = client.get("/config/model").json()

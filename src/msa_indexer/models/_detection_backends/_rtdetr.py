@@ -36,17 +36,19 @@ class RtDetrBackend:
 
         cached = self._is_cached(model_name, cache_dir, revision)
         if cached:
-            logger.info("Loading RT-DETR model {} from cache...", model_name)
+            logger.info("Loading RT-DETR model {} from local cache...", model_name)
         else:
             logger.info(
-                "RT-DETR model {} not in cache — downloading (~81 MB, this may take a minute)...",
+                "RT-DETR model {} is not in the configured local cache; loading offline only",
                 model_name,
             )
 
         t0 = time.perf_counter()
-        hf_kwargs: dict = {"cache_dir": cache_dir, "revision": revision}
-        if cached:
-            hf_kwargs["local_files_only"] = True
+        hf_kwargs: dict = {
+            "cache_dir": cache_dir,
+            "revision": revision,
+            "local_files_only": True,
+        }
         self._processor = RTDetrImageProcessor.from_pretrained(model_name, **hf_kwargs)
         self._model = RTDetrForObjectDetection.from_pretrained(model_name, **hf_kwargs)
 

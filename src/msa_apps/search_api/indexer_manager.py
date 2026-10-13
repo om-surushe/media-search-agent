@@ -185,7 +185,8 @@ class IndexerManager:
     # ── Public API ────────────────────────────────────────────────────────────
 
     def start(
-        self, config_path: str, venv_bin: str, processing_order: str = "default"
+        self, config_path: str, venv_bin: str, processing_order: str = "default",
+        object_detection_enabled: bool | None = None,
     ) -> Dict[str, Any]:
         import subprocess
 
@@ -212,8 +213,13 @@ class IndexerManager:
                 "index", "run",
                 "--config", config_path,
                 "--processing-order", processing_order,
-                "--no-console-log",
             ]
+            if object_detection_enabled is not None:
+                cmd.append(
+                    "--object-detection" if object_detection_enabled
+                    else "--no-object-detection"
+                )
+            cmd.append("--no-console-log")
             logger.info(f"Starting indexer run {run_id}: {' '.join(cmd)}")
 
             # M-8/S-2: with the sentinel-file handoff enabled, the API KEEPS

@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from 'react'
 import { useQuery, useMutation } from '@tanstack/react-query'
 import { Play, Square, ChevronDown, ChevronUp, Image, Film, User, Users, Maximize2, Minimize2 } from 'lucide-react'
 import {
-  startIndexer, stopIndexer, getIndexStats, getSources,
+  startIndexer, stopIndexer, getIndexStats, getSources, getModelConfig,
 } from '../api/indexer'
 import type { ProcessingOrder } from '../api/indexer'
 import { useIndexerWS } from '../hooks/useIndexerStatus'
@@ -70,6 +70,7 @@ export function IndexerPage() {
   const [logOpen, setLogOpen] = useState(false)
   const [logExpanded, setLogExpanded] = useState(false)
   const [processingOrder, setProcessingOrder] = useState<ProcessingOrder>('default')
+  const [objectDetectionOverride, setObjectDetectionOverride] = useState<boolean | null>(null)
   const logRef = useRef<HTMLDivElement>(null)
   const prevStatusRef = useRef<string | null>(null)
 
@@ -82,8 +83,15 @@ export function IndexerPage() {
     queryKey: ['sources'],
     queryFn: getSources,
   })
+  const { data: modelConfig, isLoading: modelConfigLoading, isError: modelConfigError } = useQuery({
+    queryKey: ['model-config'],
+    queryFn: getModelConfig,
+  })
 
-  const startMutation = useMutation({ mutationFn: startIndexer })
+  const startMutation = useMutation({
+    mutationFn: (options: { processingOrder: ProcessingOrder; objectDetectionEnabled: boolean }) =>
+      startIndexer(options.processingOrder, options.objectDetectionEnabled),
+  })
   const stopMutation  = useMutation({ mutationFn: stopIndexer  })
 
   // Refetch stats and reset start mutation when indexer transitions running → terminal
@@ -106,6 +114,8 @@ export function IndexerPage() {
 
   const status    = statusInfo?.status ?? 'idle'
   const isRunning = status === 'running'
+  const objectDetectionEnabled = objectDetectionOverride ?? modelConfig?.effective?.object_detection_enabled ?? false
+  const detectionControlDisabled = isRunning || startMutation.isPending || startMutation.isSuccess || modelConfigLoading || modelConfigError
   const runOrder = statusInfo?.summary?.processing_order
 
   useEffect(() => {
@@ -213,6 +223,17 @@ export function IndexerPage() {
             </select>
           </label>
 
+          <label className="flex items-center gap-2 text-xs text-zinc-600 dark:text-zinc-300">
+            <input
+              type="checkbox"
+              aria-label="Object Detection"
+              checked={objectDetectionEnabled}
+              disabled={detectionControlDisabled}
+              onChange={event => setObjectDetectionOverride(event.target.checked)}
+            />
+            Object Detection
+          </label>
+
           {/* Action button */}
           {isRunning ? (
             <button
@@ -225,8 +246,8 @@ export function IndexerPage() {
             </button>
           ) : (
             <button
-              onClick={() => startMutation.mutate(processingOrder)}
-              disabled={!hasSources || startMutation.isPending || (startMutation.isSuccess && !isRunning)}
+              onClick={() => startMutation.mutate({ processingOrder, objectDetectionEnabled })}
+              disabled={!hasSources || modelConfigLoading || modelConfigError || startMutation.isPending || (startMutation.isSuccess && !isRunning)}
               className="flex items-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-sm rounded-md transition-colors disabled:opacity-50"
             >
               <Play size={14} />
@@ -234,6 +255,15 @@ export function IndexerPage() {
             </button>
           )}
         </div>
+
+        <div className="text-xs text-zinc-500 dark:text-zinc-400">
+          Object Detection applies to photos and video keyframes for this run only.
+        </div>
+        {modelConfigError && (
+          <div role="alert" className="text-xs text-red-500 dark:text-red-400">
+            Could not load the effective Object Detection setting.
+          </div>
+        )}
 
         {processingOrder === 'fastest' && (
           <div className="text-xs text-zinc-500 dark:text-zinc-400">

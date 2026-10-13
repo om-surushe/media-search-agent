@@ -58,6 +58,11 @@ Examples:
         default="default",
         help="Media-item order: default, fastest, newest, or oldest",
     )
+    run.add_argument(
+        "--object-detection", action=argparse.BooleanOptionalAction,
+        default=None, dest="object_detection_enabled",
+        help="Enable or disable object detection for this run without changing config",
+    )
     run.add_argument("--export-to-qdrant", action="store_true",
                      help="Force export to Qdrant after indexing, even if nothing changed")
     run.add_argument("--log-level",
@@ -214,6 +219,8 @@ def handle(args: argparse.Namespace) -> None:
         if getattr(args, "video_only", False):
             cli_params.append("video_only=true")
         cli_params.append(f"processing_order={getattr(args, 'processing_order', 'default')}")
+        if getattr(args, "object_detection_enabled", None) is not None:
+            cli_params.append(f"object_detection={args.object_detection_enabled}")
         reprocess_flags = [
             flag for flag, attr in [
                 ("gps", "reprocess_gps"), ("objects", "reprocess_objects"),
@@ -248,6 +255,8 @@ def handle(args: argparse.Namespace) -> None:
         cfg.image_only = getattr(args, "image_only", False)
         cfg.video_only = getattr(args, "video_only", False)
         cfg.processing_order = getattr(args, "processing_order", "default")
+        if getattr(args, "object_detection_enabled", None) is not None:
+            cfg.object_detection_override = args.object_detection_enabled
         # CLI-only reconcile mode (like the reprocess flags): hash every file
         # this run, repairing fingerprint state — the safety net for the
         # size+mtime blind spot (M-8 plan §3.4).

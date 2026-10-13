@@ -125,7 +125,8 @@ def _object_detection_enabled(config) -> bool:
     — a later init failure only makes the ETA an over-estimate, the safe
     direction.
     """
-    return object_detection_enabled(config)
+    override = getattr(config, "object_detection_override", None)
+    return bool(override) if override is not None else object_detection_enabled(config)
 
 
 def _video_object_detection_enabled(config) -> bool:
@@ -142,7 +143,8 @@ def _video_object_detection_enabled(config) -> bool:
     #208 fixes. Video analog of the image-detector enablement gate (#208 review,
     Codex P2). Errs toward "enabled" — an init failure only over-estimates.
     """
-    return video_object_detection_enabled(config)
+    override = getattr(config, "object_detection_override", None)
+    return bool(override) if override is not None else video_object_detection_enabled(config)
 
 
 def _base_needs_flags(status, *, model_version, reprocess_gps, reprocess_objects,
@@ -866,7 +868,7 @@ def run_index(config, stop_event=None):
             if obj_backend == "rtdetr":
                 from .models._detection_backends._rtdetr import KNOWN_REVISIONS
                 object_model_revision = KNOWN_REVISIONS.get(obj_model)
-            if on_cpu and det_setting is True:
+            if on_cpu and (det_setting is True or getattr(config, "object_detection_override", None) is True):
                 logger.warning(
                     "Object detection enabled on CPU (backend={}, model={}). "
                     "Indexing will be slow — expect ~{}ms per image. "
@@ -888,6 +890,8 @@ def run_index(config, stop_event=None):
         except Exception as e:
             object_init_error = type(e).__name__
             logger.warning("Failed to initialize object detector ({}). Continuing with stage marked failed.", object_init_error)
+    elif getattr(config, "object_detection_override", None) is False:
+        logger.info("Object detection DISABLED for this run (per-run override)")
     elif on_cpu and det_setting == "auto":
         logger.info(
             "Object detection SKIPPED on CPU (set enable_object_detection: true to force it on, "
@@ -1575,6 +1579,13 @@ def run_index(config, stop_event=None):
                     # independently; existing keyframes do not imply detections ran.
                     reprocess_embeddings = getattr(config, 'reprocess_embeddings', False)
                     reprocess_objects = getattr(config, 'reprocess_objects', False)
+                    has_unembedded_keyframes = (
+                        has_keyframes and db.media_has_unembedded_keyframes(media_id)
+                    )
+                    needs_video_embeddings = (
+                        (not has_keyframes or reprocess_embeddings or has_unembedded_keyframes)
+                        and needs_embeddings
+                    )
                     # Whether this video is a no-op skip — decided by the SHARED
                     # _video_skip_predicate the count-phase ETA also calls, so the
                     # runtime skip and the pre-count can't diverge (#208 review,
@@ -1584,9 +1595,7 @@ def run_index(config, stop_event=None):
                     video_is_free_skip = _video_skip_predicate(
                         has_shots=bool(existing_shots),
                         has_keyframes=has_keyframes,
-                        has_unembedded_keyframes=(
-                            has_keyframes and db.media_has_unembedded_keyframes(media_id)
-                        ),
+                        has_unembedded_keyframes=has_unembedded_keyframes,
                         needs_embeddings=needs_embeddings,
                         needs_objects=needs_objects,
                         needs_faces=needs_faces,
@@ -1703,12 +1712,15 @@ def run_index(config, stop_event=None):
                                     if needs_faces:
                                         video_face_error = video_face_error or "KeyframeDecodeError"
                                     continue
-                                vec_kf = embedder.image_embed([img])[0]
-                                kf_emb_pairs.append((s_idx, k_idx, vec_kf))
-                                processed_embedding = True
-                                
-                                # Per-keyframe object detection
-                                keyframe_tags = []
+                                existing_keyframe_id = db.get_keyframe_id(media_id, s_idx, k_idx)
+                                if needs_video_embeddings or existing_keyframe_id is None:
+                                    vec_kf = embedder.image_embed([img])[0]
+                                    kf_emb_pairs.append((s_idx, k_idx, vec_kf))
+                                    processed_embedding = True
+
+                                # Per-keyframe object detection. None means the
+                                # detector did not run; [] means it ran and found no labels.
+                                keyframe_tags = None
                                 if enable_video_detection and object_detector:
                                     try:
                                         keyframe_tags = object_detector.get_labels(img)
@@ -1791,9 +1803,9 @@ def run_index(config, stop_event=None):
                                     "gps_source": gps_payload.get("gps_source") if gps_payload else None,
                                     "place": keyframe_place,
                                 })
-                        if kf_emb_pairs:
-                            # Insert keyframe metadata first so the FK from
-                            # keyframe_embedding -> video_keyframes(id) holds.
+                        if keyframe_entries:
+                            # Insert/update metadata even when embeddings already
+                            # exist; labels and GPS can change independently.
                             db.add_keyframes(media_id, keyframe_entries)
                             content_changed = True
                             for s_idx_kf, k_idx_kf, vec_kf in kf_emb_pairs:
@@ -1820,25 +1832,27 @@ def run_index(config, stop_event=None):
                                     update_fields["place"] = first_keyframe_place
                                 db.update_media_fields(media_id, update_fields)
                                 content_changed = True
-                            embed_ok += 1  # Count as successful video embedding
-                            log.debug(f"Stored video keyframes count={len(kf_emb_pairs)} shots={len(shots)}")
+                            if kf_emb_pairs:
+                                embed_ok += 1  # Count as successful video embedding
+                            log.debug(f"Stored video keyframes count={len(keyframe_entries)} shots={len(shots)}")
                         else:
                             log.warning(f"No valid keyframes extracted from {len(shots)} shots")
-                            embed_fail += 1
+                            if needs_embeddings:
+                                embed_fail += 1
 
                         if needs_faces:
                             db.set_pipeline_status(
                                 media_id, "face_detection",
-                                "failed" if video_face_error or not kf_emb_pairs else "completed",
+                                "failed" if video_face_error or not keyframe_entries else "completed",
                                 model_name=face_model_id,
-                                error_type=video_face_error or ("NoKeyframes" if not kf_emb_pairs else None),
+                                error_type=video_face_error or ("NoKeyframes" if not keyframe_entries else None),
                             )
                         if needs_objects:
                             db.set_pipeline_status(
                                 media_id, "object_detection",
-                                "failed" if video_object_error or not kf_emb_pairs else "completed",
+                                "failed" if video_object_error or not keyframe_entries else "completed",
                                 model_name=object_model_name, model_revision=object_model_revision,
-                                error_type=video_object_error or ("NoKeyframes" if not kf_emb_pairs else None),
+                                error_type=video_object_error or ("NoKeyframes" if not keyframe_entries else None),
                             )
                         
                         other_ops_time = time.perf_counter() - other_ops_start

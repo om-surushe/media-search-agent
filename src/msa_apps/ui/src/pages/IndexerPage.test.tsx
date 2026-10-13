@@ -45,6 +45,8 @@ function mockFetch(overrides: Record<string, object> = {}) {
       return Promise.resolve({ ok: true, json: () => Promise.resolve({ status: 'ok' }) })
     if (url === '/config/sources')
       return Promise.resolve({ ok: true, json: () => Promise.resolve(overrides[url] ?? { sources: [{ name: 'photos', path: '/mnt/d/Photos', display_path: '/mnt/d/Photos', enabled: true, read_only: true, description: 'Main library' }] }) })
+    if (url === '/config/model')
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(overrides[url] ?? { effective: { object_detection_enabled: false } }) })
     if (url === '/platform')
       return Promise.resolve({ ok: true, json: () => Promise.resolve(overrides[url] ?? { platform: 'linux' }) })
     if (url === '/browse/pick')
@@ -182,8 +184,26 @@ describe('IndexerPage', () => {
       await userEvent.click(screen.getByRole('button', { name: /run indexer/i }))
       expect(fetchMock).toHaveBeenCalledWith('/indexer/start', expect.objectContaining({
         method: 'POST',
-        body: JSON.stringify({ processing_order: 'oldest' }),
+        body: JSON.stringify({ processing_order: 'oldest', object_detection_enabled: false }),
       }))
+    })
+
+    it('defaults Object Detection from effective config and submits a per-run override', async () => {
+      mockFetch({ '/config/model': { effective: { object_detection_enabled: true } } })
+      renderPage()
+      const toggle = await screen.findByRole('checkbox', { name: /object detection/i })
+      expect(toggle).toBeChecked()
+      await userEvent.click(toggle)
+      await userEvent.click(screen.getByRole('button', { name: /run indexer/i }))
+      await waitFor(() => expect(vi.mocked(fetch)).toHaveBeenCalledWith('/indexer/start', expect.objectContaining({
+        body: JSON.stringify({ processing_order: 'default', object_detection_enabled: false }),
+      })))
+    })
+
+    it('disables Object Detection while indexing', async () => {
+      MockWebSocket.pendingMessage = runningUpdate
+      renderPage()
+      expect(await screen.findByRole('checkbox', { name: /object detection/i })).toBeDisabled()
     })
 
     it('disables Run Indexer until a source is configured', async () => {

@@ -2219,6 +2219,7 @@ class _SourceAdd(_BaseModel):
 
 class _IndexerStart(_BaseModel):
     processing_order: Literal["default", "fastest", "newest", "oldest"] = "default"
+    object_detection_enabled: Optional[bool] = None
 
 
 def _config_path(request: Request) -> str:
@@ -2242,6 +2243,7 @@ def indexer_start(request: Request, body: Optional[_IndexerStart] = None):
             config_path=_config_path(request),
             venv_bin=_venv_bin(),
             processing_order=body.processing_order if body else "default",
+            object_detection_enabled=body.object_detection_enabled if body else None,
         )
         return result
     except RuntimeError as e:
@@ -2750,7 +2752,12 @@ def config_model_get(request: Request):
         "model_name": getattr(cfg, "model_name", "ViT-L-14"),
         "pretrained": getattr(cfg, "pretrained", "openai"),
     }
-    return {"readonly": readonly, "editable": editable, "defaults": _MODEL_CONFIG_DEFAULTS}
+    return {
+        "readonly": readonly,
+        "editable": editable,
+        "defaults": _MODEL_CONFIG_DEFAULTS,
+        "effective": {"object_detection_enabled": object_detection_enabled(cfg)},
+    }
 
 
 @app.patch("/config/model")

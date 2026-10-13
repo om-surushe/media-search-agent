@@ -35,7 +35,8 @@ def test_start_does_not_force_export_to_qdrant(tmp_path, monkeypatch):
          patch("subprocess.Popen", return_value=fake_proc) as mock_popen, \
          patch("threading.Thread", return_value=fake_thread):
         result = manager.start(
-            str(config_path), str(venv_bin), processing_order="fastest"
+            str(config_path), str(venv_bin), processing_order="fastest",
+            object_detection_enabled=True,
         )
 
     cmd = mock_popen.call_args.args[0]
@@ -43,6 +44,7 @@ def test_start_does_not_force_export_to_qdrant(tmp_path, monkeypatch):
     assert result["status"] == "running"
     assert "--export-to-qdrant" not in cmd
     assert cmd[cmd.index("--processing-order") + 1] == "fastest"
+    assert "--object-detection" in cmd
     assert cmd[-1] == "--no-console-log"
     script_name = "msa.exe" if sys.platform == "win32" else "msa"
     assert cmd[:4] == [
@@ -72,8 +74,12 @@ def test_start_uses_python_module_when_msa_entrypoint_is_missing(tmp_path, monke
         patch("subprocess.Popen", return_value=fake_proc) as mock_popen,
         patch("threading.Thread", return_value=fake_thread),
     ):
-        manager.start(str(config_path), str(tmp_path / "missing-bin"))
+        manager.start(
+            str(config_path), str(tmp_path / "missing-bin"),
+            object_detection_enabled=False,
+        )
 
+    assert "--no-object-detection" in mock_popen.call_args.args[0]
     assert mock_popen.call_args.args[0][:4] == [
         sys.executable, "-c", "from msa_cli.cli import main; main()", "index"
     ]

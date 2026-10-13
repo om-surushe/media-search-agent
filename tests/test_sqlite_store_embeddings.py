@@ -197,6 +197,35 @@ def keyframe_row(store, media_row):
     return (media_row, 0, 0)
 
 
+def test_keyframe_metadata_without_detection_preserves_existing_tags(store, keyframe_row):
+    video_id, shot_index, kf_index = keyframe_row
+    store.add_keyframes(video_id, [{
+        "shot_index": shot_index, "kf_index": kf_index,
+        "timestamp": 1.5, "shot_start": 0.0, "shot_end": 3.0,
+        "tags": ["cat"],
+    }])
+    store.add_keyframes(video_id, [{
+        "shot_index": shot_index, "kf_index": kf_index,
+        "timestamp": 1.5, "shot_start": 0.0, "shot_end": 3.0,
+        "tags": None,
+    }])
+    row = store.conn.execute(
+        "SELECT tags FROM video_keyframes WHERE video_id=?", (video_id,)
+    ).fetchone()
+    assert row[0] == '["cat"]'
+
+    # An actual detector run returning zero labels can still clear stale labels.
+    store.add_keyframes(video_id, [{
+        "shot_index": shot_index, "kf_index": kf_index,
+        "timestamp": 1.5, "shot_start": 0.0, "shot_end": 3.0,
+        "tags": [],
+    }])
+    row = store.conn.execute(
+        "SELECT tags FROM video_keyframes WHERE video_id=?", (video_id,)
+    ).fetchone()
+    assert row[0] == "[]"
+
+
 def test_get_keyframe_id_resolves_natural_key(store, keyframe_row):
     video_id, shot_index, kf_index = keyframe_row
     kf_id = store.get_keyframe_id(video_id, shot_index, kf_index)

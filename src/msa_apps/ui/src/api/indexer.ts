@@ -62,11 +62,18 @@ export interface BrowseResult {
 
 export type ProcessingOrder = 'default' | 'fastest' | 'newest' | 'oldest'
 
-export async function startIndexer(processingOrder: ProcessingOrder = 'default'): Promise<void> {
+export async function startIndexer(
+  processingOrder: ProcessingOrder = 'default',
+  objectDetectionEnabled?: boolean,
+): Promise<void> {
+  const body: { processing_order: ProcessingOrder; object_detection_enabled?: boolean } = {
+    processing_order: processingOrder,
+  }
+  if (objectDetectionEnabled !== undefined) body.object_detection_enabled = objectDetectionEnabled
   const res = await fetch(apiUrl('/indexer/start'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ processing_order: processingOrder }),
+    body: JSON.stringify(body),
   })
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: res.statusText }))
@@ -166,6 +173,7 @@ export interface ModelConfig {
   readonly: ModelConfigReadonly
   editable: ModelConfigEditable
   defaults: ModelConfigEditable
+  effective: { object_detection_enabled: boolean }
 }
 
 export async function getModelConfig(): Promise<ModelConfig> {

@@ -218,6 +218,9 @@ class _FakeSQLiteStoreNeedsProcessing(_FingerprintNoOpsMixin):
     def add_faces(self, _media_id, _faces):
         self._writes += 1
 
+    def add_tags(self, _media_id, _tags):
+        self._writes += 1
+
     def add_keyframes(self, _video_id, _entries):
         self._writes += 1
 
@@ -349,6 +352,58 @@ def test_processing_order_and_bad_image_do_not_stop_later_items(tmp_path, monkey
     assert complete["processing_order"] == "newest"
     assert complete["total_found"] == 3
     assert embedding_calls == [1]
+
+
+def test_per_run_override_enables_image_detection_without_config_change(tmp_path, monkeypatch):
+    from msa_indexer import pipeline
+
+    image_path = tmp_path / "image.jpg"
+    Image.new("RGB", (8, 8), color="white").save(image_path)
+    detected = []
+
+    class _FakeObjectDetector:
+        def __init__(self, **_kwargs):
+            pass
+
+        def get_labels(self, _image):
+            detected.append(True)
+            return ["cat"]
+
+    monkeypatch.setattr(pipeline, "resolve_for_access", lambda p: p)
+    _patch_walk(monkeypatch, pipeline, [image_path])
+    monkeypatch.setattr(pipeline, "sha256_of_file", lambda _p: "image-id")
+    monkeypatch.setattr(pipeline, "get_exif_basic", lambda _p: {})
+    monkeypatch.setattr(pipeline, "write_thumbnail", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(pipeline, "SQLiteStore", _FakeSQLiteStoreNeedsProcessing)
+    monkeypatch.setattr(pipeline, "ClipEmbedder", _FakeClipEmbedderWithVectors)
+    monkeypatch.setattr(pipeline, "ObjectDetector", _FakeObjectDetector)
+    monkeypatch.setattr(pipeline, "_load_historical_perf", lambda _p: (1.0, 30.0, 5.0))
+    monkeypatch.setattr(pipeline, "_emit_indexer_summary", lambda **_payload: None)
+    monkeypatch.setattr(pipeline, "get_qdrant_export_version", lambda: None)
+    monkeypatch.setattr(pipeline, "record_qdrant_export_version", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(pipeline, "_do_qdrant_export", lambda *_args, **_kwargs: None)
+
+    config = SimpleNamespace(
+        sqlite_path=str(tmp_path / "test.db"),
+        faiss_path=tmp_path / "test.faiss",
+        face_faiss_path=tmp_path / "test-face.faiss",
+        thumb_dir=tmp_path / "thumbs",
+        face_thumb_dir=tmp_path / "face-thumbs",
+        log_dir=tmp_path / "logs",
+        model_name="ViT-L-14",
+        pretrained="openai",
+        model_version="test-v1",
+        device="cpu",
+        enable_object_detection=False,
+        object_detection_override=True,
+        enable_face_recognition=False,
+        media_sources=[SimpleNamespace(name="photos", path=str(tmp_path), enabled=True)],
+    )
+
+    pipeline.run_index(config)
+
+    assert detected == [True]
+    assert config.enable_object_detection is False
 
 
 def test_complete_summary_counts_up_to_date_videos(tmp_path, monkeypatch):
@@ -806,3 +861,91 @@ def test_disabled_shot_detection_uses_synthetic_full_video_fallback(tmp_path, mo
             (media_id,),
         ).fetchone()
     assert shot == (0.0, 5.0, 1)
+
+
+def test_video_detection_override_avoids_repeat_embedding_and_preserves_tags(tmp_path, monkeypatch):
+    import json
+    import sqlite3
+
+    from msa_indexer import pipeline
+
+    source = tmp_path / "videos"
+    source.mkdir()
+    video = source / "clip.mp4"
+    video.write_bytes(b"video fixture")
+    db_path = tmp_path / "index.sqlite"
+    embed_calls = []
+    detector_calls = []
+
+    class _Embedder:
+        dim = 768
+
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def image_embed(self, images):
+            embed_calls.extend(images)
+            return [np.zeros(self.dim, dtype=np.float32) for _ in images]
+
+    class _Detector:
+        def __init__(self, **_kwargs):
+            pass
+
+        def get_labels(self, _image):
+            detector_calls.append(True)
+            return ["dog"]
+
+    monkeypatch.setattr(pipeline, "ClipEmbedder", _Embedder)
+    monkeypatch.setattr(pipeline, "ObjectDetector", _Detector)
+    monkeypatch.setattr(pipeline, "get_video_meta", lambda *_args, **_kwargs: {"duration": 5.0})
+    monkeypatch.setattr(pipeline, "write_video_thumbnail", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        pipeline, "extract_keyframes_from_shot",
+        lambda *_args, **_kwargs: [(0.5, Image.new("RGB", (8, 8), color="white"))],
+    )
+    monkeypatch.setattr(pipeline, "_load_historical_perf", lambda _path: (0.0, 0.0, 0.0))
+    monkeypatch.setattr(pipeline, "_emit_indexer_summary", lambda **_payload: None)
+    monkeypatch.setattr(pipeline, "get_qdrant_export_version", lambda: None)
+    monkeypatch.setattr(pipeline, "record_qdrant_export_version", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(pipeline, "_do_qdrant_export", lambda *_args, **_kwargs: None)
+
+    config = SimpleNamespace(
+        sqlite_path=str(db_path),
+        faiss_path=tmp_path / "vectors.faiss",
+        face_faiss_path=tmp_path / "faces.faiss",
+        thumb_dir=tmp_path / "thumbnails",
+        face_thumb_dir=tmp_path / "face-thumbnails",
+        log_dir=tmp_path / "logs",
+        model_name="ViT-L-14",
+        pretrained="openai",
+        model_version="test-v1",
+        device="cpu",
+        enable_object_detection=False,
+        enable_video_object_detection=False,
+        enable_face_recognition=False,
+        enable_video_shot_detection=False,
+        keyframes_per_shot=1,
+        incremental=SimpleNamespace(fingerprint_enabled=False, deletion_sweep=False),
+        media_sources=[SimpleNamespace(name="videos", path=str(source), enabled=True)],
+    )
+
+    pipeline.run_index(config)  # Initial indexing creates the keyframe embedding.
+    assert len(embed_calls) == 1
+    assert detector_calls == []
+
+    config.object_detection_override = True
+    pipeline.run_index(config)  # Detect on the existing keyframe, without embedding again.
+    assert len(embed_calls) == 1
+    assert len(detector_calls) == 1
+    assert config.enable_object_detection is False
+    assert config.enable_video_object_detection is False
+
+    config.object_detection_override = False
+    config.reprocess_embeddings = True  # Force unrelated visual work while detection is off.
+    pipeline.run_index(config)
+    assert len(embed_calls) == 2
+    assert len(detector_calls) == 1
+
+    with sqlite3.connect(db_path) as conn:
+        tags = conn.execute("SELECT tags FROM video_keyframes").fetchone()[0]
+    assert json.loads(tags) == ["dog"]

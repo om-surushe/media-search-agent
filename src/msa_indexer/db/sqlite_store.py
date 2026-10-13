@@ -1718,7 +1718,8 @@ class SQLiteStore:
             return
         import json
         for e in entries:
-            tags_json = json.dumps(e.get("tags", [])) if e.get("tags") else None
+            tags = e.get("tags")
+            tags_json = json.dumps(tags) if tags is not None else None
             self.conn.execute(
                 """
                 INSERT INTO video_keyframes(
@@ -1730,7 +1731,7 @@ class SQLiteStore:
                   timestamp=excluded.timestamp,
                   shot_start=excluded.shot_start,
                   shot_end=excluded.shot_end,
-                  tags=excluded.tags,
+                  tags=COALESCE(excluded.tags, video_keyframes.tags),
                   gps_lat=excluded.gps_lat,
                   gps_lon=excluded.gps_lon,
                   gps_alt=excluded.gps_alt,
