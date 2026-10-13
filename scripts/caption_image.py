@@ -4,18 +4,23 @@ from __future__ import annotations
 
 import argparse
 import gc
+import hashlib
 import importlib.metadata
 import json
 import os
 import re
 import resource
+import sqlite3
 import subprocess
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Protocol
 
 MODEL_ID = "mlx-community/SmolVLM2-500M-Video-Instruct-mlx"
+PROMPT_VERSION = "stage4a2-caption-v1"
+SQLITE_HEADER = b"SQLite format 3\x00"
 PROMPT = (
     "Write a detailed factual caption in 2–3 sentences and at least 30 words. "
     "Describe the main subject's visible appearance and posture, visible action, "
@@ -97,6 +102,40 @@ class SmolVLM2Provider:
         return self._mx.get_active_memory()
 
 
+def _open_caption_store(database_path: Path, media_id: str, image_path: Path):
+    """Open an existing DB only and ensure the image matches its indexed ID."""
+    src = Path(__file__).resolve().parents[1] / "src"
+    if str(src) not in sys.path:
+        sys.path.insert(0, str(src))
+    from msa_indexer.db.sqlite_store import SQLiteStore
+
+    if not SQLiteStore.is_valid_media_id(media_id):
+        raise ValueError("Invalid media_id; expected SHA-256 hex or canonical UUID")
+    db_path = database_path.expanduser().resolve(strict=True)
+    if not db_path.is_file():
+        raise ValueError(f"Database path is not a file: {db_path}")
+    with db_path.open("rb") as db_file:
+        if db_file.read(16) != SQLITE_HEADER:
+            raise ValueError(f"Not an existing SQLite database: {db_path}")
+
+    store = SQLiteStore(db_path, create_if_missing=False)
+    try:
+        media = store.get_image_caption_media(media_id)
+        if media is None:
+            raise ValueError(f"No live indexed image for media_id: {media_id}")
+        if len(media_id) == 64:
+            with image_path.open("rb") as image_file:
+                image_hash = hashlib.file_digest(image_file, "sha256").hexdigest()
+            if image_hash != media_id.lower():
+                raise ValueError("Image content does not match the SHA-256 media_id")
+        elif Path(media["path"]).expanduser().resolve() != image_path:
+            raise ValueError("UUID media_id requires the exact indexed image path")
+        return store
+    except Exception:
+        store.close()
+        raise
+
+
 def _rss_bytes() -> int | None:
     try:
         result = subprocess.run(
@@ -135,6 +174,8 @@ def main() -> int:
     parser.add_argument("image", type=Path, help="local image file (use a disposable copy)")
     parser.add_argument("--cache-dir", type=Path, required=True, help="local Hugging Face cache directory")
     parser.add_argument("--max-tokens", type=int, default=160)
+    parser.add_argument("--database", type=Path, help="existing SQLite DB; enables caption persistence")
+    parser.add_argument("--media-id", help="existing indexed image ID; requires --database")
     args = parser.parse_args()
 
     image_path = args.image.expanduser().resolve(strict=True)
@@ -143,28 +184,44 @@ def main() -> int:
         parser.error("image must be a file and --cache-dir must be a local directory")
     if args.max_tokens < 1:
         parser.error("--max-tokens must be positive")
+    if (args.database is None) != (args.media_id is None):
+        parser.error("--database and --media-id must be supplied together")
 
-    os.environ["HF_HUB_OFFLINE"] = "1"
-    os.environ["TRANSFORMERS_OFFLINE"] = "1"
-    os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
-    from huggingface_hub import snapshot_download
-    model_path = Path(snapshot_download(
-        MODEL_ID, cache_dir=str(cache_dir), local_files_only=True
-    ))
+    caption_store = None
+    if args.database is not None:
+        try:
+            caption_store = _open_caption_store(args.database, args.media_id, image_path)
+        except (OSError, sqlite3.Error, ValueError) as exc:
+            parser.error(f"caption persistence target rejected: {exc}")
 
-    from PIL import Image
+    try:
+        os.environ["HF_HUB_OFFLINE"] = "1"
+        os.environ["TRANSFORMERS_OFFLINE"] = "1"
+        os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
+        from huggingface_hub import snapshot_download
+        model_path = Path(snapshot_download(
+            MODEL_ID, cache_dir=str(cache_dir), local_files_only=True
+        ))
 
-    with Image.open(image_path) as image:
-        image.verify()
+        from PIL import Image
 
-    process_start_rss = _rss_bytes()
-    system_free_before = _system_free_bytes()
+        with Image.open(image_path) as image:
+            image.verify()
+
+        process_start_rss = _rss_bytes()
+        system_free_before = _system_free_bytes()
+    except BaseException:
+        if caption_store is not None:
+            caption_store.close()
+        raise
+
     provider: CaptionProvider | None = None
     try:
         provider = SmolVLM2Provider(model_path)
         process_after_load = _rss_bytes()
         system_free_after_load = _system_free_bytes()
         caption = provider.caption(image_path, args.max_tokens)
+        generated_at_utc = datetime.now(timezone.utc).isoformat()
         process_after_generation = _rss_bytes()
         system_free_after_generation = _system_free_bytes()
 
@@ -186,11 +243,29 @@ def main() -> int:
         print("Metal peak (load / generation): "
               f"{_mib(provider.metal_peak_load_bytes)} / "
               f"{_mib(provider.metal_peak_generation_bytes)}")
+        if caption_store is not None:
+            schema_path = Path(__file__).resolve().parents[1] / "src/msa_indexer/db/schema.sql"
+            caption_store.init_schema_no_migrations(schema_path)
+            caption_store.store_image_caption(
+                args.media_id,
+                caption=caption,
+                model_id=MODEL_ID,
+                prompt_version=PROMPT_VERSION,
+                generated_at_utc=generated_at_utc,
+            )
+            stored = caption_store.get_image_caption(
+                args.media_id, MODEL_ID, PROMPT_VERSION
+            )
+            if stored is None or stored["caption"] != caption:
+                raise RuntimeError("Caption write could not be verified")
+            print(f"Persisted: {stored}")
         return 0
     finally:
         if provider is not None:
             provider.close()
             print(f"Metal active after release: {_mib(provider.active_metal_memory_bytes())}")
+        if caption_store is not None:
+            caption_store.close()
 
 
 if __name__ == "__main__":

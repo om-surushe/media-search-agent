@@ -1,0 +1,239 @@
+from __future__ import annotations
+
+import hashlib
+import importlib.util
+import sqlite3
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+import pytest
+
+from msa_indexer.db.sqlite_store import SQLiteStore
+
+SCHEMA_PATH = Path(__file__).resolve().parents[1] / "src/msa_indexer/db/schema.sql"
+SCRIPT_PATH = Path(__file__).resolve().parents[1] / "scripts/caption_image.py"
+
+
+@pytest.fixture
+def store(tmp_path):
+    db_path = tmp_path / "media.sqlite"
+    db = SQLiteStore(db_path)
+    db.init_schema_no_migrations(SCHEMA_PATH)
+    yield db
+    db.close()
+
+
+def add_image(store, tmp_path, data=b"copied image"):
+    image_path = tmp_path / "image.jpg"
+    image_path.write_bytes(data)
+    media_id = hashlib.sha256(data).hexdigest()
+    store.upsert_media({
+        "media_id": media_id,
+        "path": str(image_path),
+        "source_name": "caption-test",
+        "rel_path": image_path.name,
+        "size_bytes": len(data),
+        "mime": "image/jpeg",
+    })
+    return image_path, media_id
+
+
+def import_caption_script():
+    spec = importlib.util.spec_from_file_location("caption_image_poc", SCRIPT_PATH)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_caption_upsert_is_idempotent_and_models_coexist(store, tmp_path):
+    _, media_id = add_image(store, tmp_path)
+    ts1 = "2026-10-14T10:00:00+00:00"
+    ts2 = "2026-10-14T10:01:00+00:00"
+    store.store_image_caption(
+        media_id, caption="First caption", model_id="mlx/model-a",
+        prompt_version="caption-v1", generated_at_utc=ts1,
+    )
+    store.store_image_caption(
+        media_id, caption="Regenerated caption", model_id="mlx/model-a",
+        prompt_version="caption-v1", generated_at_utc=ts2,
+    )
+    store.store_image_caption(
+        media_id, caption="Other model caption", model_id="mlx/model-b",
+        prompt_version="caption-v1", generated_at_utc=ts2,
+    )
+
+    first = store.get_image_caption(media_id, "mlx/model-a", "caption-v1")
+    second = store.get_image_caption(media_id, "mlx/model-b", "caption-v1")
+    count = store.conn.execute(
+        "SELECT COUNT(*) FROM image_caption WHERE media_id = ?", (media_id,)
+    ).fetchone()[0]
+    assert first == {
+        "media_id": media_id,
+        "caption": "Regenerated caption",
+        "model_id": "mlx/model-a",
+        "prompt_version": "caption-v1",
+        "generated_at_utc": ts2,
+        "status": "completed",
+    }
+    assert second["caption"] == "Other model caption"
+    assert second["model_id"] == "mlx/model-b"
+    assert count == 2
+
+
+def test_caption_requires_valid_live_image_and_timestamp(store, tmp_path):
+    _, media_id = add_image(store, tmp_path)
+    args = {
+        "caption": "A visible scene.", "model_id": "mlx/model",
+        "prompt_version": "caption-v1",
+        "generated_at_utc": datetime.now(timezone.utc).isoformat(),
+    }
+    for invalid in ("bad-id", "../escape", " "):
+        with pytest.raises(ValueError):
+            store.store_image_caption(invalid, **args)
+    with pytest.raises(ValueError, match="No live indexed image"):
+        store.store_image_caption("a" * 64, **args)
+    with pytest.raises(ValueError, match="timezone"):
+        store.store_image_caption(
+            media_id, **{**args, "generated_at_utc": "2026-10-14T10:00:00"}
+        )
+    assert store.conn.execute("SELECT COUNT(*) FROM image_caption").fetchone()[0] == 0
+
+    video_id = hashlib.sha256(b"video").hexdigest()
+    store.upsert_media({
+        "media_id": video_id, "path": str(tmp_path / "clip.mp4"),
+        "source_name": "caption-test", "rel_path": "clip.mp4",
+        "size_bytes": 5, "mime": "video/mp4",
+    })
+    with pytest.raises(ValueError, match="not an indexed image"):
+        store.store_image_caption(video_id, **args)
+    assert store.conn.execute("SELECT COUNT(*) FROM image_caption").fetchone()[0] == 0
+
+
+def test_failed_upsert_preserves_existing_caption_and_metadata(store, tmp_path):
+    image_path, media_id = add_image(store, tmp_path)
+    store.store_image_caption(
+        media_id, caption="Keep me", model_id="mlx/model",
+        prompt_version="caption-v1", generated_at_utc="2026-10-14T10:00:00+00:00",
+    )
+    store.conn.execute(
+        """CREATE TRIGGER reject_caption BEFORE INSERT ON image_caption
+           WHEN NEW.model_id = 'mlx/fail'
+           BEGIN SELECT RAISE(ABORT, 'injected persistence failure'); END"""
+    )
+    with pytest.raises(sqlite3.IntegrityError, match="injected persistence failure"):
+        store.store_image_caption(
+            media_id, caption="Should not persist", model_id="mlx/fail",
+            prompt_version="caption-v1", generated_at_utc="2026-10-14T10:01:00+00:00",
+        )
+    assert store.get_image_caption(media_id, "mlx/model", "caption-v1")["caption"] == "Keep me"
+    assert store.conn.execute("SELECT COUNT(*) FROM image_caption").fetchone()[0] == 1
+    assert store.conn.execute("SELECT path FROM media WHERE media_id=?", (media_id,)).fetchone()[0] == str(image_path)
+
+
+def test_existing_db_migration_only_adds_caption_table(store, tmp_path):
+    _, media_id = add_image(store, tmp_path)
+    store.upsert_image_embedding(media_id, [0.25, 0.75], model="clip-v1")
+    store.store_transcript(
+        media_id, model_name="whisper-test", model_revision="r1",
+        runtime_version="test", status="transcribed", language="en",
+        segments=[{"start": 0.0, "end": 1.0, "text": "existing transcript"}],
+    )
+    store.set_pipeline_status(media_id, "object_detection", "completed", model_name="detector")
+    store.conn.execute("DROP TABLE image_caption")
+    store.commit()
+
+    store.init_schema_no_migrations(SCHEMA_PATH)
+
+    assert store.conn.execute("SELECT object_detection_done FROM media WHERE media_id=?", (media_id,)).fetchone()[0] == 1
+    assert store.conn.execute("SELECT embedding_model FROM image_embedding WHERE media_id=?", (media_id,)).fetchone()[0] == "clip-v1"
+    assert store.conn.execute("SELECT text FROM transcript_segment WHERE media_id=?", (media_id,)).fetchone()[0] == "existing transcript"
+    assert store.conn.execute("SELECT COUNT(*) FROM image_caption").fetchone()[0] == 0
+
+
+def test_persistence_helper_rejects_missing_or_wrong_database_and_mismatched_image(store, tmp_path):
+    image_path, media_id = add_image(store, tmp_path)
+    script = import_caption_script()
+
+    missing = tmp_path / "must-not-be-created.sqlite"
+    with pytest.raises(FileNotFoundError):
+        script._open_caption_store(missing, media_id, image_path)
+    assert not missing.exists()
+
+    invalid_db = tmp_path / "not-sqlite.db"
+    invalid_db.write_bytes(b"do not modify")
+    with pytest.raises(ValueError, match="Not an existing SQLite database"):
+        script._open_caption_store(invalid_db, media_id, image_path)
+    assert invalid_db.read_bytes() == b"do not modify"
+
+    with pytest.raises(ValueError, match="Invalid media_id"):
+        script._open_caption_store(store.path, "not-a-media-id", image_path)
+
+    other_image = tmp_path / "different.jpg"
+    other_image.write_bytes(b"different image")
+    with pytest.raises(ValueError, match="does not match"):
+        script._open_caption_store(store.path, media_id, other_image)
+    assert store.conn.execute("SELECT COUNT(*) FROM image_caption").fetchone()[0] == 0
+
+
+def test_script_remains_print_only_without_persistence_options(tmp_path, monkeypatch, capsys):
+    from PIL import Image
+    import huggingface_hub
+
+    image = tmp_path / "image.jpg"
+    Image.new("RGB", (2, 2), "white").save(image)
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    script = import_caption_script()
+    seen = {}
+
+    def resolve_model(model_id, **kwargs):
+        seen.update(model_id=model_id, **kwargs)
+        return str(cache / "snapshot")
+
+    class FakeProvider:
+        model_load_seconds = 0.1
+        generation_seconds = 0.2
+        metal_peak_load_bytes = 0
+        metal_active_after_load_bytes = 0
+        metal_peak_generation_bytes = 0
+        metal_active_after_generation_bytes = 0
+        closed = []
+
+        def __init__(self, _path):
+            pass
+
+        def caption(self, _image, _max_tokens):
+            return "A test caption."
+
+        def close(self):
+            type(self).closed.append(True)
+
+        def active_metal_memory_bytes(self):
+            return 0
+
+    provider = FakeProvider
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", resolve_model)
+    monkeypatch.setattr(script, "SmolVLM2Provider", provider)
+    monkeypatch.setattr(script.importlib.metadata, "version", lambda _name: "test-version")
+    monkeypatch.setattr(script, "_rss_bytes", lambda: None)
+    monkeypatch.setattr(script, "_system_free_bytes", lambda: None)
+    monkeypatch.setattr(script, "_peak_rss_bytes", lambda: 0)
+    monkeypatch.setattr(sys, "argv", [
+        "caption_image.py", str(image), "--cache-dir", str(cache),
+    ])
+
+    assert script.main() == 0
+    output = capsys.readouterr().out
+    assert "Caption: A test caption." in output
+    assert "Persisted:" not in output
+    assert seen["model_id"] == script.MODEL_ID
+    assert seen["local_files_only"] is True
+    assert FakeProvider.closed == [True]
+
+
+def test_safe_store_open_does_not_create_missing_database(tmp_path):
+    missing = tmp_path / "missing.sqlite"
+    with pytest.raises(FileNotFoundError):
+        SQLiteStore(missing, create_if_missing=False)
+    assert not missing.exists()

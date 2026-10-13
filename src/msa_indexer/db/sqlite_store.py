@@ -1,4 +1,5 @@
 from pathlib import Path
+import mimetypes
 import sqlite3
 from typing import Iterable, Any, Dict, Mapping, Optional, List, Sequence
 import uuid
@@ -78,8 +79,18 @@ _MEDIA_PAYLOAD_FIELDS = frozenset(
 
 
 class SQLiteStore:
-    def __init__(self, path: Path, autocommit: bool = True):
-        self.path = path
+    def __init__(self, path: Path, autocommit: bool = True, *, create_if_missing: bool = True):
+        path = Path(path).expanduser()
+        if create_if_missing:
+            self.path = path
+            self.conn = sqlite3.connect(str(path), timeout=30.0)
+        else:
+            self.path = path.resolve(strict=True)
+            if not self.path.is_file():
+                raise ValueError(f"SQLite database path is not a file: {self.path}")
+            self.conn = sqlite3.connect(
+                f"{self.path.as_uri()}?mode=rw", uri=True, timeout=30.0
+            )
         # timeout (busy wait) raised from the sqlite3 default of 5s: the API's
         # §4 payload-write guard (M-8/S-2) holds its deferred-commit write
         # transaction across the Qdrant payload sync — bounded but multi-second
@@ -88,7 +99,6 @@ class SQLiteStore:
         # WAL keeps readers unaffected; this only changes behavior under
         # writer-writer contention, where waiting is strictly more robust
         # than failing.
-        self.conn = sqlite3.connect(str(path), timeout=30.0)
         self.conn.execute("PRAGMA foreign_keys=ON")
         # synchronous=NORMAL is the appropriate companion to journal_mode=WAL
         # for a single-host workload — it keeps fsync only at WAL checkpoints
@@ -862,6 +872,34 @@ class SQLiteStore:
         result = self.conn.execute("SELECT 1 FROM media WHERE media_id = ? LIMIT 1", (media_id,)).fetchone()
         return result is not None
     
+    @staticmethod
+    def is_valid_media_id(media_id: str) -> bool:
+        """Accept the SHA-256 and canonical UUID identifiers used by media rows."""
+        if not isinstance(media_id, str) or media_id != media_id.strip():
+            return False
+        if len(media_id) == 64 and all(c in "0123456789abcdefABCDEF" for c in media_id):
+            return True
+        try:
+            return str(uuid.UUID(media_id)) == media_id.lower()
+        except (ValueError, AttributeError):
+            return False
+
+    def get_image_caption_media(self, media_id: str) -> dict | None:
+        """Return a live indexed image's path and MIME type, or None if absent."""
+        if not self.is_valid_media_id(media_id):
+            raise ValueError("Invalid media_id; expected SHA-256 hex or canonical UUID")
+        row = self.conn.execute(
+            "SELECT path, mime FROM media WHERE media_id = ? AND deleted = 0",
+            (media_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        path, mime = row
+        media_type = (mime or mimetypes.guess_type(path)[0] or "").split(";", 1)[0].lower()
+        if not media_type.startswith("image/"):
+            raise ValueError(f"media_id is not an indexed image: {media_id}")
+        return {"path": path, "mime": mime}
+
     def get_processing_status(self, media_id: str) -> dict:
         """Get feature-processing status for a media item; empty if missing."""
         result = self.conn.execute(
@@ -929,6 +967,76 @@ class SQLiteStore:
             self.conn.execute("RELEASE SAVEPOINT store_transcript")
             raise
         self._maybe_commit()
+
+    def store_image_caption(
+        self,
+        media_id: str,
+        *,
+        caption: str,
+        model_id: str,
+        prompt_version: str,
+        generated_at_utc: str,
+    ) -> None:
+        """Replace one image/model/prompt caption variant atomically."""
+        if self.get_image_caption_media(media_id) is None:
+            raise ValueError(f"No live indexed image for media_id: {media_id}")
+        if not isinstance(caption, str) or not caption.strip():
+            raise ValueError("caption must be non-empty text")
+        if not isinstance(model_id, str) or not model_id.strip():
+            raise ValueError("model_id must be non-empty text")
+        if not isinstance(prompt_version, str) or not prompt_version.strip():
+            raise ValueError("prompt_version must be non-empty text")
+        if not isinstance(generated_at_utc, str):
+            raise ValueError("generated_at_utc must be an ISO-8601 timestamp")
+        try:
+            generated_at = datetime.fromisoformat(
+                generated_at_utc.replace("Z", "+00:00")
+            )
+        except ValueError as exc:
+            raise ValueError("generated_at_utc must be an ISO-8601 timestamp") from exc
+        if generated_at.tzinfo is None:
+            raise ValueError("generated_at_utc must include a timezone")
+        generated_at_utc = generated_at.astimezone(timezone.utc).isoformat()
+
+        self.conn.execute("SAVEPOINT store_image_caption")
+        try:
+            self.conn.execute(
+                """INSERT INTO image_caption(
+                       media_id, caption, model_id, prompt_version,
+                       generated_at_utc, status
+                   ) VALUES (?, ?, ?, ?, ?, 'completed')
+                   ON CONFLICT(media_id, model_id, prompt_version) DO UPDATE SET
+                       caption=excluded.caption,
+                       generated_at_utc=excluded.generated_at_utc,
+                       status=excluded.status""",
+                (media_id, caption.strip(), model_id, prompt_version, generated_at_utc),
+            )
+            self.conn.execute("RELEASE SAVEPOINT store_image_caption")
+        except Exception:
+            self.conn.execute("ROLLBACK TO SAVEPOINT store_image_caption")
+            self.conn.execute("RELEASE SAVEPOINT store_image_caption")
+            raise
+        self._maybe_commit()
+
+    def get_image_caption(
+        self, media_id: str, model_id: str, prompt_version: str
+    ) -> dict | None:
+        """Read one stored image caption variant."""
+        if not self.is_valid_media_id(media_id):
+            raise ValueError("Invalid media_id; expected SHA-256 hex or canonical UUID")
+        row = self.conn.execute(
+            """SELECT media_id, caption, model_id, prompt_version,
+                      generated_at_utc, status
+               FROM image_caption
+               WHERE media_id = ? AND model_id = ? AND prompt_version = ?""",
+            (media_id, model_id, prompt_version),
+        ).fetchone()
+        if row is None:
+            return None
+        return dict(zip(
+            ("media_id", "caption", "model_id", "prompt_version", "generated_at_utc", "status"),
+            row,
+        ))
 
     def mark_transcription_failed(
         self, media_id: str, *, model_name: str, model_revision: str,

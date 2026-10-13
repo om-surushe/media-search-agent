@@ -254,6 +254,19 @@ CREATE TABLE IF NOT EXISTS transcript_segment (
 CREATE INDEX IF NOT EXISTS idx_transcript_segment_media_time
   ON transcript_segment(media_id, t_start);
 
+-- One current caption per image/model/prompt version; regeneration replaces
+-- only that variant while captions from other models remain available.
+CREATE TABLE IF NOT EXISTS image_caption (
+  media_id TEXT NOT NULL,
+  caption TEXT NOT NULL CHECK (length(trim(caption)) > 0),
+  model_id TEXT NOT NULL,
+  prompt_version TEXT NOT NULL,
+  generated_at_utc TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('completed', 'failed')),
+  PRIMARY KEY (media_id, model_id, prompt_version),
+  FOREIGN KEY (media_id) REFERENCES media(media_id) ON DELETE CASCADE
+);
+
 CREATE VIRTUAL TABLE IF NOT EXISTS transcript_segment_fts USING fts5(
   text,
   content='transcript_segment',
