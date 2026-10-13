@@ -11,7 +11,8 @@ export interface IndexerStatus {
 }
 
 export interface IndexerRunSummary {
-  phase?: 'counting' | 'analyzing' | 'processing' | 'exporting' | 'complete'
+  phase?: 'counting' | 'analyzing' | 'processing' | 'exporting' | 'complete' | 'commit_stats'
+  processing_order?: ProcessingOrder
   total_found?: number
   already_indexed?: number
   needs_processing?: number
@@ -59,8 +60,14 @@ export interface BrowseResult {
   entries: BrowseEntry[]
 }
 
-export async function startIndexer(): Promise<void> {
-  const res = await fetch(apiUrl('/indexer/start'), { method: 'POST' })
+export type ProcessingOrder = 'default' | 'fastest' | 'newest' | 'oldest'
+
+export async function startIndexer(processingOrder: ProcessingOrder = 'default'): Promise<void> {
+  const res = await fetch(apiUrl('/indexer/start'), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ processing_order: processingOrder }),
+  })
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: res.statusText }))
     throw new Error(err.detail ?? 'Failed to start indexer')

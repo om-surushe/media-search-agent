@@ -52,6 +52,12 @@ Examples:
                      help="Path to media to index (CLI override; skips media_sources in config)")
     run.add_argument("--config", required=False, default=None,
                      help="YAML config file (default: ./config.yaml)")
+    run.add_argument(
+        "--processing-order",
+        choices=("default", "fastest", "newest", "oldest"),
+        default="default",
+        help="Media-item order: default, fastest, newest, or oldest",
+    )
     run.add_argument("--export-to-qdrant", action="store_true",
                      help="Force export to Qdrant after indexing, even if nothing changed")
     run.add_argument("--log-level",
@@ -207,6 +213,7 @@ def handle(args: argparse.Namespace) -> None:
             cli_params.append("image_only=true")
         if getattr(args, "video_only", False):
             cli_params.append("video_only=true")
+        cli_params.append(f"processing_order={getattr(args, 'processing_order', 'default')}")
         reprocess_flags = [
             flag for flag, attr in [
                 ("gps", "reprocess_gps"), ("objects", "reprocess_objects"),
@@ -240,6 +247,7 @@ def handle(args: argparse.Namespace) -> None:
         cfg.export_to_qdrant = getattr(args, "export_to_qdrant", False)
         cfg.image_only = getattr(args, "image_only", False)
         cfg.video_only = getattr(args, "video_only", False)
+        cfg.processing_order = getattr(args, "processing_order", "default")
         # CLI-only reconcile mode (like the reprocess flags): hash every file
         # this run, repairing fingerprint state — the safety net for the
         # size+mtime blind spot (M-8 plan §3.4).

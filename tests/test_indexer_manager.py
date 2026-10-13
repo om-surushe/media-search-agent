@@ -21,6 +21,9 @@ def test_start_does_not_force_export_to_qdrant(tmp_path, monkeypatch):
     log_dir = tmp_path / "logs"
     config_path = tmp_path / "config.yaml"
     config_path.write_text("media_sources: []\n")
+    venv_bin = tmp_path / ".venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    (venv_bin / ("msa.exe" if sys.platform == "win32" else "msa")).touch()
 
     fake_thread = MagicMock()
     fake_thread.start = MagicMock()
@@ -31,19 +34,48 @@ def test_start_does_not_force_export_to_qdrant(tmp_path, monkeypatch):
          patch("msa_query.storage.qdrant_client.close_shared_client"), \
          patch("subprocess.Popen", return_value=fake_proc) as mock_popen, \
          patch("threading.Thread", return_value=fake_thread):
-        result = manager.start(str(config_path), str(tmp_path / ".venv" / "bin"))
+        result = manager.start(
+            str(config_path), str(venv_bin), processing_order="fastest"
+        )
 
     cmd = mock_popen.call_args.args[0]
 
     assert result["status"] == "running"
     assert "--export-to-qdrant" not in cmd
+    assert cmd[cmd.index("--processing-order") + 1] == "fastest"
     assert cmd[-1] == "--no-console-log"
     script_name = "msa.exe" if sys.platform == "win32" else "msa"
     assert cmd[:4] == [
-        str(Path(tmp_path / ".venv" / "bin") / script_name),
+        str(venv_bin / script_name),
         "index",
         "run",
         "--config",
+    ]
+
+
+def test_start_uses_python_module_when_msa_entrypoint_is_missing(tmp_path, monkeypatch):
+    from msa_apps.search_api import indexer_manager as mod
+
+    monkeypatch.setattr(mod.IndexerManager, "_restore_from_pid_file", lambda self: None)
+    monkeypatch.setattr(mod.IndexerManager, "_handoff_watcher_loop", lambda self: None, raising=False)
+    _isolate_run_dir(monkeypatch, tmp_path)
+    manager = mod.IndexerManager()
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("media_sources: []\n")
+    fake_proc = MagicMock(pid=12345)
+    fake_thread = MagicMock()
+    fake_thread.start = MagicMock()
+
+    with (
+        patch("msa_settings.load_config", return_value=SimpleNamespace(log_dir=tmp_path / "logs")),
+        patch("msa_query.storage.qdrant_client.close_shared_client"),
+        patch("subprocess.Popen", return_value=fake_proc) as mock_popen,
+        patch("threading.Thread", return_value=fake_thread),
+    ):
+        manager.start(str(config_path), str(tmp_path / "missing-bin"))
+
+    assert mock_popen.call_args.args[0][:4] == [
+        sys.executable, "-c", "from msa_cli.cli import main; main()", "index"
     ]
 
 

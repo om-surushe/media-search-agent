@@ -4,6 +4,7 @@ import { Play, Square, ChevronDown, ChevronUp, Image, Film, User, Users, Maximiz
 import {
   startIndexer, stopIndexer, getIndexStats, getSources,
 } from '../api/indexer'
+import type { ProcessingOrder } from '../api/indexer'
 import { useIndexerWS } from '../hooks/useIndexerStatus'
 import { MediaSourcesPanel } from '../components/MediaSourcesPanel'
 import { cn } from '../lib/utils'
@@ -68,6 +69,7 @@ export function IndexerPage() {
 
   const [logOpen, setLogOpen] = useState(false)
   const [logExpanded, setLogExpanded] = useState(false)
+  const [processingOrder, setProcessingOrder] = useState<ProcessingOrder>('default')
   const logRef = useRef<HTMLDivElement>(null)
   const prevStatusRef = useRef<string | null>(null)
 
@@ -104,6 +106,11 @@ export function IndexerPage() {
 
   const status    = statusInfo?.status ?? 'idle'
   const isRunning = status === 'running'
+  const runOrder = statusInfo?.summary?.processing_order
+
+  useEffect(() => {
+    if (isRunning && runOrder) setProcessingOrder(runOrder)
+  }, [isRunning, runOrder])
   const hasSources = sources.length > 0
   const elapsed   = statusInfo?.elapsed_seconds ?? null
   const filteredLines = logLines.filter(l => l.trim())
@@ -190,6 +197,22 @@ export function IndexerPage() {
             </div>
           </div>
 
+          <label className="flex items-center gap-2 text-xs text-zinc-600 dark:text-zinc-300">
+            Processing order
+            <select
+              aria-label="Processing order"
+              value={processingOrder}
+              disabled={isRunning || startMutation.isPending}
+              onChange={event => setProcessingOrder(event.target.value as ProcessingOrder)}
+              className="rounded border border-zinc-300 dark:border-zinc-600 bg-white dark:bg-zinc-900 px-2 py-1 text-sm"
+            >
+              <option value="default">Default</option>
+              <option value="fastest">Fastest first</option>
+              <option value="newest">Newest first</option>
+              <option value="oldest">Oldest first</option>
+            </select>
+          </label>
+
           {/* Action button */}
           {isRunning ? (
             <button
@@ -202,7 +225,7 @@ export function IndexerPage() {
             </button>
           ) : (
             <button
-              onClick={() => startMutation.mutate()}
+              onClick={() => startMutation.mutate(processingOrder)}
               disabled={!hasSources || startMutation.isPending || (startMutation.isSuccess && !isRunning)}
               className="flex items-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-sm rounded-md transition-colors disabled:opacity-50"
             >
@@ -211,6 +234,17 @@ export function IndexerPage() {
             </button>
           )}
         </div>
+
+        {processingOrder === 'fastest' && (
+          <div className="text-xs text-zinc-500 dark:text-zinc-400">
+            Fastest first is a heuristic: photos before videos, then smaller files first.
+          </div>
+        )}
+        {(processingOrder === 'newest' || processingOrder === 'oldest') && (
+          <div className="text-xs text-zinc-500 dark:text-zinc-400">
+            Chronological order uses filesystem modification time.
+          </div>
+        )}
 
         {isRunning && summary?.phase === 'counting' && (
           <div className="text-xs text-zinc-500 dark:text-zinc-400 bg-white dark:bg-zinc-900 px-3 py-2 rounded">

@@ -488,6 +488,36 @@ class TestConfigSourcesBomConfig:
 # ── GET /indexer/status ───────────────────────────────────────────────────────
 
 class TestIndexerStatus:
+    def test_start_passes_selected_processing_order(self, client, monkeypatch):
+        from msa_apps.search_api.app import indexer_manager
+
+        captured = {}
+        monkeypatch.setattr(
+            indexer_manager,
+            "start",
+            lambda **kwargs: captured.update(kwargs) or {"status": "running"},
+        )
+        response = client.post("/indexer/start", json={"processing_order": "newest"})
+        assert response.status_code == 200
+        assert captured["processing_order"] == "newest"
+
+    def test_start_defaults_for_legacy_empty_request(self, client, monkeypatch):
+        from msa_apps.search_api.app import indexer_manager
+
+        captured = {}
+        monkeypatch.setattr(
+            indexer_manager,
+            "start",
+            lambda **kwargs: captured.update(kwargs) or {"status": "running"},
+        )
+        response = client.post("/indexer/start")
+        assert response.status_code == 200
+        assert captured["processing_order"] == "default"
+
+    def test_start_rejects_invalid_processing_order(self, client):
+        response = client.post("/indexer/start", json={"processing_order": "random"})
+        assert response.status_code == 422
+
     def test_returns_200(self, client):
         assert client.get("/indexer/status").status_code == 200
 

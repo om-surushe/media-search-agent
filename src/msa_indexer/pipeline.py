@@ -1,4 +1,5 @@
 from pathlib import Path
+from itertools import groupby
 import json
 import re
 from PIL import Image
@@ -48,6 +49,53 @@ def _emit_indexer_summary(**payload) -> None:
 
 
 def _db_rel_path(p: Path, root: Path) -> str:
+def _sort_media_entries(entries, order: str):
+    """Apply scheduling while preserving the existing scanner order by default."""
+    valid_orders = {"default", "fastest", "newest", "oldest"}
+    if order not in valid_orders:
+        raise ValueError(f"Invalid processing order: {order!r}")
+
+    def stable_key(entry):
+        source, root, path, _stat, source_index = entry
+        relative = _db_rel_path(path, root)
+        return (source_index, str(source.name).casefold(), relative.casefold(), relative)
+
+    if order == "default":
+        return list(entries)
+
+    ordered = sorted(entries, key=stable_key)
+    if order == "fastest":
+        # File size and media type are cheap proxies, not runtime predictions.
+        def size_bytes(entry):
+            try:
+                value = int(getattr(entry[3], "st_size", 0))
+            except (TypeError, ValueError, OverflowError):
+                return 0
+            return max(0, value)
+
+        return sorted(
+            ordered,
+            key=lambda entry: (
+                0 if entry[2].suffix.lower() in IMAGE_EXT else 1,
+                size_bytes(entry),
+                stable_key(entry),
+            ),
+        )
+
+    def modified_ns(entry):
+        stat = entry[3]
+        try:
+            value = int(getattr(stat, "st_mtime_ns"))
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            try:
+                value = int(float(getattr(stat, "st_mtime", 0)) * 1_000_000_000)
+            except (TypeError, ValueError, OverflowError):
+                value = 0
+        return value if value >= 0 else 0
+
+    return sorted(ordered, key=modified_ns, reverse=(order == "newest"))
+
+
     """The relative-path key stored in SQLite — POSIX form per ADR-007.
 
     This is THE single computation shared by the fingerprint key
@@ -418,6 +466,9 @@ def get_place_name(lat: float, lon: float) -> str | None:
 
 def run_index(config, stop_event=None):
     import time
+    processing_order = getattr(config, "processing_order", "default")
+    if processing_order not in {"default", "fastest", "newest", "oldest"}:
+        raise ValueError(f"Invalid processing order: {processing_order!r}")
     import os
     # Track total run time
     run_start_time = time.perf_counter()
@@ -511,6 +562,10 @@ def run_index(config, stop_event=None):
     _incremental_cfg = getattr(config, 'incremental', None)
     fingerprint_enabled = bool(getattr(_incremental_cfg, 'fingerprint_enabled', True))
     verify_content = bool(getattr(config, 'verify_content', False))
+    # ponytail: keep only scan metadata in memory for a global sort; use a
+    # disk-backed queue only if real libraries make this O(n) snapshot costly.
+    scheduled_entries = []
+    source_walk_stats: dict[str, ScanStats] = {}
     total_found = 0
     total_images_found = 0
     total_videos_found = 0
@@ -583,11 +638,18 @@ def run_index(config, stop_event=None):
         finally:
             if _fp_reader is not None:
                 _fp_reader.close()
-    for source in sources_to_index:
+    for source_index, source in enumerate(sources_to_index):
         root = Path(resolve_for_access(str(source.path)))
         src_fps = fp_by_source.get(source.name, {})
         src_snap = snap_by_source.get(source.name, {})
-        for p, st in iter_media_entries(root, media_type=media_type_filter, stop_event=stop_event):
+        walk_stats = ScanStats()
+        source_walk_stats[source.name] = walk_stats
+        for p, st in iter_media_entries(root, stop_event=stop_event, stats=walk_stats):
+            if media_type_filter == "image" and ext not in IMAGE_EXT:
+                continue
+            if media_type_filter == "video" and ext not in VIDEO_EXT:
+                continue
+            scheduled_entries.append((source, root, p, st, source_index))
             ext = p.suffix.lower()
             total_found += 1
             is_image = ext in IMAGE_EXT
@@ -626,6 +688,9 @@ def run_index(config, stop_event=None):
                     if is_image:
                         expected_image_hits += 1
                     elif is_video:
+    scheduled_entries = _sort_media_entries(scheduled_entries, processing_order)
+    logger.info("Processing order: {}", processing_order)
+
                         expected_video_hits += 1
     # Estimate only the remainder — the files that will actually be hashed
     # and (potentially) processed. Keep total_found / images_to_process /
@@ -639,6 +704,7 @@ def run_index(config, stop_event=None):
         images_to_process=total_images_found,
         videos_to_process=total_videos_found,
         expected_to_process=max(0, total_found - expected_image_hits - expected_video_hits),
+        processing_order=processing_order,
         estimated_remaining_seconds=round(est_img_time + est_vid_time),
     )
     
@@ -921,16 +987,16 @@ def run_index(config, stop_event=None):
     source_roots: dict[str, Path] = {
         s.name: Path(resolve_for_access(str(s.path))) for s in sources_to_index
     }
-    source_walk_stats: dict[str, ScanStats] = {}
 
-    # Iterate through all enabled sources
-    for source in sources_to_index:
-        root = source_roots[source.name]
-        source_name = source.name
-        walk_stats = ScanStats()
-        source_walk_stats[source_name] = walk_stats
-        logger.info(f"📂 Indexing source: {source_name} | path: {root}")
-        for p, st in iter_media_entries(root, stats=walk_stats):
+    # Process the one scan snapshot in the selected global media-item order.
+    logged_sources: set[str] = set()
+    for (_source_index, source_name), source_entries in groupby(
+        scheduled_entries, key=lambda entry: (entry[4], entry[0].name)
+    ):
+        if source_name not in logged_sources:
+            logger.info(f"📂 Indexing source: {source_name} | path: {source_roots[source_name]}")
+            logged_sources.add(source_name)
+        for source, root, p, st, _source_index in source_entries:
             # Check for graceful shutdown between files
             if stop_event is not None and stop_event.is_set():
                 logger.info("Stop requested — finishing indexing run early (FAISS will still be saved)")
@@ -943,6 +1009,17 @@ def run_index(config, stop_event=None):
             file_count += 1
             # Count images and videos as they are discovered (before skip check)
             if ext in IMAGE_EXT:
+            # The ordering snapshot can age while models initialize; preserve the
+            # original fast-path's fresh-stat check before trusting a fingerprint.
+            try:
+                st = os.stat(p, follow_symlinks=False)
+            except OSError as exc:
+                rel = _db_rel_path(p, root)
+                if fingerprint_enabled:
+                    pending_seen.append((source_name, rel))
+                logger.warning("Skipping media whose metadata could not be refreshed ({}): {}", type(exc).__name__, p.name)
+                continue
+
                 img_count += 1
             elif ext in VIDEO_EXT:
                 vid_count += 1
@@ -982,7 +1059,17 @@ def run_index(config, stop_event=None):
                 fingerprint_hits += 1
                 pending_seen.append((source_name, rel))
             else:
-                media_id = sha256_of_file(p)
+                try:
+                    media_id = sha256_of_file(p)
+                except Exception as exc:
+                    if fingerprint_enabled:
+                        pending_seen.append((source_name, rel))
+                    skipped_count += 1
+                    logger.warning(
+                        "Skipping media that could not be hashed ({}): {}",
+                        type(exc).__name__, p.name,
+                    )
+                    continue
                 files_hashed += 1
                 if fingerprint_enabled:
                     if fp is not None and fp["media_id"] == media_id:
@@ -1936,6 +2023,7 @@ def run_index(config, stop_event=None):
                         s.name: {
                             "walked_to_completion": True,
                             "walk_errors": (
+                    processing_order=processing_order,
                                 source_walk_stats[s.name].walk_errors
                                 if s.name in source_walk_stats
                                 else None
@@ -2161,6 +2249,7 @@ def run_index(config, stop_event=None):
                     logger.warning("Could not read Qdrant export state ({}); treating as unknown — will export conservatively.", _e)
                     qdrant_export_state = None
             if not export_blocked:
+        processing_order=processing_order,
                 qdrant_stale = False
                 local_index_version_seq = int(current_index_state.get("index_version_seq") or 0)
                 exported_seq: int | None = (
@@ -2197,6 +2286,7 @@ def run_index(config, stop_event=None):
                             # complete the interrupted bump FIRST, then
                             # export and record THAT seq — recording the
                             # stale lower seq would repeat the recovery
+        processing_order=processing_order,
                             # export on every subsequent no-op run.
                             _max_stamped = probe_db.max_stamped_seq()
                             if _max_stamped > local_index_version_seq:

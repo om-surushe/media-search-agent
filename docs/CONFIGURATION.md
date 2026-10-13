@@ -51,6 +51,23 @@ media_sources:
 The Indexer page in the UI manages this list for you with a directory
 picker — you rarely need to edit it by hand.
 
+## Per-run processing order
+
+The Indexer page lets you choose the order for each run. The choice is sent
+with that run and does not rewrite `config.yaml` or change indexed data.
+
+| Mode | Ordering |
+|---|---|
+| `default` | Existing source-by-source scanner order, preserving filesystem enumeration order within each source. |
+| `fastest` | Photos before videos, then smaller files first. This is a deterministic file-type/size heuristic, not a runtime prediction. |
+| `newest` / `oldest` | Filesystem modification time, with the same stable source/path tie-breakers. Capture-time EXIF/video metadata is not probed during scheduling. |
+
+The CLI accepts the same per-run option, for example
+`msa index run --processing-order newest`. Older API clients that omit the
+option retain the existing `default` order. The indexer scans the enabled
+sources once into an in-memory metadata queue before processing so it can apply
+a global order; source files are stat-checked again before fingerprint reuse.
+
 ## CLIP model
 
 The vision-language model that powers semantic search.

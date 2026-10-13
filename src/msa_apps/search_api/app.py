@@ -21,7 +21,7 @@ from msa_query.storage.db import connect_readonly
 from msa_query.query_engine.transcript_search import search_transcripts as _search_transcripts
 import os
 from loguru import logger
-from typing import Optional, List
+from typing import Optional, List, Literal
 try:
     from msa_settings import load_config
     from msa_indexer.utils.logging import setup_logging
@@ -1918,7 +1918,7 @@ def _venv_bin() -> str:
 
 
 @app.post("/indexer/start")
-def indexer_start(request: Request):
+def indexer_start(request: Request, body: Optional[_IndexerStart] = None):
     """Spawn msa-index run as a background subprocess."""
     try:
         result = indexer_manager.start(
@@ -2217,6 +2217,10 @@ def browse_directory(path: str = "", request: Request = None):
 
 # ── Diagnostics ───────────────────────────────────────────────────────────────
 
+class _IndexerStart(_BaseModel):
+    processing_order: Literal["default", "fastest", "newest", "oldest"] = "default"
+
+
 def _latest_timestamped_log(log_dir: Path, prefix: str) -> Optional[Path]:
     """Return the most-recently-created log matching <prefix>-*.log, or None."""
     matches = sorted(log_dir.glob(f"{prefix}-*.log"))
@@ -2237,6 +2241,7 @@ def diagnostics(request: Request):
     # (separate from the DataDir data root).  Fall back to cfg.log_dir, then cwd/logs.
     log_dir_env = os.environ.get("MSA_LOG_DIR")
     log_dir_raw = log_dir_env or getattr(cfg, "log_dir", None)
+            processing_order=body.processing_order if body else "default",
     log_dir = Path(log_dir_raw) if log_dir_raw else config_file.parent / "logs"
 
     latest_launch  = _latest_timestamped_log(log_dir, "launch")

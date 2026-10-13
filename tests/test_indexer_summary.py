@@ -54,10 +54,12 @@ class _FingerprintNoOpsMixin:
     def resurrect_media(self, _media_id):
         pass
 
+    def set_pipeline_status(self, *_args, **_kwargs):
+        pass
+
 
 def _patch_walk(monkeypatch, pipeline, paths):
-    """Patch both the count-phase walk (iter_media) and the main-loop walk
-    (iter_media_entries, which yields (path, stat) tuples)."""
+    """Patch the metadata scan used to build the processing queue."""
     monkeypatch.setattr(pipeline, "iter_media", lambda *_a, **_k: list(paths))
     monkeypatch.setattr(
         pipeline,
@@ -282,6 +284,73 @@ def _reset_fake_store_state():
     _FakeFaissStore.fail_on_save = False
 
 
+def test_processing_order_and_bad_image_do_not_stop_later_items(tmp_path, monkeypatch):
+    from msa_indexer import pipeline
+
+    unreadable_path = tmp_path / "unreadable.jpg"
+    bad_path = tmp_path / "bad.jpg"
+    good_path = tmp_path / "good.jpg"
+    unreadable_path.write_bytes(b"unreadable")
+    bad_path.write_bytes(b"not an image")
+    Image.new("RGB", (8, 8), color="white").save(good_path)
+    os.utime(unreadable_path, (300, 300))
+    os.utime(bad_path, (200, 200))
+    os.utime(good_path, (100, 100))
+
+    hash_order = []
+    embedding_calls = []
+    summaries = []
+
+    class _TrackingEmbedder(_FakeClipEmbedderWithVectors):
+        def image_embed(self, images):
+            embedding_calls.append(len(images))
+            return super().image_embed(images)
+
+    monkeypatch.setattr(pipeline, "resolve_for_access", lambda p: p)
+    _patch_walk(monkeypatch, pipeline, [good_path, bad_path, unreadable_path])
+    def fake_hash(path):
+        hash_order.append(path.name)
+        if path == unreadable_path:
+            raise OSError("fixture read failure")
+        return f"{path.stem}-id"
+
+    monkeypatch.setattr(pipeline, "sha256_of_file", fake_hash)
+    monkeypatch.setattr(pipeline, "get_exif_basic", lambda _p: {})
+    monkeypatch.setattr(pipeline, "write_thumbnail", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(pipeline, "SQLiteStore", _FakeSQLiteStoreNeedsProcessing)
+    monkeypatch.setattr(pipeline, "ClipEmbedder", _TrackingEmbedder)
+    monkeypatch.setattr(pipeline, "_load_historical_perf", lambda _p: (1.0, 30.0, 5.0))
+    monkeypatch.setattr(pipeline, "_emit_indexer_summary", lambda **payload: summaries.append(payload))
+    monkeypatch.setattr(pipeline, "get_qdrant_export_version", lambda: None)
+    monkeypatch.setattr(pipeline, "record_qdrant_export_version", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(pipeline, "_do_qdrant_export", lambda *_args, **_kwargs: None)
+
+    config = SimpleNamespace(
+        sqlite_path=str(tmp_path / "test.db"),
+        faiss_path=tmp_path / "test.faiss",
+        face_faiss_path=tmp_path / "test-face.faiss",
+        thumb_dir=tmp_path / "thumbs",
+        face_thumb_dir=tmp_path / "face-thumbs",
+        log_dir=tmp_path / "logs",
+        model_name="ViT-L-14",
+        pretrained="openai",
+        model_version="test-v1",
+        device="cpu",
+        enable_object_detection=False,
+        enable_face_recognition=False,
+        processing_order="newest",
+        media_sources=[SimpleNamespace(name="photos", path=str(tmp_path), enabled=True)],
+    )
+
+    pipeline.run_index(config)
+
+    assert hash_order == ["unreadable.jpg", "bad.jpg", "good.jpg"]
+    complete = [summary for summary in summaries if summary["phase"] == "complete"][-1]
+    assert complete["processing_order"] == "newest"
+    assert complete["total_found"] == 3
+    assert embedding_calls == [1]
+
+
 def test_complete_summary_counts_up_to_date_videos(tmp_path, monkeypatch):
     from msa_indexer import pipeline
 
@@ -316,6 +385,7 @@ def test_complete_summary_counts_up_to_date_videos(tmp_path, monkeypatch):
         device="cpu",
         enable_object_detection=False,
         enable_face_recognition=False,
+        processing_order="default",
         media_sources=[SimpleNamespace(name="photos", path=str(tmp_path), enabled=True)],
     )
 
@@ -324,6 +394,7 @@ def test_complete_summary_counts_up_to_date_videos(tmp_path, monkeypatch):
     assert summaries, "expected at least one summary payload"
     complete = summaries[-1]
     assert complete["phase"] == "complete"
+    assert complete["processing_order"] == "default"
     assert complete["total_found"] == 2
     assert complete["already_indexed"] == 2
     assert complete["skipped"] == 2

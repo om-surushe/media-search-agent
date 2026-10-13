@@ -184,8 +184,13 @@ class IndexerManager:
 
     # ── Public API ────────────────────────────────────────────────────────────
 
-    def start(self, config_path: str, venv_bin: str) -> Dict[str, Any]:
+    def start(
+        self, config_path: str, venv_bin: str, processing_order: str = "default"
+    ) -> Dict[str, Any]:
         import subprocess
+
+        if processing_order not in {"default", "fastest", "newest", "oldest"}:
+            raise ValueError(f"Invalid processing order: {processing_order!r}")
 
         with self._lock:
             if self._status == "running":
@@ -199,10 +204,14 @@ class IndexerManager:
                 log_path = Path(config_path).parent / "logs" / "msa.log"
 
             script_name = "msa.exe" if sys.platform == "win32" else "msa"
-            cmd = [
-                str(Path(venv_bin) / script_name),
+            msa_script = Path(venv_bin) / script_name
+            cmd = [str(msa_script)] if msa_script.is_file() else [
+                sys.executable, "-c", "from msa_cli.cli import main; main()"
+            ]
+            cmd += [
                 "index", "run",
                 "--config", config_path,
+                "--processing-order", processing_order,
                 "--no-console-log",
             ]
             logger.info(f"Starting indexer run {run_id}: {' '.join(cmd)}")

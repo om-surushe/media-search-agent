@@ -509,6 +509,7 @@ def test_run_branch_preserves_api_provided_sentinel(tmp_path, monkeypatch):
         # By the time run_index is called, the parent-provided sentinel
         # must still exist so the watcher can observe it.
         observations["sentinel_exists"] = parent_sentinel.exists()
+        observations["processing_order"] = cfg.processing_order
         if stop_event is not None:
             stop_event.set()  # let watcher exit
 
@@ -517,7 +518,7 @@ def test_run_branch_preserves_api_provided_sentinel(tmp_path, monkeypatch):
     args = SimpleNamespace(
         index_cmd="run", config=str(config_path), no_console_log=True,
         dry_run=False, media_source_override=None, export_to_qdrant=False,
-        log_level=None, image_only=False, video_only=False,
+        log_level=None, image_only=False, video_only=False, processing_order="oldest",
         reprocess_gps=False, reprocess_objects=False, reprocess_faces=False,
         reprocess_embeddings=False, reprocess_all=False,
     )
@@ -525,6 +526,7 @@ def test_run_branch_preserves_api_provided_sentinel(tmp_path, monkeypatch):
     from msa_cli import cmd_index
     cmd_index.handle(args)
 
+    assert observations.get("processing_order") == "oldest"
     assert observations.get("sentinel_exists") is True, (
         "Child erased a parent-provided stop sentinel during startup. "
         "The API parent already cleared stale state before spawning; "

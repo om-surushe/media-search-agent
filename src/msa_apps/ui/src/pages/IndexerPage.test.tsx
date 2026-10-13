@@ -174,12 +174,16 @@ describe('IndexerPage', () => {
       )
     })
 
-    it('calls POST /indexer/start when Run is clicked', async () => {
+    it('sends the selected processing order when Run is clicked', async () => {
       renderPage()
       await waitFor(() => screen.getByRole('button', { name: /run indexer/i }))
       const fetchMock = vi.mocked(fetch)
+      await userEvent.selectOptions(screen.getByRole('combobox', { name: /processing order/i }), 'oldest')
       await userEvent.click(screen.getByRole('button', { name: /run indexer/i }))
-      expect(fetchMock).toHaveBeenCalledWith('/indexer/start', expect.objectContaining({ method: 'POST' }))
+      expect(fetchMock).toHaveBeenCalledWith('/indexer/start', expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({ processing_order: 'oldest' }),
+      }))
     })
 
     it('disables Run Indexer until a source is configured', async () => {
