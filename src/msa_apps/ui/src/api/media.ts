@@ -1,4 +1,4 @@
-import type { MediaListResponse, MediaFacesResponse, MediaFilters } from './types'
+import type { MediaListResponse, MediaFacesResponse, MediaFilters, AssetIntelligence } from './types'
 import { apiUrl } from '../lib/apiBase'
 
 export async function getMedia(
@@ -21,6 +21,14 @@ export async function getMedia(
   const res = await fetch(apiUrl(`/media?${params}`))
   if (!res.ok) throw new Error(`Media listing failed: ${res.status}`)
   return res.json()
+}
+
+export async function getAssetIntelligence(mediaId: string): Promise<AssetIntelligence> {
+  const res = await fetch(apiUrl(`/media/${encodeURIComponent(mediaId)}/intelligence`))
+  if (!res.ok) throw new Error(`Asset intelligence fetch failed: ${res.status}`)
+  const data = await res.json()
+  if (!data?.media || !Array.isArray(data.pipeline_status)) throw new Error('Invalid asset intelligence response')
+  return data as AssetIntelligence
 }
 
 export async function getMediaFaces(mediaId: string): Promise<MediaFacesResponse> {

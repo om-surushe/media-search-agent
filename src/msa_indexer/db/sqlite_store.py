@@ -984,6 +984,47 @@ class SQLiteStore:
         )
         self._maybe_commit()
 
+    def set_pipeline_status(
+        self, media_id: str, pipeline: str, status: str, *,
+        model_name: str | None = None, model_revision: str | None = None,
+        error_type: str | None = None,
+    ) -> None:
+        """Persist an optional detector's state without confusing errors with zero results."""
+        if pipeline not in {"face_detection", "object_detection"}:
+            raise ValueError(f"Unsupported pipeline: {pipeline}")
+        if status not in {"disabled", "not_processed", "pending", "completed", "failed", "unsupported", "unknown"}:
+            raise ValueError(f"Unsupported pipeline status: {status}")
+        self.conn.execute(
+            """
+            INSERT INTO media_pipeline_status(
+                media_id, pipeline, status, model_name, model_revision,
+                started_at, completed_at, error_type
+            ) VALUES (
+                ?, ?, ?, ?, ?,
+                CASE WHEN ? = 'pending' THEN datetime('now') ELSE NULL END,
+                CASE WHEN ? IN ('completed', 'failed') THEN datetime('now') ELSE NULL END,
+                ?
+            )
+            ON CONFLICT(media_id, pipeline) DO UPDATE SET
+                status=excluded.status,
+                model_name=COALESCE(excluded.model_name, media_pipeline_status.model_name),
+                model_revision=COALESCE(excluded.model_revision, media_pipeline_status.model_revision),
+                started_at=CASE WHEN excluded.status='pending' THEN datetime('now') ELSE media_pipeline_status.started_at END,
+                completed_at=CASE WHEN excluded.status IN ('completed', 'failed') THEN datetime('now') ELSE NULL END,
+                error_type=excluded.error_type
+            """,
+            (media_id, pipeline, status, model_name, model_revision, status, status, error_type),
+        )
+        # Keep the old skip flags in sync: only a completed run can make a stage
+        # incremental-skip eligible; a failed/retried attempt must remain retryable.
+        if status == "completed":
+            column = "face_detection_done" if pipeline == "face_detection" else "object_detection_done"
+            self.conn.execute(f"UPDATE media SET {column}=1 WHERE media_id=?", (media_id,))
+        elif status in {"pending", "not_processed", "failed"}:
+            column = "face_detection_done" if pipeline == "face_detection" else "object_detection_done"
+            self.conn.execute(f"UPDATE media SET {column}=0 WHERE media_id=?", (media_id,))
+        self._maybe_commit()
+
     def get_total_changes(self) -> int:
         return int(self.conn.total_changes)
 

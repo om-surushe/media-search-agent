@@ -2,7 +2,7 @@ import asyncio
 import json
 from contextlib import asynccontextmanager, contextmanager
 from fastapi import FastAPI, Depends, HTTPException, WebSocket
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from msa_settings.paths import resolve_for_access, display_path, is_wsl2
@@ -15,9 +15,23 @@ from msa_apps.search_api.schemas import (
     PersonSuggestion, FaceSuggestionsResponse,
     BatchFaceSuggestionsRequest, BatchFaceSuggestionsResponse, BatchFaceSuggestionItem,
     TrackOpenRequest,
+    AssetIntelligenceResponse,
+    PipelineStateOut,
+    EmbeddingInfo,
+    FingerprintInfo,
+    AssetMediaInfo,
+    FaceIntelligenceOut,
+    ObjectLabelOut,
+    VideoKeyframeOut,
+    VideoShotOut,
+    TranscriptInfo,
+    TranscriptSegmentOut,
+    AssetDescriptionsOut,
+    DescriptionOut,
 )
 from msa_apps.search_api.deps import get_query_engine
 from msa_query.storage.db import connect_readonly
+from msa_settings.config import object_detection_enabled, video_object_detection_enabled
 from msa_query.query_engine.transcript_search import search_transcripts as _search_transcripts
 import os
 from loguru import logger
@@ -723,6 +737,256 @@ def list_media(
         logger.error(f"/media listing failed: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error")
 
+# --- Reusable asset intelligence inspector ---
+@app.get("/media/{media_id}/intelligence", response_model=AssetIntelligenceResponse)
+def get_asset_intelligence(media_id: str, request: Request):
+    """Read canonical asset metadata and stored pipeline outputs; never returns vectors."""
+    S = _get_config(request)
+    db_path = Path(S.sqlite_path)
+    if not db_path.exists():
+        raise HTTPException(status_code=500, detail="SQLite database not found")
+    conn = connect_readonly(db_path)
+    try:
+        media = conn.execute(
+            """SELECT media_id, path, source_name, rel_path, size_bytes, mime,
+                      ts_utc, added_at, gps_lat, gps_lon, place, gps_processed,
+                      gps_data_mode, camera, lens, width, height, duration, hash_blake3,
+                      face_detection_done, object_detection_done
+               FROM media WHERE media_id=? AND deleted=0""",
+            (media_id,),
+        ).fetchone()
+        if media is None:
+            raise HTTPException(status_code=404, detail="Media not found")
+        (mid, raw_path, source_name, rel_path, size_bytes, mime, captured_at,
+         added_at, gps_lat, gps_lon, place, gps_processed, gps_data_mode,
+         camera, lens, width, height, duration, content_hash, face_done, object_done) = media
+        media_type = "image" if (mime or "").startswith("image/") else (
+            "video" if (mime or "").startswith("video/") else "unknown"
+        )
+        object_enabled = (
+            media_type == "image" and object_detection_enabled(S)
+        ) or (
+            media_type == "video" and video_object_detection_enabled(S)
+        )
+        face_enabled = bool(getattr(S, "enable_face_recognition", False))
+
+        try:
+            stored_states = {
+                pipeline: row for pipeline, *row in conn.execute(
+                    """SELECT pipeline, status, model_name, model_revision,
+                              started_at, completed_at, error_type
+                       FROM media_pipeline_status WHERE media_id=?""", (media_id,)
+                ).fetchall()
+            }
+        except Exception as exc:
+            import sqlite3 as _sqlite3
+            if not isinstance(exc, _sqlite3.OperationalError) or "no such table" not in str(exc):
+                raise
+            stored_states = {}
+        pipeline_states = []
+        for pipeline, enabled, legacy_done in (
+            ("face_detection", face_enabled, face_done),
+            ("object_detection", object_enabled, object_done),
+        ):
+            current = stored_states.get(pipeline)
+            if current:
+                status, model_name, revision, started, completed, error_type = current
+                evidence = "recorded"
+                if status == "disabled" and enabled:
+                    status, evidence = "not_processed", "current_config"
+                elif status == "not_processed" and not enabled:
+                    status, evidence = "disabled", "current_config"
+            elif legacy_done:
+                status, model_name, revision, started, completed, error_type = (
+                    "completed", None, None, None, None, None
+                )
+                evidence = "legacy_flag"
+            else:
+                status = "not_processed" if enabled else "disabled"
+                model_name = revision = started = completed = error_type = None
+                evidence = "current_config"
+            pipeline_states.append(PipelineStateOut(
+                pipeline=pipeline, status=status, evidence=evidence,
+                configured_enabled=enabled, model_name=model_name,
+                model_revision=revision, started_at=started,
+                completed_at=completed, error_type=error_type,
+            ))
+
+        fingerprint_rows = conn.execute(
+            """SELECT source_name, rel_path, size_bytes, mtime_ns
+               FROM file_fingerprint WHERE media_id=? ORDER BY source_name, rel_path""",
+            (media_id,),
+        ).fetchall()
+        from datetime import datetime, timezone
+        fingerprints = [FingerprintInfo(
+            source_name=str(src), relative_path=str(path), size_bytes=int(size),
+            filesystem_mtime=datetime.fromtimestamp(ns / 1_000_000_000, timezone.utc).isoformat(),
+        ) for src, path, size, ns in fingerprint_rows]
+        resolved_path = _resolve_path(raw_path, source_name, rel_path)
+        path_text = display_path(resolved_path)
+        file_path = Path(str(resolved_path)) if resolved_path else None
+        mtime_text = None
+        if fingerprint_rows:
+            mtime_text = fingerprints[0].filesystem_mtime
+        asset_media = AssetMediaInfo(
+            id=str(mid), type=media_type, mime=mime,
+            filename=file_path.name if file_path else None,
+            source_name=source_name,
+            source_folder=file_path.parent.name if file_path else None,
+            path=path_text, size_bytes=size_bytes, width=width, height=height,
+            duration=duration, captured_at=captured_at, added_at=added_at,
+            filesystem_mtime=mtime_text, camera=camera, lens=lens,
+            gps_lat=gps_lat, gps_lon=gps_lon, place=place,
+            gps_processed=bool(gps_processed), gps_data_mode=gps_data_mode,
+            gps_sensitive=(gps_lat is not None or gps_lon is not None),
+            hash_blake3=content_hash, fingerprints=fingerprints,
+        )
+
+        image_row = conn.execute(
+            "SELECT embedding_dim, embedding_model, created_at FROM image_embedding WHERE media_id=?",
+            (media_id,),
+        ).fetchone()
+        keyframe_embedding = conn.execute(
+            """SELECT COUNT(*), MIN(embedding_dim), MAX(embedding_dim),
+                      MIN(embedding_model), MAX(created_at)
+               FROM keyframe_embedding ke JOIN video_keyframes k ON k.id=ke.keyframe_id
+               WHERE k.video_id=?""", (media_id,),
+        ).fetchone()
+        face_rows = conn.execute(
+            """SELECT f.face_id, f.x, f.y, f.w, f.h, f.confidence,
+                      f.person_id, p.name, f.gender, f.age, f.shot_index,
+                      f.kf_index, k.timestamp, fe.embedding_dim,
+                      fe.embedding_model, fe.created_at
+               FROM face f LEFT JOIN person p ON p.person_id=f.person_id
+               LEFT JOIN video_keyframes k ON k.video_id=f.media_id
+                    AND k.shot_index=f.shot_index AND k.kf_index=f.kf_index
+               LEFT JOIN face_embedding fe ON fe.face_id=f.face_id
+               WHERE f.media_id=? ORDER BY f.shot_index, f.kf_index, f.face_id""",
+            (media_id,),
+        ).fetchall()
+        faces = []
+        for (fid, x, y, w, h, confidence, person_id, person_name, gender, age,
+             shot_index, kf_index, timestamp, dim, model, created) in face_rows:
+            safe_face_id = str(fid).replace(":", "_")
+            faces.append(FaceIntelligenceOut(
+                face_id=str(fid), bbox=[x or 0, y or 0, w or 0, h or 0],
+                confidence=confidence, person_id=person_id, person_name=person_name,
+                identity_status="known" if person_id else "unknown",
+                gender=gender, age=age, shot_index=shot_index, kf_index=kf_index,
+                timestamp=timestamp, thumbnail_url=f"/face_thumbnails/{safe_face_id}.jpg",
+                embedding=EmbeddingInfo(
+                    present=dim is not None, count=1 if dim is not None else 0,
+                    dimensions=dim, model=model, created_at=created,
+                ),
+            ))
+
+        stored_tags = [str(row[0]) for row in conn.execute(
+            """SELECT t.name FROM media_tag mt JOIN tag t ON t.tag_id=mt.tag_id
+               WHERE mt.media_id=? ORDER BY t.name COLLATE NOCASE""", (media_id,)
+        ).fetchall() if row[0]]
+        keyframe_rows = conn.execute(
+            """SELECT k.id, k.shot_index, k.kf_index, k.timestamp, k.shot_start,
+                      k.shot_end, k.gps_lat, k.gps_lon, k.gps_alt, k.gps_datetime_utc,
+                      k.gps_fix, k.gps_source, k.place, k.tags, COUNT(ke.keyframe_id),
+                      MIN(ke.embedding_dim), MIN(ke.embedding_model), MAX(ke.created_at)
+               FROM video_keyframes k LEFT JOIN keyframe_embedding ke ON ke.keyframe_id=k.id
+               WHERE k.video_id=? GROUP BY k.id ORDER BY k.shot_index, k.kf_index""",
+            (media_id,),
+        ).fetchall()
+        keyframes = []
+        objects = [ObjectLabelOut(label=tag) for tag in stored_tags]
+        for (kid, shot_idx, kf_idx, timestamp, shot_start, shot_end, kf_lat,
+             kf_lon, kf_alt, kf_gps_time, kf_gps_fix, kf_gps_source, kf_place,
+             tags_json, emb_count, emb_dim, emb_model, emb_created) in keyframe_rows:
+            try:
+                frame_tags = [str(tag) for tag in json.loads(tags_json or "[]") if tag]
+            except (TypeError, ValueError):
+                frame_tags = []
+            objects.extend(ObjectLabelOut(
+                label=tag, shot_index=shot_idx, kf_index=kf_idx, timestamp=timestamp
+            ) for tag in frame_tags)
+            keyframes.append(VideoKeyframeOut(
+                id=kid, shot_index=shot_idx, kf_index=kf_idx, timestamp=timestamp,
+                shot_start=shot_start, shot_end=shot_end,
+                gps_lat=kf_lat, gps_lon=kf_lon, gps_alt=kf_alt,
+                gps_datetime_utc=kf_gps_time, gps_fix=kf_gps_fix,
+                gps_source=kf_gps_source, place=kf_place, tags=frame_tags,
+                preview_url=None,
+                embedding=EmbeddingInfo(
+                    present=bool(emb_count), count=emb_count or 0,
+                    dimensions=emb_dim, model=emb_model, created_at=emb_created,
+                ),
+            ))
+        shot_rows = conn.execute(
+            """SELECT id, shot_index, t_start, t_end, is_synthetic
+               FROM shots WHERE video_id=? ORDER BY shot_index""", (media_id,)
+        ).fetchall()
+        shots = [VideoShotOut(
+            id=sid, shot_index=idx, start=start, end=end,
+            duration=max(0.0, end - start), is_synthetic=bool(synthetic),
+        ) for sid, idx, start, end, synthetic in shot_rows]
+        distinct_tags = sorted({o.label for o in objects}, key=str.casefold)
+
+        transcript_row = conn.execute(
+            """SELECT model_name, model_revision, runtime_version, status, language,
+                      processed_at, error_code FROM transcription_state WHERE media_id=?""",
+            (media_id,),
+        ).fetchone()
+        if transcript_row:
+            model_name, revision, runtime_version, transcript_status, language, processed_at, error_code = transcript_row
+            segment_total = conn.execute(
+                "SELECT COUNT(*) FROM transcript_segment WHERE media_id=?", (media_id,)
+            ).fetchone()[0]
+            segment_rows = conn.execute(
+                """SELECT id, segment_index, t_start, t_end, text
+                   FROM transcript_segment WHERE media_id=? ORDER BY segment_index LIMIT 100""",
+                (media_id,),
+            ).fetchall()
+            segments = [TranscriptSegmentOut(
+                id=sid, segment_index=idx, start=start, end=end, text=text
+            ) for sid, idx, start, end, text in segment_rows]
+        else:
+            model_name = revision = runtime_version = language = processed_at = error_code = None
+            transcript_status = (
+                "unsupported" if media_type != "video" else
+                "not_processed" if getattr(S, "enable_speech_transcription", False) else "disabled"
+            )
+            segment_total, segments = 0, []
+        transcript = TranscriptInfo(
+            status=transcript_status, model_name=model_name, model_revision=revision,
+            runtime_version=runtime_version, language=language, processed_at=processed_at,
+            error_code=error_code, segments=segments, total_segments=segment_total,
+        )
+        descriptions = AssetDescriptionsOut(
+            image_caption=DescriptionOut(status="not_generated"),
+            video_summary=DescriptionOut(status="not_generated"), scenes=[],
+        )
+        return AssetIntelligenceResponse(
+            media=asset_media, descriptions=descriptions,
+            pipeline_status=pipeline_states,
+            embeddings={
+                "image": EmbeddingInfo(
+                    present=image_row is not None, count=1 if image_row else 0,
+                    dimensions=image_row[0] if image_row else None,
+                    model=image_row[1] if image_row else None,
+                    created_at=image_row[2] if image_row else None,
+                ),
+                "keyframes": EmbeddingInfo(
+                    present=bool(keyframe_embedding[0]), count=keyframe_embedding[0] or 0,
+                    dimensions=keyframe_embedding[1] if keyframe_embedding[1] == keyframe_embedding[2] else None,
+                    model=keyframe_embedding[3], created_at=keyframe_embedding[4],
+                ),
+            },
+            faces=faces, face_count=len(faces), objects=objects,
+            object_label_count=len(objects),
+            objects_evidence="stored_label_only" if objects else "none",
+            stored_tags=distinct_tags, shots=shots, total_shots=len(shots),
+            keyframes=keyframes, total_keyframes=len(keyframes), transcript=transcript,
+        )
+    finally:
+        conn.close()
+
+
 # --- Single media item metadata ---
 @app.get("/media/{media_id}/info")
 def get_media_info(media_id: str, request: Request):
@@ -785,6 +1049,55 @@ def get_media_info(media_id: str, request: Request):
         raise HTTPException(status_code=500, detail="Internal server error")
 
 # --- Video file serving ---
+def _iter_video_range(file_path: Path, start: int, length: int):
+    with file_path.open("rb") as video_file:
+        video_file.seek(start)
+        remaining = length
+        while remaining:
+            chunk = video_file.read(min(64 * 1024, remaining))
+            if not chunk:
+                break
+            remaining -= len(chunk)
+            yield chunk
+
+
+def _video_file_response(file_path: Path, media_type: str, request: Request):
+    range_header = request.headers.get("range")
+    headers = {"Accept-Ranges": "bytes"}
+    if not range_header or not range_header.startswith("bytes=") or "," in range_header:
+        return FileResponse(str(file_path), media_type=media_type, headers=headers)
+
+    size = file_path.stat().st_size
+    try:
+        first, last = range_header[6:].split("-", 1)
+        if first:
+            if not first.isdigit() or (last and not last.isdigit()):
+                return FileResponse(str(file_path), media_type=media_type, headers=headers)
+            start = int(first)
+            end = min(int(last) if last else size - 1, size - 1)
+        else:
+            if not last.isdigit():
+                return FileResponse(str(file_path), media_type=media_type, headers=headers)
+            suffix_length = int(last)
+            if suffix_length <= 0:
+                start, end = size, size - 1
+            else:
+                start, end = max(size - suffix_length, 0), size - 1
+    except ValueError:
+        return FileResponse(str(file_path), media_type=media_type, headers=headers)
+
+    if start >= size or end < start:
+        return Response(status_code=416, headers={**headers, "Content-Range": f"bytes */{size}"})
+
+    length = end - start + 1
+    return StreamingResponse(
+        _iter_video_range(file_path, start, length),
+        status_code=206,
+        media_type=media_type,
+        headers={**headers, "Content-Range": f"bytes {start}-{end}/{size}", "Content-Length": str(length)},
+    )
+
+
 @app.get("/videos/{media_id}")
 def get_video(media_id: str, request: Request):
     """
@@ -824,7 +1137,7 @@ def get_video(media_id: str, request: Request):
             raise HTTPException(status_code=404, detail="File not found on disk")
         # MIME follows the indexed file's extension (e.g. MP4 vs WebM).
         media_type = mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
-        return FileResponse(str(file_path), media_type=media_type)
+        return _video_file_response(file_path, media_type, request)
     except HTTPException:
         raise
     except Exception as e:
@@ -1904,6 +2217,10 @@ class _SourceAdd(_BaseModel):
     description: str = ""
 
 
+class _IndexerStart(_BaseModel):
+    processing_order: Literal["default", "fastest", "newest", "oldest"] = "default"
+
+
 def _config_path(request: Request) -> str:
     # Prefer the explicit launcher-provided config path so installer builds do
     # not depend on uvicorn's working directory. Fall back to cwd/config.yaml in
@@ -1924,6 +2241,7 @@ def indexer_start(request: Request, body: Optional[_IndexerStart] = None):
         result = indexer_manager.start(
             config_path=_config_path(request),
             venv_bin=_venv_bin(),
+            processing_order=body.processing_order if body else "default",
         )
         return result
     except RuntimeError as e:
@@ -2217,10 +2535,6 @@ def browse_directory(path: str = "", request: Request = None):
 
 # ── Diagnostics ───────────────────────────────────────────────────────────────
 
-class _IndexerStart(_BaseModel):
-    processing_order: Literal["default", "fastest", "newest", "oldest"] = "default"
-
-
 def _latest_timestamped_log(log_dir: Path, prefix: str) -> Optional[Path]:
     """Return the most-recently-created log matching <prefix>-*.log, or None."""
     matches = sorted(log_dir.glob(f"{prefix}-*.log"))
@@ -2241,7 +2555,6 @@ def diagnostics(request: Request):
     # (separate from the DataDir data root).  Fall back to cfg.log_dir, then cwd/logs.
     log_dir_env = os.environ.get("MSA_LOG_DIR")
     log_dir_raw = log_dir_env or getattr(cfg, "log_dir", None)
-            processing_order=body.processing_order if body else "default",
     log_dir = Path(log_dir_raw) if log_dir_raw else config_file.parent / "logs"
 
     latest_launch  = _latest_timestamped_log(log_dir, "launch")

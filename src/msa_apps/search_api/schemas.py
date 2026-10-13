@@ -1,4 +1,4 @@
-from typing import Dict, List, Optional
+from typing import Dict, List, Literal, Optional
 from pydantic import BaseModel, Field
 class SearchFilters(BaseModel):
     people: Optional[List[str]] = None
@@ -158,3 +158,181 @@ class BatchFaceSuggestionItem(BaseModel):
 class BatchFaceSuggestionsResponse(BaseModel):
     results: Dict[str, BatchFaceSuggestionItem]
     missing: List[str] = []
+
+
+PipelineStatus = Literal[
+    "disabled", "not_processed", "pending", "completed", "failed", "unsupported", "unknown"
+]
+
+
+class PipelineStateOut(BaseModel):
+    pipeline: str
+    status: PipelineStatus
+    evidence: Literal["recorded", "legacy_flag", "current_config", "unknown"]
+    configured_enabled: Optional[bool] = None
+    model_name: Optional[str] = None
+    model_revision: Optional[str] = None
+    started_at: Optional[str] = None
+    completed_at: Optional[str] = None
+    error_type: Optional[str] = None
+
+
+class EmbeddingInfo(BaseModel):
+    present: bool
+    count: int = 0
+    dimensions: Optional[int] = None
+    model: Optional[str] = None
+    created_at: Optional[str] = None
+
+
+class FingerprintInfo(BaseModel):
+    source_name: str
+    relative_path: str
+    size_bytes: int
+    filesystem_mtime: Optional[str] = None
+
+
+class AssetMediaInfo(BaseModel):
+    id: str
+    type: Literal["image", "video", "unknown"]
+    mime: Optional[str] = None
+    filename: Optional[str] = None
+    source_name: Optional[str] = None
+    source_folder: Optional[str] = None
+    path: Optional[str] = None
+    size_bytes: Optional[int] = None
+    width: Optional[int] = None
+    height: Optional[int] = None
+    duration: Optional[float] = None
+    frame_rate: Optional[float] = None
+    captured_at: Optional[str] = None
+    added_at: Optional[str] = None
+    filesystem_mtime: Optional[str] = None
+    camera: Optional[str] = None
+    lens: Optional[str] = None
+    gps_lat: Optional[float] = None
+    gps_lon: Optional[float] = None
+    place: Optional[str] = None
+    gps_processed: Optional[bool] = None
+    gps_data_mode: Optional[str] = None
+    gps_sensitive: bool = True
+    hash_blake3: Optional[str] = None
+    fingerprints: List[FingerprintInfo] = Field(default_factory=list)
+
+
+class FaceIntelligenceOut(BaseModel):
+    face_id: str
+    bbox: List[float]
+    confidence: Optional[float] = None
+    person_id: Optional[str] = None
+    person_name: Optional[str] = None
+    identity_status: Literal["known", "unknown"]
+    gender: Optional[str] = None
+    age: Optional[int] = None
+    shot_index: Optional[int] = None
+    kf_index: Optional[int] = None
+    timestamp: Optional[float] = None
+    thumbnail_url: Optional[str] = None
+    embedding: EmbeddingInfo
+
+
+class ObjectLabelOut(BaseModel):
+    label: str
+    confidence: Optional[float] = None
+    bbox: Optional[List[float]] = None
+    shot_index: Optional[int] = None
+    kf_index: Optional[int] = None
+    timestamp: Optional[float] = None
+    evidence: Literal["stored_label_only"] = "stored_label_only"
+
+
+class VideoKeyframeOut(BaseModel):
+    id: int
+    shot_index: int
+    kf_index: int
+    timestamp: float
+    shot_start: float
+    shot_end: float
+    gps_lat: Optional[float] = None
+    gps_lon: Optional[float] = None
+    gps_alt: Optional[float] = None
+    gps_datetime_utc: Optional[str] = None
+    gps_fix: Optional[int] = None
+    gps_source: Optional[str] = None
+    place: Optional[str] = None
+    tags: List[str] = Field(default_factory=list)
+    preview_url: Optional[str] = None
+    embedding: EmbeddingInfo
+
+
+class VideoShotOut(BaseModel):
+    id: int
+    shot_index: int
+    start: float
+    end: float
+    duration: float
+    is_synthetic: bool
+
+
+class TranscriptSegmentOut(BaseModel):
+    id: int
+    segment_index: int
+    start: float
+    end: float
+    text: str
+
+
+class TranscriptInfo(BaseModel):
+    status: Literal["transcribed", "no_speech", "unsupported", "failed", "disabled", "not_processed", "unknown"]
+    model_name: Optional[str] = None
+    model_revision: Optional[str] = None
+    runtime_version: Optional[str] = None
+    language: Optional[str] = None
+    processed_at: Optional[str] = None
+    error_code: Optional[str] = None
+    segments: List[TranscriptSegmentOut] = Field(default_factory=list)
+    total_segments: int = 0
+    offset: int = 0
+    limit: int = 100
+
+
+class DescriptionOut(BaseModel):
+    status: Literal["not_generated", "available", "unavailable"]
+    text: Optional[str] = None
+    model_name: Optional[str] = None
+    model_revision: Optional[str] = None
+    generated_at: Optional[str] = None
+
+
+class SceneDescriptionOut(BaseModel):
+    start: float
+    end: float
+    text: Optional[str] = None
+    status: Literal["not_generated", "available", "unavailable"] = "not_generated"
+    model_name: Optional[str] = None
+    model_revision: Optional[str] = None
+    generated_at: Optional[str] = None
+
+
+class AssetDescriptionsOut(BaseModel):
+    image_caption: DescriptionOut
+    video_summary: DescriptionOut
+    scenes: List[SceneDescriptionOut] = Field(default_factory=list)
+
+
+class AssetIntelligenceResponse(BaseModel):
+    media: AssetMediaInfo
+    descriptions: AssetDescriptionsOut
+    pipeline_status: List[PipelineStateOut]
+    embeddings: Dict[str, EmbeddingInfo]
+    faces: List[FaceIntelligenceOut]
+    face_count: int
+    objects: List[ObjectLabelOut]
+    object_label_count: int
+    objects_evidence: Literal["stored_label_only", "none", "unknown"]
+    stored_tags: List[str] = Field(default_factory=list)
+    shots: List[VideoShotOut] = Field(default_factory=list)
+    total_shots: int = 0
+    keyframes: List[VideoKeyframeOut] = Field(default_factory=list)
+    total_keyframes: int = 0
+    transcript: TranscriptInfo

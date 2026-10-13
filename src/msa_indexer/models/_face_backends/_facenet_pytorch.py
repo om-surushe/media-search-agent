@@ -178,9 +178,9 @@ class FacenetPytorchBackend:
                 )
             return results
 
-        except Exception as exc:
-            logger.error("FaceNet detect_and_embed failed: {}", exc)
-            return []
+        except Exception:
+            logger.exception("FaceNet detect_and_embed failed")
+            raise
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 

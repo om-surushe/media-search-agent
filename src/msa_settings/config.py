@@ -201,6 +201,20 @@ class Config:
 # Device detection
 # ---------------------------------------------------------------------------
 
+def object_detection_enabled(config) -> bool:
+    """Resolve the configured image-object detector gate consistently."""
+    setting = getattr(config, "enable_object_detection", False)
+    on_cpu = getattr(config, "device", "cpu") == "cpu"
+    return setting is True or (setting == "auto" and not on_cpu)
+
+
+def video_object_detection_enabled(config) -> bool:
+    """Video object detection additionally requires its explicit opt-in."""
+    return object_detection_enabled(config) and bool(
+        getattr(config, "enable_video_object_detection", False)
+    )
+
+
 def detect_device() -> str:
     """Return the best available compute device: 'cuda' > 'mps' > 'cpu'."""
     try:

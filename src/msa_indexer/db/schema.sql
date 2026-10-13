@@ -35,6 +35,26 @@ CREATE INDEX IF NOT EXISTS idx_media_path ON media(path);
 -- Browse default sort: ORDER BY ts_utc DESC, plus date-range filters.
 -- Without this, every paginated /media call sorts every matched row.
 CREATE INDEX IF NOT EXISTS idx_media_ts ON media(ts_utc);
+
+-- Detailed status/provenance for optional per-media detectors. The legacy
+-- boolean columns remain the incremental-indexing compatibility flags.
+CREATE TABLE IF NOT EXISTS media_pipeline_status (
+  media_id TEXT NOT NULL,
+  pipeline TEXT NOT NULL CHECK (pipeline IN ('face_detection', 'object_detection')),
+  status TEXT NOT NULL CHECK (status IN (
+    'disabled', 'not_processed', 'pending', 'completed', 'failed', 'unsupported', 'unknown'
+  )),
+  model_name TEXT,
+  model_revision TEXT,
+  started_at TEXT,
+  completed_at TEXT,
+  error_type TEXT,
+  PRIMARY KEY (media_id, pipeline),
+  FOREIGN KEY (media_id) REFERENCES media(media_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_media_pipeline_status_media
+  ON media_pipeline_status(media_id, pipeline);
+
 CREATE TABLE IF NOT EXISTS tag (
   tag_id INTEGER PRIMARY KEY AUTOINCREMENT,
   name TEXT UNIQUE

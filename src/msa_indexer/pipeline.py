@@ -7,6 +7,7 @@ from loguru import logger
 from .utils.logging import with_ctx
 from .io.scanner import ScanStats, iter_media, iter_media_entries
 from msa_settings.paths import resolve_for_access
+from msa_settings.config import object_detection_enabled, video_object_detection_enabled
 from .io.exif import get_exif_basic
 try:
     import reverse_geocoder as rg
@@ -48,7 +49,6 @@ def _emit_indexer_summary(**payload) -> None:
     logger.info(f"INDEXER_SUMMARY {json.dumps(payload, sort_keys=True)}")
 
 
-def _db_rel_path(p: Path, root: Path) -> str:
 def _sort_media_entries(entries, order: str):
     """Apply scheduling while preserving the existing scanner order by default."""
     valid_orders = {"default", "fastest", "newest", "oldest"}
@@ -96,6 +96,7 @@ def _sort_media_entries(entries, order: str):
     return sorted(ordered, key=modified_ns, reverse=(order == "newest"))
 
 
+def _db_rel_path(p: Path, root: Path) -> str:
     """The relative-path key stored in SQLite — POSIX form per ADR-007.
 
     This is THE single computation shared by the fingerprint key
@@ -124,9 +125,7 @@ def _object_detection_enabled(config) -> bool:
     — a later init failure only makes the ETA an over-estimate, the safe
     direction.
     """
-    det_setting = getattr(config, "enable_object_detection", False)
-    on_cpu = getattr(config, "device", "cpu") == "cpu"
-    return det_setting is True or (det_setting == "auto" and not on_cpu)
+    return object_detection_enabled(config)
 
 
 def _video_object_detection_enabled(config) -> bool:
@@ -143,9 +142,7 @@ def _video_object_detection_enabled(config) -> bool:
     #208 fixes. Video analog of the image-detector enablement gate (#208 review,
     Codex P2). Errs toward "enabled" — an init failure only over-estimates.
     """
-    return _object_detection_enabled(config) and bool(
-        getattr(config, "enable_video_object_detection", False)
-    )
+    return video_object_detection_enabled(config)
 
 
 def _base_needs_flags(status, *, model_version, reprocess_gps, reprocess_objects,
@@ -189,10 +186,10 @@ def _video_skip_predicate(*, has_shots, has_keyframes, has_unembedded_keyframes,
     image-style ``embeddings_version != model_version`` gate reads as "needs
     embeddings" for EVERY video forever. The runtime instead decides a video is
     done from its keyframe/shot state: shots present AND keyframes present AND
-    every keyframe embedded (and, under the historical heuristic that keyframes
-    could not exist without their tags, keyframes-present ⇒ object detection done
-    — so object work is re-charged only when keyframes are ABSENT). This
-    reproduces the main loop's visual-work skip decision exactly. Transcript
+    every keyframe embedded. Object detection is independently complete only
+    when its own completion flag is set; keyframes may exist from a run where
+    video object detection was disabled. This reproduces the main loop's visual-
+    work skip decision exactly. Transcript
     status is checked separately by :func:`_transcription_needs_processing`.
     Returns True iff the existing visual video work can be skipped.
 
@@ -205,7 +202,7 @@ def _video_skip_predicate(*, has_shots, has_keyframes, has_unembedded_keyframes,
     video_needs_embeddings = (
         not has_keyframes or reprocess_embeddings or needs_keyframe_emb_backfill
     ) and needs_embeddings
-    video_needs_objects = (not has_keyframes or reprocess_objects) and needs_objects
+    video_needs_objects = needs_objects or reprocess_objects
     return bool(has_shots) and bool(has_keyframes) and not (
         video_needs_embeddings or video_needs_objects or needs_faces
     )
@@ -213,6 +210,7 @@ def _video_skip_predicate(*, has_shots, has_keyframes, has_unembedded_keyframes,
 
 def _count_phase_expects_free_skip(snap, *, model_version, is_image, is_video,
                                    objects_enabled, faces_enabled,
+                                   video_objects_enabled=False,
                                    transcription_enabled=False,
                                    transcription_model=WHISPER_MODEL_NAME,
                                    transcription_revision=WHISPER_MODEL_REVISION) -> bool:
@@ -236,10 +234,9 @@ def _count_phase_expects_free_skip(snap, *, model_version, is_image, is_video,
       is decided by the SHARED :func:`_video_skip_predicate` from keyframe/shot
       state, NOT the permanently-"stale" ``embeddings_version`` gate. If speech
       transcription is enabled, current model/revision state is checked first.
-      Because the visual predicate
-      already treats keyframes-present ⇒ object tags done, video object-detection
-      enablement never enters here (the runtime does not re-run object detection
-      on a video that already has keyframes).
+      Video object detection is a separate opt-in; when enabled, an unset
+      completion flag blocks a free skip even if keyframes already exist, so
+      previously untagged videos can be enriched.
     * **Images** gate the object/face stages by whether they are ENABLED this
       session (a disabled stage does no work even with its ``*_done`` flag at 0,
       so it must not block the subtraction — otherwise a library indexed without
@@ -281,8 +278,8 @@ def _count_phase_expects_free_skip(snap, *, model_version, is_image, is_video,
             has_keyframes=snap.get("has_keyframes", False),
             has_unembedded_keyframes=snap.get("has_unembedded_keyframes", False),
             needs_embeddings=needs_embeddings,
-            needs_objects=needs_objects,
-            needs_faces=needs_faces,
+            needs_objects=video_objects_enabled and needs_objects,
+            needs_faces=faces_enabled and needs_faces,
             reprocess_embeddings=False,
             reprocess_objects=False,
         )
@@ -466,12 +463,12 @@ def get_place_name(lat: float, lon: float) -> str | None:
 
 def run_index(config, stop_event=None):
     import time
-    processing_order = getattr(config, "processing_order", "default")
-    if processing_order not in {"default", "fastest", "newest", "oldest"}:
-        raise ValueError(f"Invalid processing order: {processing_order!r}")
     import os
     # Track total run time
     run_start_time = time.perf_counter()
+    processing_order = getattr(config, "processing_order", "default")
+    if processing_order not in {"default", "fastest", "newest", "oldest"}:
+        raise ValueError(f"Invalid processing order: {processing_order!r}")
 
     # Per-batch commit configuration. The indexer commits to SQLite every N
     # files or every M seconds, whichever fires first, so that browse readers
@@ -562,13 +559,13 @@ def run_index(config, stop_event=None):
     _incremental_cfg = getattr(config, 'incremental', None)
     fingerprint_enabled = bool(getattr(_incremental_cfg, 'fingerprint_enabled', True))
     verify_content = bool(getattr(config, 'verify_content', False))
+    total_found = 0
+    total_images_found = 0
+    total_videos_found = 0
     # ponytail: keep only scan metadata in memory for a global sort; use a
     # disk-backed queue only if real libraries make this O(n) snapshot costly.
     scheduled_entries = []
     source_walk_stats: dict[str, ScanStats] = {}
-    total_found = 0
-    total_images_found = 0
-    total_videos_found = 0
     # Files whose stored (size, mtime) already matches the on-disk stat — the
     # exact fast-path skip condition — so they cost ~0 processing time (#208).
     expected_image_hits = 0
@@ -596,6 +593,7 @@ def run_index(config, stop_event=None):
     count_model_version = getattr(config, 'model_version', None)
     transcription_enabled = bool(getattr(config, "enable_speech_transcription", False))
     objects_enabled = _object_detection_enabled(config)
+    video_objects_enabled = _video_object_detection_enabled(config)
     faces_enabled = bool(getattr(config, 'enable_face_recognition', False))
     # Bulk-load each source's fingerprints AND processing-status snapshot ONCE
     # (no per-file SQL in the walk). Only when the fast path is actually armed
@@ -645,12 +643,12 @@ def run_index(config, stop_event=None):
         walk_stats = ScanStats()
         source_walk_stats[source.name] = walk_stats
         for p, st in iter_media_entries(root, stop_event=stop_event, stats=walk_stats):
+            scheduled_entries.append((source, root, p, st, source_index))
+            ext = p.suffix.lower()
             if media_type_filter == "image" and ext not in IMAGE_EXT:
                 continue
             if media_type_filter == "video" and ext not in VIDEO_EXT:
                 continue
-            scheduled_entries.append((source, root, p, st, source_index))
-            ext = p.suffix.lower()
             total_found += 1
             is_image = ext in IMAGE_EXT
             is_video = ext in VIDEO_EXT
@@ -683,15 +681,16 @@ def run_index(config, stop_event=None):
                     is_video=is_video,
                     objects_enabled=objects_enabled,
                     faces_enabled=faces_enabled,
+                    video_objects_enabled=video_objects_enabled,
                     transcription_enabled=transcription_enabled,
                 ):
                     if is_image:
                         expected_image_hits += 1
                     elif is_video:
+                        expected_video_hits += 1
     scheduled_entries = _sort_media_entries(scheduled_entries, processing_order)
     logger.info("Processing order: {}", processing_order)
 
-                        expected_video_hits += 1
     # Estimate only the remainder — the files that will actually be hashed
     # and (potentially) processed. Keep total_found / images_to_process /
     # videos_to_process as the raw COUNTS found (unchanged meaning; the
@@ -704,8 +703,8 @@ def run_index(config, stop_event=None):
         images_to_process=total_images_found,
         videos_to_process=total_videos_found,
         expected_to_process=max(0, total_found - expected_image_hits - expected_video_hits),
-        processing_order=processing_order,
         estimated_remaining_seconds=round(est_img_time + est_vid_time),
+        processing_order=processing_order,
     )
     
     reprocess_flags = []
@@ -850,6 +849,9 @@ def run_index(config, stop_event=None):
 
     # Object detection init (optional, based on config)
     object_detector = None
+    object_init_error = None
+    object_model_name = getattr(config, "object_model", "PekingU/rtdetr_r18vd")
+    object_model_revision = None
     det_setting = getattr(config, "enable_object_detection", False)
     on_cpu = config.device == "cpu"
     # Shared with the count-phase ETA so both agree on whether object detection
@@ -859,8 +861,11 @@ def run_index(config, stop_event=None):
     if should_detect:
         try:
             obj_backend = getattr(config, "object_detector_backend", "rtdetr")
-            obj_model   = getattr(config, "object_model", "PekingU/rtdetr_r18vd")
+            obj_model   = object_model_name
             obj_conf    = getattr(config, "object_confidence_threshold", 0.35)
+            if obj_backend == "rtdetr":
+                from .models._detection_backends._rtdetr import KNOWN_REVISIONS
+                object_model_revision = KNOWN_REVISIONS.get(obj_model)
             if on_cpu and det_setting is True:
                 logger.warning(
                     "Object detection enabled on CPU (backend={}, model={}). "
@@ -881,7 +886,8 @@ def run_index(config, stop_event=None):
                 obj_backend, obj_model, get_device_label(config.device),
             )
         except Exception as e:
-            logger.warning("Failed to initialize object detector: {}. Continuing without object detection.", e)
+            object_init_error = type(e).__name__
+            logger.warning("Failed to initialize object detector ({}). Continuing with stage marked failed.", object_init_error)
     elif on_cpu and det_setting == "auto":
         logger.info(
             "Object detection SKIPPED on CPU (set enable_object_detection: true to force it on, "
@@ -892,14 +898,15 @@ def run_index(config, stop_event=None):
     
     # Face recognition init (optional, based on config)
     face_recognizer = None
-    face_model_id = "unknown"
+    face_init_error = None
+    face_model = getattr(config, 'face_model', 'vggface2')
+    face_backend = getattr(config, 'face_recognizer_backend', 'facenet_pytorch')
+    face_model_id = f"{face_backend}:{face_model}"
     if hasattr(config, 'enable_face_recognition') and config.enable_face_recognition:
         try:
             from .models.faces import FaceRecognizer
-            face_model = getattr(config, 'face_model', 'vggface2')
             face_conf = getattr(config, 'face_confidence_threshold', 0.95)
             face_min_size = getattr(config, 'face_min_size', 60)
-            face_backend = getattr(config, 'face_recognizer_backend', 'facenet_pytorch')
             face_recognizer = FaceRecognizer(
                 model_name=face_model,
                 device=config.device,
@@ -912,12 +919,12 @@ def run_index(config, stop_event=None):
             logger.info(f"Face recognition ({face_backend}/{face_model}) running on {get_device_label(config.device)}")
             logger.info(f"Face recognition ENABLED with backend={face_backend} model={face_model} threshold={face_conf} min_size={face_min_size}")
         except Exception as e:
+            face_init_error = type(e).__name__
             logger.error(
-                f"Failed to initialize face recognizer: {e}. "
-                "Check that facenet-pytorch is installed and the model cache is intact. "
-                "Fix the error or set enable_face_recognition: false in config.yaml to skip faces."
+                "Failed to initialize face recognizer ({}). Other indexing stages will continue; "
+                "face detection will be recorded as failed.",
+                face_init_error,
             )
-            raise
     else:
         logger.info("Face recognition DISABLED (set enable_face_recognition: true in config.yaml to enable)")
     
@@ -1002,13 +1009,6 @@ def run_index(config, stop_event=None):
                 logger.info("Stop requested — finishing indexing run early (FAISS will still be saved)")
                 break
 
-            # Track time for each file
-            file_start_time = time.perf_counter()
-
-            ext = p.suffix.lower()
-            file_count += 1
-            # Count images and videos as they are discovered (before skip check)
-            if ext in IMAGE_EXT:
             # The ordering snapshot can age while models initialize; preserve the
             # original fast-path's fresh-stat check before trusting a fingerprint.
             try:
@@ -1020,6 +1020,13 @@ def run_index(config, stop_event=None):
                 logger.warning("Skipping media whose metadata could not be refreshed ({}): {}", type(exc).__name__, p.name)
                 continue
 
+            # Track time for each file
+            file_start_time = time.perf_counter()
+
+            ext = p.suffix.lower()
+            file_count += 1
+            # Count images and videos as they are discovered (before skip check)
+            if ext in IMAGE_EXT:
                 img_count += 1
             elif ext in VIDEO_EXT:
                 vid_count += 1
@@ -1200,6 +1207,13 @@ def run_index(config, stop_event=None):
                 reprocess_faces=bool(getattr(config, 'reprocess_faces', False)),
                 reprocess_embeddings=bool(getattr(config, 'reprocess_embeddings', False)),
             )
+            # A configured-off stage is not pending work. Videos have their
+            # own explicit object-detection opt-in.
+            needs_objects = (
+                (video_objects_enabled if ext in VIDEO_EXT else objects_enabled)
+                and needs_objects
+            )
+            needs_faces = faces_enabled and needs_faces
             needs_transcription = (
                 ext in VIDEO_EXT
                 and bool(getattr(config, "enable_speech_transcription", False))
@@ -1321,6 +1335,28 @@ def run_index(config, stop_event=None):
                 content_changed = True
                 log.debug(f"Upserted media row: {row}")
 
+            if not media_exists:
+                object_stage_enabled = video_objects_enabled if ext in VIDEO_EXT else objects_enabled
+                object_initial_status = (
+                    "disabled" if not object_stage_enabled else
+                    "failed" if object_init_error else "not_processed"
+                )
+                db.set_pipeline_status(
+                    media_id, "object_detection", object_initial_status,
+                    model_name=object_model_name,
+                    model_revision=object_model_revision,
+                    error_type=object_init_error if object_stage_enabled else None,
+                )
+                face_initial_status = (
+                    "disabled" if not faces_enabled else
+                    "failed" if face_init_error else "not_processed"
+                )
+                db.set_pipeline_status(
+                    media_id, "face_detection", face_initial_status,
+                    model_name=face_model_id,
+                    error_type=face_init_error if faces_enabled else None,
+                )
+
             # Deferred fingerprint insert for brand-new content: the media
             # row now exists, so the FK is satisfiable.
             if fp_pending is not None and fingerprint_enabled:
@@ -1404,35 +1440,63 @@ def run_index(config, stop_event=None):
                         embed_fail += 1
                         log.warning(f"Image embedding failed: {e}")
                 
-                # Object detection and tagging - only if needed
-                if object_detector and needs_objects and img is not None:
-                    try:
-                        object_labels = object_detector.get_labels(img)
-                        if object_labels:
-                            db.add_tags(media_id, object_labels)
-                            tag_items += 1
-                            processed_object_count = len(object_labels)
-                            log.debug(f"Object tags added count={len(object_labels)} labels={object_labels}")
-                        # Mark object detection as done (even if no objects found)
-                        db.mark_object_detection_done(media_id)
-                        content_changed = True
-                    except Exception as e:
-                        log.warning(f"Object detection failed: {e}")
-                
-                # Face detection and recognition - only if needed
-                if face_recognizer and needs_faces and img is not None:
-                    files_processed_with_faces += 1
-                    try:
-                        # Delete old faces when reprocessing to avoid orphaned face_ids
-                        if getattr(config, 'reprocess_faces', False):
-                            db.delete_faces_for_media(media_id)
-                            content_changed = True
-                            log.debug("Deleted old face records for reprocessing")
-                        
-                        # Run face detection (reprocess or first time)
-                        log.debug("Running face detection on image...")
-                        faces = face_recognizer.detect_and_embed(img)
-                        if faces:
+                # Object detection: an empty result is completed; an exception is failed.
+                if needs_objects:
+                    if object_init_error or object_detector is None:
+                        db.set_pipeline_status(
+                            media_id, "object_detection", "failed",
+                            model_name=object_model_name, model_revision=object_model_revision,
+                            error_type=object_init_error or "DetectorUnavailable",
+                        )
+                    elif img is None:
+                        db.set_pipeline_status(
+                            media_id, "object_detection", "failed",
+                            model_name=object_model_name, model_revision=object_model_revision,
+                            error_type="ImageDecodeError",
+                        )
+                    else:
+                        db.set_pipeline_status(
+                            media_id, "object_detection", "pending",
+                            model_name=object_model_name, model_revision=object_model_revision,
+                        )
+                        try:
+                            object_labels = object_detector.get_labels(img)
+                            if object_labels:
+                                db.add_tags(media_id, object_labels)
+                                tag_items += 1
+                                processed_object_count = len(object_labels)
+                            db.set_pipeline_status(
+                                media_id, "object_detection", "completed",
+                                model_name=object_model_name, model_revision=object_model_revision,
+                            )
+                            log.debug("Object detection completed labels={}", len(object_labels))
+                        except Exception as exc:
+                            db.set_pipeline_status(
+                                media_id, "object_detection", "failed",
+                                model_name=object_model_name, model_revision=object_model_revision,
+                                error_type=type(exc).__name__,
+                            )
+                            log.warning("Object detection failed ({})", type(exc).__name__)
+
+                # Face detection: do not discard previous faces until inference succeeds.
+                if needs_faces:
+                    if face_init_error or face_recognizer is None:
+                        db.set_pipeline_status(
+                            media_id, "face_detection", "failed", model_name=face_model_id,
+                            error_type=face_init_error or "DetectorUnavailable",
+                        )
+                    elif img is None:
+                        db.set_pipeline_status(
+                            media_id, "face_detection", "failed", model_name=face_model_id,
+                            error_type="ImageDecodeError",
+                        )
+                    else:
+                        files_processed_with_faces += 1
+                        db.set_pipeline_status(
+                            media_id, "face_detection", "pending", model_name=face_model_id,
+                        )
+                        try:
+                            faces = face_recognizer.detect_and_embed(img)
                             face_entries = []
                             face_emb_pairs: list[tuple[str, object]] = []
                             for i, face in enumerate(faces):
@@ -1445,24 +1509,28 @@ def run_index(config, stop_event=None):
                                     "age": face.metadata.get("age"),
                                 })
                                 face_emb_pairs.append((face_id, face.embedding))
-                                # Generate face thumbnail
+                            for face, (face_id, _) in zip(faces, face_emb_pairs):
                                 write_face_thumbnail(img, face.bbox, face_id, config.face_thumb_dir)
-                            db.add_faces(media_id, face_entries)
-                            content_changed = True
-                            # face rows must exist before face_embedding rows
-                            # for the FK to be satisfied — order matters here.
-                            for fid, emb in face_emb_pairs:
-                                db.upsert_face_embedding(fid, emb, model=face_model_id)
-                                face_embedding_count += 1
+                            if getattr(config, 'reprocess_faces', False):
+                                db.delete_faces_for_media(media_id)
+                                content_changed = True
+                            if face_entries:
+                                db.add_faces(media_id, face_entries)
+                                for fid, emb in face_emb_pairs:
+                                    db.upsert_face_embedding(fid, emb, model=face_model_id)
+                                    face_embedding_count += 1
+                                content_changed = True
                             processed_face_count = len(faces)
-                            log.debug(f"Detected {len(faces)} faces in image")
-                        else:
-                            log.debug("No faces detected in image")
-                        # Mark face detection as done (even if no faces found)
-                        db.mark_face_detection_done(media_id)
-                        content_changed = True
-                    except Exception as e:
-                        log.warning(f"Face detection failed: {e}")
+                            db.set_pipeline_status(
+                                media_id, "face_detection", "completed", model_name=face_model_id,
+                            )
+                            log.debug("Face detection completed count={}", len(faces))
+                        except Exception as exc:
+                            db.set_pipeline_status(
+                                media_id, "face_detection", "failed", model_name=face_model_id,
+                                error_type=type(exc).__name__,
+                            )
+                            log.warning("Face detection failed ({})", type(exc).__name__)
                 
                 # Summary log for image processing
                 file_elapsed = time.perf_counter() - file_start_time
@@ -1503,13 +1571,8 @@ def run_index(config, stop_event=None):
                     existing_shots = db.get_shots_for_video(media_id)
                     has_keyframes = db.has_keyframes_for_video(media_id)
 
-                    # For videos, the historical heuristic was: if keyframes
-                    # exist, embeddings and object-detection tags are implicitly
-                    # done (in the FAISS era keyframes couldn't exist without
-                    # vectors). Stage 3 broke that invariant — a pre-Stage-3
-                    # upgrade has video_keyframes rows but no keyframe_embedding
-                    # rows. Detect that case explicitly so we still re-run the
-                    # video path on those keyframes.
+                    # Keyframes, embeddings, and detector completion are tracked
+                    # independently; existing keyframes do not imply detections ran.
                     reprocess_embeddings = getattr(config, 'reprocess_embeddings', False)
                     reprocess_objects = getattr(config, 'reprocess_objects', False)
                     # Whether this video is a no-op skip — decided by the SHARED
@@ -1547,6 +1610,22 @@ def run_index(config, stop_event=None):
                         shots = []
                         is_synthetic = False
                         processed_shot_count = 0
+
+                    video_object_error = object_init_error if needs_objects else None
+                    video_face_error = face_init_error if needs_faces else None
+                    if needs_objects and not object_detector:
+                        video_object_error = video_object_error or "DetectorUnavailable"
+                    if needs_faces and not face_recognizer:
+                        video_face_error = video_face_error or "DetectorUnavailable"
+                    if needs_objects and not video_object_error:
+                        db.set_pipeline_status(
+                            media_id, "object_detection", "pending",
+                            model_name=object_model_name, model_revision=object_model_revision,
+                        )
+                    if needs_faces and not video_face_error:
+                        db.set_pipeline_status(
+                            media_id, "face_detection", "pending", model_name=face_model_id,
+                        )
 
                     # Timing variables for video processing breakdown
                     scene_detect_time = 0.0
@@ -1605,17 +1684,8 @@ def run_index(config, stop_event=None):
                         # object_detector is None unless _object_detection_enabled
                         # held at init, so this stays equivalent to the prior
                         # `object_detector and enable_video_object_detection`.
-                        enable_video_detection = (
-                            object_detector is not None
-                            and _video_object_detection_enabled(config)
-                        )
+                        enable_video_detection = video_objects_enabled and object_detector is not None
                         geocode_cache = {}
-                        
-                        # Delete old faces when reprocessing to avoid orphaned face_ids
-                        if face_recognizer and needs_faces and getattr(config, 'reprocess_faces', False):
-                            db.delete_faces_for_media(media_id)
-                            content_changed = True
-                            log.debug("Deleted old face records for video reprocessing")
                         
                         keyframe_entries = []
                         # (shot_index, kf_index, embedding) tuples — embeddings
@@ -1628,6 +1698,10 @@ def run_index(config, stop_event=None):
                             keyframes = extract_keyframes_from_shot(p, shot, keyframes_per_shot=kps)
                             for k_idx, (t_sec, img) in enumerate(keyframes):
                                 if img is None:
+                                    if needs_objects:
+                                        video_object_error = video_object_error or "KeyframeDecodeError"
+                                    if needs_faces:
+                                        video_face_error = video_face_error or "KeyframeDecodeError"
                                     continue
                                 vec_kf = embedder.image_embed([img])[0]
                                 kf_emb_pairs.append((s_idx, k_idx, vec_kf))
@@ -1643,7 +1717,8 @@ def run_index(config, stop_event=None):
                                             processed_object_count += len(keyframe_tags)
                                             log.debug(f"Keyframe {s_idx}:{k_idx} objects: {keyframe_tags}")
                                     except Exception as e:
-                                        log.warning(f"Object detection failed for keyframe {s_idx}:{k_idx}: {e}")
+                                        video_object_error = type(e).__name__
+                                        log.warning("Object detection failed for keyframe {}:{} ({})", s_idx, k_idx, video_object_error)
                                 
                                 # Per-keyframe face detection
                                 if face_recognizer and needs_faces:
@@ -1682,7 +1757,8 @@ def run_index(config, stop_event=None):
                                         else:
                                             log.debug(f"No faces detected in keyframe {s_idx}:{k_idx}")
                                     except Exception as e:
-                                        log.warning(f"Face detection failed for keyframe {s_idx}:{k_idx}: {e}")
+                                        video_face_error = type(e).__name__
+                                        log.warning("Face detection failed for keyframe {}:{} ({})", s_idx, k_idx, video_face_error)
                                 
                                 # Metadata row for SQLite
                                 gps_payload = sample_video_gps_at_timestamp(video_gps_samples, float(t_sec)) if video_gps_samples else None
@@ -1749,16 +1825,21 @@ def run_index(config, stop_event=None):
                         else:
                             log.warning(f"No valid keyframes extracted from {len(shots)} shots")
                             embed_fail += 1
-                        
-                        # Mark face detection as done for video (if face recognizer is enabled and we processed faces)
-                        if face_recognizer and needs_faces:
-                            db.mark_face_detection_done(media_id)
-                            content_changed = True
 
-                        # Mark object detection as done for video (if object detection was enabled and run)
-                        if enable_video_detection and needs_objects:
-                            db.mark_object_detection_done(media_id)
-                            content_changed = True
+                        if needs_faces:
+                            db.set_pipeline_status(
+                                media_id, "face_detection",
+                                "failed" if video_face_error or not kf_emb_pairs else "completed",
+                                model_name=face_model_id,
+                                error_type=video_face_error or ("NoKeyframes" if not kf_emb_pairs else None),
+                            )
+                        if needs_objects:
+                            db.set_pipeline_status(
+                                media_id, "object_detection",
+                                "failed" if video_object_error or not kf_emb_pairs else "completed",
+                                model_name=object_model_name, model_revision=object_model_revision,
+                                error_type=video_object_error or ("NoKeyframes" if not kf_emb_pairs else None),
+                            )
                         
                         other_ops_time = time.perf_counter() - other_ops_start
                         
@@ -1832,9 +1913,33 @@ def run_index(config, stop_event=None):
                                 total_video_duration += duration
                             if processed_shot_count > 0:
                                 total_shots += processed_shot_count
+                    elif not video_is_free_skip:
+                        if needs_objects:
+                            db.set_pipeline_status(
+                                media_id, "object_detection", "failed",
+                                model_name=object_model_name, model_revision=object_model_revision,
+                                error_type=video_object_error or "NoKeyframes",
+                            )
+                        if needs_faces:
+                            db.set_pipeline_status(
+                                media_id, "face_detection", "failed", model_name=face_model_id,
+                                error_type=video_face_error or "NoKeyframes",
+                            )
                 except Exception as e:
                     embed_fail += 1
-                    log.error(f"Video shot detection/indexing failed: {e}", exc_info=True)
+                    error_type = type(e).__name__
+                    if needs_objects:
+                        db.set_pipeline_status(
+                            media_id, "object_detection", "failed",
+                            model_name=object_model_name, model_revision=object_model_revision,
+                            error_type=error_type,
+                        )
+                    if needs_faces:
+                        db.set_pipeline_status(
+                            media_id, "face_detection", "failed", model_name=face_model_id,
+                            error_type=error_type,
+                        )
+                    log.error("Video shot detection/indexing failed ({})", error_type, exc_info=True)
 
             # Accrue THIS file's true processing wall-clock for the rolling ETA
             # (#208 review, Codex P2). Every file reaching here was actually
@@ -1918,11 +2023,8 @@ def run_index(config, stop_event=None):
                     videos_to_process=total_videos_found,
                     files_walked=file_count,
                     estimated_remaining_seconds=round(remaining_files * avg_per_file),
+                    processing_order=processing_order,
                 )
-
-        # If stop was requested mid-source, don't continue to the next source
-        if stop_event is not None and stop_event.is_set():
-            break
 
     # Embeddings are now durably committed per file via image_embedding /
     # keyframe_embedding / face_embedding tables, so there is no separate
@@ -2023,7 +2125,6 @@ def run_index(config, stop_event=None):
                         s.name: {
                             "walked_to_completion": True,
                             "walk_errors": (
-                    processing_order=processing_order,
                                 source_walk_stats[s.name].walk_errors
                                 if s.name in source_walk_stats
                                 else None
@@ -2148,6 +2249,7 @@ def run_index(config, stop_event=None):
         p50_inter = p95_inter = max_inter = 0
     _emit_indexer_summary(
         phase="commit_stats",
+        processing_order=processing_order,
         total_commits=commit_count,
         total_commit_ms=total_commit_ms,
         wall_clock_ms=total_wall_ms,
@@ -2184,6 +2286,7 @@ def run_index(config, stop_event=None):
     # counters rather than stuck on "exporting" (M-8/S-2 plan §3.4).
     complete_summary = dict(
         phase="complete",
+        processing_order=processing_order,
         total_found=file_count,
         already_indexed=skipped_up_to_date_count,
         needs_processing=processed_img_count + processed_vid_count,
@@ -2249,7 +2352,6 @@ def run_index(config, stop_event=None):
                     logger.warning("Could not read Qdrant export state ({}); treating as unknown — will export conservatively.", _e)
                     qdrant_export_state = None
             if not export_blocked:
-        processing_order=processing_order,
                 qdrant_stale = False
                 local_index_version_seq = int(current_index_state.get("index_version_seq") or 0)
                 exported_seq: int | None = (
@@ -2286,7 +2388,6 @@ def run_index(config, stop_event=None):
                             # complete the interrupted bump FIRST, then
                             # export and record THAT seq — recording the
                             # stale lower seq would repeat the recovery
-        processing_order=processing_order,
                             # export on every subsequent no-op run.
                             _max_stamped = probe_db.max_stamped_seq()
                             if _max_stamped > local_index_version_seq:

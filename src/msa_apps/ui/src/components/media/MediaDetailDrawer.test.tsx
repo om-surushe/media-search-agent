@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
@@ -14,6 +14,31 @@ function wrap(ui: React.ReactElement) {
   )
 }
 
+const mockIntelligence = {
+  media: { id: 'img-01', type: 'image', mime: 'image/jpeg', filename: 'beach.jpg', source_name: 'fixture', source_folder: 'photos', path: '/photos/beach.jpg', size_bytes: 1024, width: 10, height: 20, duration: null, captured_at: null, added_at: null, filesystem_mtime: null, camera: null, lens: null, gps_lat: null, gps_lon: null, gps_sensitive: false, hash_blake3: null, fingerprints: [] },
+  descriptions: { image_caption: { status: 'not_generated', text: null, model_name: null }, video_summary: { status: 'not_generated', text: null, model_name: null }, scenes: [] },
+  pipeline_status: [
+    { pipeline: 'face_detection', status: 'disabled', evidence: 'current_config', configured_enabled: false, model_name: null, model_revision: null, started_at: null, completed_at: null, error_type: null },
+    { pipeline: 'object_detection', status: 'not_processed', evidence: 'current_config', configured_enabled: true, model_name: null, model_revision: null, started_at: null, completed_at: null, error_type: null },
+  ],
+  embeddings: { image: { present: true, count: 1, dimensions: 768, model: 'clip', created_at: null }, keyframes: { present: false, count: 0, dimensions: null, model: null, created_at: null } },
+  faces: [], face_count: 0, objects: [], object_label_count: 0, objects_evidence: 'none', stored_tags: [], shots: [], total_shots: 0, keyframes: [], total_keyframes: 0,
+  transcript: { status: 'disabled', model_name: null, model_revision: null, runtime_version: null, language: null, processed_at: null, error_code: null, segments: [], total_segments: 0 },
+}
+
+const videoIntelligence = {
+  ...mockIntelligence,
+  media: { ...mockIntelligence.media, id: 'vid-01', type: 'video', mime: 'video/mp4', filename: 'clip.mp4', duration: 40 },
+  keyframes: [
+    { id: 1, shot_index: 0, kf_index: 0, timestamp: 2.6, tags: [], place: null },
+    { id: 2, shot_index: 1, kf_index: 0, timestamp: 36.5, tags: [], place: null },
+  ],
+  total_keyframes: 2,
+  total_shots: 2,
+}
+
+const videoItem = { id: 'vid-01', type: 'video' as const, path: '/videos/clip.mp4' }
+
 const baseItem = {
   id: 'img-01',
   type: 'image' as const,
@@ -27,9 +52,10 @@ const baseItem = {
 }
 
 beforeEach(() => {
-  vi.stubGlobal('fetch', vi.fn(() =>
-    Promise.resolve({ ok: true, json: () => Promise.resolve({ faces: [] }) })
-  ))
+  vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+    const payload = String(input).includes('/intelligence') ? mockIntelligence : { faces: [] }
+    return Promise.resolve({ ok: true, json: () => Promise.resolve(payload) })
+  }))
   Object.defineProperty(navigator, 'clipboard', {
     value: { writeText: vi.fn().mockResolvedValue(undefined) },
     writable: true,
@@ -39,6 +65,134 @@ beforeEach(() => {
 afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks() })
 
 describe('MediaDetailDrawer', () => {
+  it('defers selected keyframe seek until video metadata is ready and stays paused', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve({ ok: true, json: () => Promise.resolve(videoIntelligence) })))
+    const { container } = wrap(<MediaDetailDrawer item={videoItem} onClose={vi.fn()} />)
+    const keyframe = await screen.findByRole('button', { name: /2\.6s · shot 1/ })
+    const video = container.querySelector('video')!
+    let currentTime = 0
+    Object.defineProperty(video, 'readyState', { configurable: true, value: 0 })
+    Object.defineProperty(video, 'currentTime', { configurable: true, get: () => currentTime, set: value => { currentTime = value } })
+    const pause = vi.spyOn(video, 'pause').mockImplementation(() => {})
+    const play = vi.spyOn(video, 'play').mockResolvedValue(undefined)
+
+    await userEvent.click(keyframe)
+    expect(keyframe).toHaveAttribute('aria-pressed', 'true')
+    expect(currentTime).toBe(0)
+    expect(pause).toHaveBeenCalled()
+    expect(play).not.toHaveBeenCalled()
+
+    Object.defineProperty(video, 'readyState', { configurable: true, value: 1 })
+    fireEvent.loadedMetadata(video)
+    expect(currentTime).toBe(2.6)
+    expect(play).not.toHaveBeenCalled()
+  })
+
+  it('switches keyframes without reloading and preserves native playback controls', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve({ ok: true, json: () => Promise.resolve(videoIntelligence) })))
+    const { container } = wrap(<MediaDetailDrawer item={videoItem} onClose={vi.fn()} />)
+    const first = await screen.findByRole('button', { name: /2\.6s · shot 1/ })
+    const second = screen.getByRole('button', { name: /36\.5s · shot 2/ })
+    const video = container.querySelector('video')!
+    let currentTime = 0
+    Object.defineProperty(video, 'readyState', { configurable: true, value: 1 })
+    Object.defineProperty(video, 'currentTime', { configurable: true, get: () => currentTime, set: value => { currentTime = value } })
+    const pause = vi.spyOn(video, 'pause').mockImplementation(() => {})
+    const play = vi.spyOn(video, 'play').mockResolvedValue(undefined)
+    const load = vi.spyOn(video, 'load').mockImplementation(() => {})
+    const src = video.getAttribute('src')
+
+    await userEvent.click(first)
+    expect(currentTime).toBe(2.6)
+    expect(first).toHaveAttribute('aria-pressed', 'true')
+    expect(pause).toHaveBeenCalled()
+    expect(play).not.toHaveBeenCalled()
+    await userEvent.click(second)
+    expect(currentTime).toBe(36.5)
+    expect(second).toHaveAttribute('aria-pressed', 'true')
+    expect(first).toHaveAttribute('aria-pressed', 'false')
+    expect(video.controls).toBe(true)
+    expect(video.getAttribute('src')).toBe(src)
+    expect(load).not.toHaveBeenCalled()
+    expect(play).not.toHaveBeenCalled()
+
+    await video.play()
+    expect(play).toHaveBeenCalledOnce()
+    expect(currentTime).toBe(36.5)
+  })
+
+  it('shows an alert when seeking the selected keyframe throws', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve({ ok: true, json: () => Promise.resolve(videoIntelligence) })))
+    const { container } = wrap(<MediaDetailDrawer item={videoItem} onClose={vi.fn()} />)
+    const keyframe = await screen.findByRole('button', { name: /2\.6s · shot 1/ })
+    const video = container.querySelector('video')!
+    Object.defineProperty(video, 'readyState', { configurable: true, value: 1 })
+    Object.defineProperty(video, 'currentTime', { configurable: true, set: () => { throw new Error('seek failed') } })
+    vi.spyOn(video, 'pause').mockImplementation(() => {})
+
+    await userEvent.click(keyframe)
+    expect(await screen.findByRole('alert')).toHaveTextContent('Unable to seek to this video timestamp.')
+  })
+
+  it('shows explicit detector states and metadata from the inspector API', async () => {
+    wrap(<MediaDetailDrawer item={baseItem} onClose={vi.fn()} />)
+    expect(await screen.findByText('Object detection')).toBeInTheDocument()
+    expect(screen.getByText('not processed')).toBeInTheDocument()
+    expect(screen.getByText('Image caption: not generated yet.')).toBeInTheDocument()
+  })
+
+  it('keeps the page interactive on desktop and uses a full-screen mobile modal', () => {
+    const { container } = wrap(<MediaDetailDrawer item={baseItem} onClose={vi.fn()} />)
+    const [backdrop, panel] = Array.from(container.querySelectorAll('div.fixed'))
+    expect(backdrop.className).toContain('md:hidden')
+    expect(panel.className).toContain('w-full')
+    expect(panel.className).toContain('md:w-[min(42rem,calc(100vw-4rem))]')
+  })
+
+  it('renders successful detections returned by the inspector', async () => {
+    const payload = {
+      ...mockIntelligence,
+      pipeline_status: mockIntelligence.pipeline_status.map(stage => ({ ...stage, status: 'completed', configured_enabled: true })),
+      faces: [{ face_id: 'img-01:f0', bbox: [0.1, 0.2, 0.3, 0.4], confidence: 0.99, person_id: null, person_name: null, identity_status: 'unknown', gender: null, age: null, shot_index: null, kf_index: null, timestamp: null, thumbnail_url: null, embedding: { present: true, count: 1, dimensions: 512, model: 'facenet', created_at: null } }],
+      face_count: 1,
+      objects: [{ label: 'dog', confidence: 0.95, bbox: null, evidence: 'stored_label_only', shot_index: null, kf_index: null, timestamp: null }],
+      object_label_count: 1,
+      objects_evidence: 'stored_label_only',
+    }
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve({ ok: true, json: () => Promise.resolve(payload) })))
+    wrap(<MediaDetailDrawer item={baseItem} onClose={vi.fn()} />)
+    expect(await screen.findByText(/dog/)).toBeInTheDocument()
+    expect(screen.getByText('Face detections · 1')).toBeInTheDocument()
+    expect(screen.getAllByText('completed').length).toBeGreaterThan(0)
+  })
+
+  it('shows loading and API error states', async () => {
+    let resolveRequest!: (value: { ok: boolean; json: () => Promise<unknown> }) => void
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      if (String(input).includes('/intelligence')) return new Promise(resolve => { resolveRequest = resolve })
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({}) })
+    }))
+    wrap(<MediaDetailDrawer item={baseItem} onClose={vi.fn()} />)
+    expect(await screen.findByText('Loading asset metadata…')).toBeInTheDocument()
+    resolveRequest({ ok: false, json: () => Promise.resolve({}) })
+    expect(await screen.findByRole('alert')).toHaveTextContent('Asset metadata unavailable.')
+  })
+
+  it('refreshes inspector data when switching assets', async () => {
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const id = String(input).match(/media\/([^/]+)\/intelligence/)?.[1]
+      const payload = { ...mockIntelligence, media: { ...mockIntelligence.media, id, filename: `${id}.jpg` } }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(payload) })
+    }))
+    const tree = (item: typeof baseItem) => <QueryClientProvider client={qc}><MemoryRouter><MediaDetailDrawer item={item} onClose={vi.fn()} /></MemoryRouter></QueryClientProvider>
+    const { rerender } = render(tree(baseItem))
+    expect(await screen.findByText('img-01.jpg')).toBeInTheDocument()
+    const nextItem = { ...baseItem, id: 'img-02', path: '/photos/img-02.jpg' }
+    rerender(tree(nextItem))
+    expect(await screen.findByText('img-02.jpg')).toBeInTheDocument()
+  })
+
   it('does not render media content when item is null', () => {
     wrap(<MediaDetailDrawer item={null} onClose={vi.fn()} />)
     expect(screen.queryByRole('img')).toBeNull()

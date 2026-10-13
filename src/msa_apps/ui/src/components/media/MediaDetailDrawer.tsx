@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { X, MapPin, Calendar, Tag, Expand, Copy, Check } from 'lucide-react'
 import { useQuery } from '@tanstack/react-query'
-import { getMediaFaces, imageUrl, videoUrl } from '../../api/media'
+import { faceThumbnailUrl, getAssetIntelligence, imageUrl, videoUrl } from '../../api/media'
 import { trackOpen } from '../../api/search'
 import { FaceStrip } from './FaceStrip'
 import { cn } from '../../lib/utils'
@@ -78,6 +78,9 @@ function PathRow({ path }: { path: string }) {
 
 export function MediaDetailDrawer({ item, onClose, searchId }: MediaDetailDrawerProps) {
   const videoRef = useRef<HTMLVideoElement>(null)
+  const pendingVideoSeekRef = useRef<number | null>(null)
+  const [selectedKeyframeId, setSelectedKeyframeId] = useState<number | null>(null)
+  const [videoError, setVideoError] = useState<string | null>(null)
   const [imgLightbox, setImgLightbox] = useState(false)
 
   // Log the open as a relevance label when this item came from a search (best-effort).
@@ -95,24 +98,54 @@ export function MediaDetailDrawer({ item, onClose, searchId }: MediaDetailDrawer
     }
   }, [item?.id, searchId])
 
-  const { data: facesData } = useQuery({
-    queryKey: ['media-faces', item?.id],
-    queryFn: () => getMediaFaces(item!.id),
+  const { data: intelligence, isLoading: intelligenceLoading, error: intelligenceError } = useQuery({
+    queryKey: ['asset-intelligence', item?.id],
+    queryFn: () => getAssetIntelligence(item!.id),
     enabled: !!item,
-    staleTime: 60_000,
+    staleTime: 30_000,
   })
+
+  const objectState = intelligence?.pipeline_status.find(stage => stage.pipeline === 'object_detection')
+  const faceState = intelligence?.pipeline_status.find(stage => stage.pipeline === 'face_detection')
 
   // Reset lightbox when item changes
   useEffect(() => {
     setImgLightbox(false)
   }, [item?.id])
 
-  // Seek video to timestamp when it loads
-  useEffect(() => {
-    if (item?.type === 'video' && item.timestamp != null && videoRef.current) {
-      videoRef.current.currentTime = item.timestamp
+  const applyPendingVideoSeek = () => {
+    const video = videoRef.current
+    const timestamp = pendingVideoSeekRef.current
+    if (!video || timestamp == null || video.readyState < 1) return
+    try {
+      video.pause()
+      video.currentTime = timestamp
+      pendingVideoSeekRef.current = null
+    } catch {
+      pendingVideoSeekRef.current = null
+      setVideoError('Unable to seek to this video timestamp.')
     }
-  }, [item])
+  }
+
+  const selectKeyframe = (id: number, timestamp: number) => {
+    pendingVideoSeekRef.current = timestamp
+    setSelectedKeyframeId(id)
+    setVideoError(null)
+    const video = videoRef.current
+    if (!video) {
+      setVideoError('Video preview is unavailable.')
+      return
+    }
+    if (video.readyState < 1) video.pause()
+    applyPendingVideoSeek()
+  }
+
+  useEffect(() => {
+    pendingVideoSeekRef.current = item?.type === 'video' ? item.timestamp ?? null : null
+    setSelectedKeyframeId(null)
+    setVideoError(null)
+    applyPendingVideoSeek()
+  }, [item?.id, item?.type, item?.timestamp])
 
   // Close on Escape
   useEffect(() => {
@@ -130,19 +163,20 @@ export function MediaDetailDrawer({ item, onClose, searchId }: MediaDetailDrawer
     <>
       {/* Backdrop */}
       <div
-        className={cn('fixed inset-0 bg-black/60 z-40 transition-opacity', item ? 'opacity-100' : 'opacity-0 pointer-events-none')}
+        className={cn('fixed inset-0 bg-black/60 z-40 transition-opacity md:hidden', item ? 'opacity-100' : 'opacity-0 pointer-events-none')}
         onClick={onClose}
       />
 
       {/* Drawer */}
       <div className={cn(
-        'fixed top-0 right-0 h-full w-full max-w-lg bg-white dark:bg-zinc-900 z-50 flex flex-col',
+        'fixed top-0 right-0 h-full w-full md:w-[min(42rem,calc(100vw-4rem))] bg-white dark:bg-zinc-900 z-50 flex flex-col',
         'shadow-2xl transition-transform duration-300',
         item ? 'translate-x-0' : 'translate-x-full',
       )}>
         {/* Header */}
-        <div className="flex items-center justify-end px-4 py-3 border-b border-slate-200 dark:border-zinc-800">
-          <button onClick={onClose} className="text-zinc-400 dark:text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-100">
+        <div className="flex items-center justify-between px-4 py-3 border-b border-slate-200 dark:border-zinc-800">
+          <span className="text-sm font-medium text-zinc-700 dark:text-zinc-200 truncate">{item?.id ?? 'Asset details'}</span>
+          <button onClick={onClose} aria-label="Close asset inspector" className="text-zinc-400 dark:text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-100">
             <X size={18} />
           </button>
         </div>
@@ -153,10 +187,16 @@ export function MediaDetailDrawer({ item, onClose, searchId }: MediaDetailDrawer
             <div className="bg-slate-100 dark:bg-zinc-950 flex items-center justify-center relative group/preview">
               {item.type === 'video' ? (
                 <video
+                  key={item.id}
                   ref={videoRef}
                   src={videoUrl(item.id)}
                   controls
                   className="w-full max-h-72 object-contain"
+                  onLoadedMetadata={applyPendingVideoSeek}
+                  onError={() => {
+                    pendingVideoSeekRef.current = null
+                    setVideoError('Unable to load or seek this video.')
+                  }}
                 />
               ) : (
                 <>
@@ -176,6 +216,7 @@ export function MediaDetailDrawer({ item, onClose, searchId }: MediaDetailDrawer
                 </>
               )}
             </div>
+            {item.type === 'video' && videoError && <p role="alert" className="px-4 pt-2 text-xs text-rose-600">{videoError}</p>}
 
             {/* Metadata */}
             <div className="px-4 py-4 space-y-4">
@@ -286,11 +327,93 @@ export function MediaDetailDrawer({ item, onClose, searchId }: MediaDetailDrawer
               )}
 
 
+              {/* Asset intelligence — stored facts only; unavailable stages stay explicit. */}
+              <section className="border-t border-slate-200 dark:border-zinc-800 pt-4 space-y-4">
+                <h2 className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Asset intelligence</h2>
+                {intelligenceLoading && <p className="text-xs text-zinc-500">Loading asset metadata…</p>}
+                {intelligenceError && <p role="alert" className="text-xs text-rose-600">Asset metadata unavailable.</p>}
+                {intelligence && <>
+                  <dl className="grid grid-cols-2 gap-x-3 gap-y-1 text-xs">
+                    {[
+                      ['File', intelligence.media.filename], ['Type', intelligence.media.mime],
+                      ['Size', intelligence.media.size_bytes == null ? null : `${new Intl.NumberFormat().format(intelligence.media.size_bytes)} bytes`],
+                      ['Dimensions', intelligence.media.width && intelligence.media.height ? `${intelligence.media.width} × ${intelligence.media.height}` : null],
+                      ['Duration', intelligence.media.duration == null ? null : `${intelligence.media.duration.toFixed(2)} s`],
+                      ['Source', intelligence.media.source_name], ['Folder', intelligence.media.source_folder],
+                      ['Camera', intelligence.media.camera], ['Lens', intelligence.media.lens],
+                      ['Place', intelligence.media.place],
+                      ['GPS coordinates', intelligence.media.gps_lat == null || intelligence.media.gps_lon == null ? null : `${intelligence.media.gps_lat}, ${intelligence.media.gps_lon}`],
+                      ['GPS extraction', intelligence.media.gps_processed == null ? null : intelligence.media.gps_processed ? `processed${intelligence.media.gps_data_mode ? ` · ${intelligence.media.gps_data_mode}` : ''}` : 'not processed'],
+                      ['Captured', formatDate(intelligence.media.captured_at)],
+                      ['Indexed', formatDate(intelligence.media.added_at)],
+                      ['Modified', formatDate(intelligence.media.filesystem_mtime)],
+                      ['Content hash', intelligence.media.hash_blake3],
+                    ].filter(([, value]) => value && value !== '—').map(([label, value]) => (
+                      <div key={label} className="contents"><dt className="text-zinc-500">{label}</dt><dd className="text-right text-zinc-700 dark:text-zinc-300 truncate" title={String(value)}>{value}</dd></div>
+                    ))}
+                  </dl>
+                  {intelligence.pipeline_status.map(stage => (
+                    <div key={stage.pipeline} className="flex justify-between gap-3 text-xs">
+                      <span className="text-zinc-500">{stage.pipeline === 'face_detection' ? 'Face detection' : 'Object detection'}</span>
+                      <span className="text-zinc-700 dark:text-zinc-300 text-right">
+                        {stage.status.replace('_', ' ')}{stage.error_type ? ` · ${stage.error_type}` : ''}
+                        {stage.evidence === 'legacy_flag' ? ' · legacy record' : ''}
+                      </span>
+                    </div>
+                  ))}
+                  <div className="text-xs text-zinc-500 space-y-1">
+                    <h3 className="font-medium text-zinc-600 dark:text-zinc-300">Embeddings (vectors are not returned)</h3>
+                    {(['image', 'keyframes'] as const).map(kind => {
+                      const embedding = intelligence.embeddings[kind]
+                      return <p key={kind}>{kind}: {embedding.present ? `${embedding.count} stored · ${embedding.dimensions ?? '?'} dimensions${embedding.model ? ` · ${embedding.model}` : ''}${embedding.created_at ? ` · ${formatDate(embedding.created_at)}` : ''}` : 'not stored'}</p>
+                    })}
+                  </div>
+                  <div>
+                    <h3 className="text-xs font-medium text-zinc-600 dark:text-zinc-300 mb-1">Stored object labels</h3>
+                    {intelligence.objects.length ? <div className="flex flex-wrap gap-1">{intelligence.objects.map((object, index) => <span key={`${object.label}-${index}`} className="px-2 py-0.5 rounded bg-slate-100 dark:bg-zinc-800 text-xs text-zinc-600 dark:text-zinc-300">{object.label}{object.confidence != null ? ` · ${(object.confidence * 100).toFixed(1)}%` : ''}{object.timestamp != null ? ` · ${object.timestamp.toFixed(1)}s` : ''}{object.bbox ? ` · box ${object.bbox.map(n => n.toFixed(2)).join(',')}` : ''}</span>)}</div> : <p className="text-xs text-zinc-500">{objectState?.status === 'completed' ? 'Detection completed; no labels were stored.' : objectState?.status === 'failed' ? `Detection failed${objectState.error_type ? ` (${objectState.error_type})` : ''}.` : objectState?.status === 'disabled' ? 'Detection is disabled; no result is available.' : 'Detection has not completed; no result is available.'}</p>}
+                    {intelligence.objects_evidence === 'stored_label_only' && <p className="mt-1 text-[11px] text-zinc-400">Stored labels only; confidence scores and bounding boxes are not available.</p>}
+                  </div>
+                  {intelligence.media.type === 'video' && <div>
+                    <h3 className="text-xs font-medium text-zinc-600 dark:text-zinc-300 mb-1">Shots & keyframes · {intelligence.total_shots} shots · {intelligence.total_keyframes} keyframes</h3>
+                    <div className="space-y-1">{intelligence.keyframes.map(k => <button key={k.id} type="button" aria-pressed={selectedKeyframeId === k.id} className={cn('block text-left text-xs rounded px-1 -mx-1 hover:underline', selectedKeyframeId === k.id ? 'bg-indigo-100 text-indigo-800 dark:bg-indigo-950 dark:text-indigo-200' : 'text-indigo-600 dark:text-indigo-300')} onClick={() => selectKeyframe(k.id, k.timestamp)}>{k.timestamp.toFixed(1)}s · shot {k.shot_index + 1}{k.tags.length ? ` · ${k.tags.join(', ')}` : ''}{k.place ? ` · ${k.place}` : ''}</button>)}</div>
+                  </div>}
+                  <div>
+                    <h3 className="text-xs font-medium text-zinc-600 dark:text-zinc-300 mb-1">Face detections · {intelligence.face_count}</h3>
+                    {intelligence.faces.length ? <div className="space-y-2">{intelligence.faces.map(face => <div key={face.face_id} className="flex items-center gap-2 text-xs text-zinc-600 dark:text-zinc-300"><img src={faceThumbnailUrl(face.face_id)} alt="" className="h-8 w-8 rounded object-cover" onError={e => { e.currentTarget.hidden = true }} /><span>{face.person_name ?? 'Unknown identity'}{face.confidence != null ? ` · ${(face.confidence * 100).toFixed(1)}%` : ''}{face.timestamp != null ? ` · ${face.timestamp.toFixed(1)}s` : ''}{face.shot_index != null ? ` · shot ${face.shot_index + 1}` : ''}<span className="block text-zinc-400">Box {face.bbox.map(n => n.toFixed(3)).join(', ')}{face.gender ? ` · ${face.gender}` : ''}{face.age != null ? ` · age ${face.age}` : ''}{face.embedding.present ? ` · embedding ${face.embedding.dimensions ?? '?'}d${face.embedding.model ? ` (${face.embedding.model})` : ''}` : ''}</span></span></div>)}</div> : <p className="text-xs text-zinc-500">{faceState?.status === 'completed' ? 'Detection completed; no faces were stored.' : faceState?.status === 'failed' ? `Detection failed${faceState.error_type ? ` (${faceState.error_type})` : ''}.` : faceState?.status === 'disabled' ? 'Detection is disabled; no result is available.' : 'Detection has not completed; no result is available.'}</p>}
+                  </div>
+                  {intelligence.media.type === 'video' && intelligence.shots.length > 0 && <div className="text-[11px] text-zinc-400">{intelligence.shots.map(s => `Shot ${s.shot_index + 1}: ${s.start.toFixed(1)}–${s.end.toFixed(1)}s${s.is_synthetic ? ' (synthetic)' : ''}`).join(' · ')}</div>}
+                  {intelligence.media.type === 'image' && <div className="text-xs text-zinc-500">Object detection evidence: {intelligence.objects_evidence}. {intelligence.stored_tags.length ? `Stored tags: ${intelligence.stored_tags.join(', ')}` : 'No stored tags.'}</div>}
+                  {intelligence.media.fingerprints.length > 0 && <div className="text-[11px] text-zinc-400 break-all"><div>Indexed source paths</div>{intelligence.media.fingerprints.map((f, index) => <div key={`${f.source_name}-${f.relative_path}-${index}`}>{f.source_name}/{f.relative_path} · {new Intl.NumberFormat().format(f.size_bytes)} bytes · {formatDate(f.filesystem_mtime)}</div>)}</div>}
+                  <div>
+                    <h3 className="text-xs font-medium text-zinc-600 dark:text-zinc-300 mb-1">Visual descriptions</h3>
+                    <p className="text-xs text-zinc-500">Image caption: {intelligence.descriptions.image_caption.status === 'not_generated' ? 'not generated yet.' : intelligence.descriptions.image_caption.text ?? intelligence.descriptions.image_caption.status}</p>
+                    {intelligence.media.type === 'video' && <p className="text-xs text-zinc-500">Video summary: {intelligence.descriptions.video_summary.status === 'not_generated' ? 'not generated yet.' : intelligence.descriptions.video_summary.text ?? intelligence.descriptions.video_summary.status}</p>}
+                    {intelligence.descriptions.scenes.map((scene, index) => <p key={index} className="text-xs text-zinc-500">Scene {index + 1} · {scene.start.toFixed(1)}–{scene.end.toFixed(1)}s: {scene.text ?? scene.status}</p>)}
+                  </div>
+                  <div>
+                    <h3 className="text-xs font-medium text-zinc-600 dark:text-zinc-300 mb-1">Transcript · {intelligence.transcript.status}</h3>
+                    {(intelligence.transcript.model_name || intelligence.transcript.language || intelligence.transcript.error_code) && <p className="mb-1 text-[11px] text-zinc-400">{[intelligence.transcript.model_name, intelligence.transcript.language, intelligence.transcript.error_code].filter(Boolean).join(' · ')}</p>}
+                    {intelligence.transcript.segments.length ? <div className="max-h-48 overflow-y-auto space-y-1">{intelligence.transcript.segments.map(segment => <p key={segment.id} className="text-xs text-zinc-600 dark:text-zinc-300"><span className="text-zinc-400 tabular-nums">{segment.start.toFixed(1)}s </span>{segment.text}</p>)}</div> : <p className="text-xs text-zinc-500">No transcript segments stored.</p>}
+                    {intelligence.transcript.total_segments > intelligence.transcript.segments.length && <p className="text-[11px] text-zinc-400">Showing {intelligence.transcript.segments.length} of {intelligence.transcript.total_segments} segments.</p>}
+                  </div>
+                </>}
+              </section>
+
               {/* Faces */}
-              {facesData && facesData.faces.length > 0 && (
+              {intelligence && intelligence.faces.length > 0 && (
                 <div>
                   <div className="text-xs text-zinc-400 dark:text-zinc-500 uppercase tracking-wider mb-2">People</div>
-                  <FaceStrip faces={facesData.faces} />
+                  <FaceStrip faces={intelligence.faces.map(face => ({
+                    face_id: face.face_id,
+                    bbox: face.bbox as [number, number, number, number],
+                    confidence: face.confidence ?? 0,
+                    person_id: face.person_id,
+                    person_name: face.person_name,
+                    gender: face.gender,
+                    age: face.age,
+                    shot_index: face.shot_index,
+                    kf_index: face.kf_index,
+                  }))} />
                 </div>
               )}
             </div>

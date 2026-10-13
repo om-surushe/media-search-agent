@@ -271,6 +271,13 @@ describe('PeoplePage', () => {
           date: null, gps_lat: null, gps_lon: null, place: null, duration: null,
         })
         if (face.media_id && url === `/media/${face.media_id}/faces`) return ok({ faces: [] })
+        if (face.media_id && url === `/media/${face.media_id}/intelligence`) return ok({
+          media: { id: face.media_id, type: 'image', filename: 'x.jpg', mime: 'image/jpeg', size_bytes: null, width: null, height: null, duration: null, captured_at: null, added_at: null, filesystem_mtime: null, camera: null, lens: null, gps_lat: null, gps_lon: null, gps_sensitive: false, hash_blake3: null, fingerprints: [] },
+          descriptions: { image_caption: { status: 'not_generated', text: null, model_name: null }, video_summary: { status: 'not_generated', text: null, model_name: null }, scenes: [] },
+          pipeline_status: [], embeddings: { image: { present: false, count: 0 }, keyframes: { present: false, count: 0 } },
+          faces: [], face_count: 0, objects: [], object_label_count: 0, objects_evidence: 'none', stored_tags: [], shots: [], total_shots: 0, keyframes: [], total_keyframes: 0,
+          transcript: { status: 'disabled', segments: [], total_segments: 0 },
+        })
         if (url === '/faces/search') return ok({ matches: [] })
         return ok({})
       })

@@ -2066,13 +2066,14 @@ class TestIncrementalEta:
         return db, media_id
 
     @staticmethod
-    def _video_free_skip(db, media_id):
+    def _video_free_skip(db, media_id, *, video_objects_enabled=False):
         from msa_indexer.pipeline import _count_phase_expects_free_skip
         snap = db.get_processing_snapshot_for_media_ids([media_id])
         assert media_id in snap
         return snap[media_id], _count_phase_expects_free_skip(
             snap[media_id], model_version="test-v1", is_image=False, is_video=True,
             objects_enabled=True, faces_enabled=True,
+            video_objects_enabled=video_objects_enabled,
         )
 
     def test_count_phase_video_complete_keyframes_is_free_skip(self, tmp_path):
@@ -2080,10 +2081,9 @@ class TestIncrementalEta:
         # is a free skip — NOT charged at hist_vid_time — even though its
         # embeddings_version is NULL. The runtime video branch skips exactly this
         # state; the count phase now asks the SAME shared _video_skip_predicate.
-        # object_detection_done is left 0 (a video indexed with video object
-        # detection off): keyframes-present ⇒ the runtime never re-runs object
-        # detection, so an un-done object stage does NOT block the free skip —
-        # ending the old video_objects_enabled gate that used to (over-)charge it.
+        # object_detection_done is left 0, but video object detection is OFF;
+        # a disabled detector stage does not block the free skip. When enabled,
+        # the independent completion flag must block it until detection runs.
         db, mid = self._make_video_db(tmp_path, with_kf_embeddings=True)
         try:
             snap, free = self._video_free_skip(db, mid)
@@ -2091,6 +2091,14 @@ class TestIncrementalEta:
             assert snap["has_shots"] and snap["has_keyframes"]
             assert not snap["has_unembedded_keyframes"]
             assert free is True, "complete video is a free skip despite NULL version"
+        finally:
+            db.close()
+
+    def test_count_phase_video_detection_enabled_blocks_free_skip(self, tmp_path):
+        db, mid = self._make_video_db(tmp_path, with_kf_embeddings=True)
+        try:
+            _, free = self._video_free_skip(db, mid, video_objects_enabled=True)
+            assert free is False
         finally:
             db.close()
 
@@ -2121,9 +2129,8 @@ class TestIncrementalEta:
 
     def test_video_object_detection_gate_helper(self):
         # (n) The shared video-object config gate still needs BOTH object
-        # detection AND the video sub-flag (default off). It no longer feeds the
-        # count-phase free-skip decision (the keyframe-state predicate subsumes
-        # it), but the main loop's enable_video_detection still consults it.
+        # detection AND the video sub-flag (default off). The same opt-in gates
+        # the count-phase skip and the main loop, keeping both paths consistent.
         from msa_indexer.pipeline import _video_object_detection_enabled
 
         assert _video_object_detection_enabled(
@@ -2192,3 +2199,45 @@ class TestIncrementalEta:
             "the cross-source duplicate must subtract as a free skip in src_b"
         )
         assert cp["estimated_remaining_seconds"] == 0
+
+
+def test_detector_inference_exceptions_remain_failed_in_pipeline(tmp_path, monkeypatch):
+    """Detector exceptions must not set legacy completion flags."""
+    from msa_indexer import pipeline
+    from msa_indexer.db.sqlite_store import SQLiteStore
+    from msa_indexer.models import faces as faces_module
+
+    class FailingObjectDetector:
+        def __init__(self, **_kwargs): pass
+        def get_labels(self, _image): raise RuntimeError("synthetic object inference error")
+
+    class FailingFaceRecognizer:
+        def __init__(self, **_kwargs): pass
+        def detect_and_embed(self, _image): raise ValueError("synthetic face inference error")
+
+    media_dir = tmp_path / "photos"
+    media_dir.mkdir()
+    _make_images(media_dir, 1)
+    _patch_pipeline_common(monkeypatch, pipeline, _FakeQdrant())
+    _ordered_walk(monkeypatch, pipeline)
+    monkeypatch.setattr(pipeline, "ObjectDetector", FailingObjectDetector)
+    monkeypatch.setattr(faces_module, "FaceRecognizer", FailingFaceRecognizer)
+    config = _pipeline_config(
+        tmp_path, media_dir, enable_object_detection=True,
+        enable_face_recognition=True, models_dir=tmp_path / "models",
+    )
+
+    pipeline.run_index(config)
+    store = SQLiteStore(config.sqlite_path)
+    try:
+        state = dict(store.conn.execute(
+            "SELECT pipeline, status FROM media_pipeline_status ORDER BY pipeline"
+        ).fetchall())
+        flags = store.conn.execute(
+            "SELECT face_detection_done, object_detection_done FROM media"
+        ).fetchone()
+    finally:
+        store.close()
+
+    assert state == {"face_detection": "failed", "object_detection": "failed"}
+    assert flags == (0, 0)

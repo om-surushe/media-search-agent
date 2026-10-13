@@ -121,9 +121,9 @@ class RtDetrBackend:
                     det["bbox"] = [round(v, 1) for v in box.cpu().tolist()]
                 detections.append(det)
             return detections
-        except Exception as e:
-            logger.warning("RT-DETR detection failed: {}", e)
-            return []
+        except Exception:
+            logger.exception("RT-DETR detection failed")
+            raise
 
     def get_labels(self, pil_image: Image.Image, min_confidence: float | None = None) -> list[str]:
         original_conf = None
@@ -131,9 +131,9 @@ class RtDetrBackend:
             original_conf = self.conf_threshold
             self.conf_threshold = min_confidence
 
-        detections = self.detect(pil_image, return_boxes=False)
-        labels = sorted({d["label"] for d in detections})
-
-        if original_conf is not None:
-            self.conf_threshold = original_conf
-        return labels
+        try:
+            detections = self.detect(pil_image, return_boxes=False)
+            return sorted({d["label"] for d in detections})
+        finally:
+            if original_conf is not None:
+                self.conf_threshold = original_conf

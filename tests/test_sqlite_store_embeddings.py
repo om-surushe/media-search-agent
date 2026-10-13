@@ -64,6 +64,25 @@ def test_schema_creates_three_embedding_tables(store):
     assert names == {"image_embedding", "keyframe_embedding", "face_embedding"}
 
 
+def test_pipeline_status_keeps_failed_detection_retryable(store, media_row):
+    store.set_pipeline_status(media_row, "object_detection", "pending", model_name="detector")
+    store.set_pipeline_status(media_row, "object_detection", "failed", error_type="RuntimeError")
+    row = store.conn.execute(
+        "SELECT status, error_type FROM media_pipeline_status WHERE media_id=? AND pipeline='object_detection'",
+        (media_row,),
+    ).fetchone()
+    done = store.conn.execute(
+        "SELECT object_detection_done FROM media WHERE media_id=?", (media_row,)
+    ).fetchone()[0]
+    assert row == ("failed", "RuntimeError")
+    assert done == 0
+
+    store.set_pipeline_status(media_row, "object_detection", "completed")
+    assert store.conn.execute(
+        "SELECT object_detection_done FROM media WHERE media_id=?", (media_row,)
+    ).fetchone()[0] == 1
+
+
 def test_schema_drops_legacy_vec_meta_table_on_fresh_db(store):
     # vec_meta was the original-commit legacy table; new DBs should not
     # carry it (existing DBs harmlessly retain an empty one).

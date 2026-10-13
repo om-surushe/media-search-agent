@@ -331,6 +331,64 @@ class TestVideoTagsInAPI:
         assert r.json()["tags"] == []  # no tags seeded for this image
 
 
+class TestAssetIntelligence:
+    def test_returns_canonical_metadata_and_stored_intelligence(self, client, db):
+        """Inspector reports stored detections separately from configured-off stages."""
+        with sqlite3.connect(db) as conn:
+            conn.execute("INSERT INTO tag(name) VALUES ('beach')")
+            tag_id = conn.execute("SELECT tag_id FROM tag WHERE name='beach'").fetchone()[0]
+            conn.execute("INSERT INTO media_tag(media_id, tag_id) VALUES ('id_img_01', ?)", (tag_id,))
+            conn.execute(
+                "INSERT INTO image_embedding(media_id, embedding, embedding_dim, embedding_model) VALUES (?,?,?,?)",
+                ('id_img_01', sqlite3.Binary(b'not returned'), 768, 'clip-test'),
+            )
+
+        response = client.get('/media/id_img_01/intelligence')
+        assert response.status_code == 200, response.text
+        data = response.json()
+        assert data['media']['filename'] == 'beach.heic'
+        assert data['media']['size_bytes'] is None
+        assert data['embeddings']['image']['present'] is True
+        assert 'embedding' not in data['embeddings']['image']
+        assert data['faces'][0]['identity_status'] == 'known'
+        assert data['stored_tags'] == ['beach']
+        assert data['pipeline_status'][0]['status'] == 'disabled'
+        assert data['pipeline_status'][0]['evidence'] == 'current_config'
+        assert data['descriptions']['image_caption']['status'] == 'not_generated'
+
+    def test_stale_disabled_status_reopens_when_config_is_enabled(self, client, db):
+        with sqlite3.connect(db) as conn:
+            conn.execute(
+                "INSERT INTO media_pipeline_status(media_id,pipeline,status) VALUES (?,?,?)",
+                ('id_img_01', 'object_detection', 'disabled'),
+            )
+        client.app.state.S.enable_object_detection = True
+        response = client.get('/media/id_img_01/intelligence')
+        assert response.status_code == 200, response.text
+        state = next(s for s in response.json()['pipeline_status'] if s['pipeline'] == 'object_detection')
+        assert (state['status'], state['evidence'], state['configured_enabled']) == (
+            'not_processed', 'current_config', True
+        )
+
+    def test_legacy_database_without_status_table_still_inspects(self, client, db):
+        with sqlite3.connect(db) as conn:
+            conn.execute('DROP TABLE media_pipeline_status')
+        response = client.get('/media/id_img_01/intelligence')
+        assert response.status_code == 200, response.text
+        assert response.json()['pipeline_status'][0]['evidence'] == 'current_config'
+
+    def test_video_keyframes_are_separate_from_object_detection_status(self, client):
+        response = client.get('/media/id_vid_01/intelligence')
+        assert response.status_code == 200, response.text
+        data = response.json()
+        assert data['total_shots'] == 1
+        assert data['total_keyframes'] == 1
+        assert data['keyframes'][0]['tags'] == ['person']
+        obj_state = next(s for s in data['pipeline_status'] if s['pipeline'] == 'object_detection')
+        assert obj_state['status'] == 'disabled'
+        assert data['objects'][0]['evidence'] == 'stored_label_only'
+
+
 class TestSearchDateBackfill:
     """POST /search must backfill date from SQLite when Qdrant payload has none."""
 
@@ -398,3 +456,29 @@ def test_video_file_uses_format_specific_mime(client, db, tmp_path, extension, e
     assert response.status_code == 200
     assert response.headers["content-type"] == expected_mime
     assert response.content == b"video fixture"
+
+
+def test_video_file_supports_byte_ranges(client, db, tmp_path):
+    media_id = "range-test-video"
+    media_path = tmp_path / "range-fixture.mp4"
+    media_path.write_bytes(b"0123456789")
+    with sqlite3.connect(db) as conn:
+        conn.execute(
+            "INSERT INTO media(media_id, path, mime) VALUES (?, ?, ?)",
+            (media_id, str(media_path), "video/mp4"),
+        )
+
+    response = client.get(f"/videos/{media_id}", headers={"Range": "bytes=2-5"})
+    assert response.status_code == 206
+    assert response.content == b"2345"
+    assert response.headers["content-range"] == "bytes 2-5/10"
+    assert response.headers["accept-ranges"] == "bytes"
+    assert response.headers["content-length"] == "4"
+
+    suffix = client.get(f"/videos/{media_id}", headers={"Range": "bytes=-3"})
+    assert suffix.status_code == 206
+    assert suffix.content == b"789"
+
+    unsatisfiable = client.get(f"/videos/{media_id}", headers={"Range": "bytes=10-"})
+    assert unsatisfiable.status_code == 416
+    assert unsatisfiable.headers["content-range"] == "bytes */10"
