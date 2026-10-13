@@ -114,6 +114,7 @@ def client(db, tmp_path):
             "timestamp": None,
             "shot_id": None,
             "date": "2023-06-15T10:00:00",
+            "caption_excerpt": "Blue water and a sandy beach.",
             "why": "src=img score=0.910",
         },
         {
@@ -167,6 +168,11 @@ class TestSearchScore:
     def test_empty_query_returns_200(self, client):
         r = client.post("/search", json={"q": ""})
         assert r.status_code == 200
+
+    def test_caption_excerpt_is_returned(self, client):
+        r = client.post("/search", json={"q": "beach"})
+        assert r.status_code == 200
+        assert r.json()["results"][0]["caption_excerpt"] == "Blue water and a sandy beach."
 
 
 # ── /media tests ──────────────────────────────────────────────────────────────

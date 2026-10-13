@@ -28,6 +28,7 @@ export interface SearchItem {
   gps_lat: number | null
   gps_lon: number | null
   place: string | null
+  caption_excerpt?: string | null
   why: string | null
 }
 

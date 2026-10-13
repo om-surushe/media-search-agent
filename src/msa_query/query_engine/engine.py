@@ -1,8 +1,10 @@
 from typing import List, Dict, Any
+import sqlite3
 from loguru import logger
 from msa_query.embeddings.text_encoder import TextEncoder
 from msa_query.query_engine.retrievers import Retriever
 from msa_query.query_engine.filters import apply_filters
+from msa_query.query_engine.image_caption_search import search_image_captions
 from msa_query.query_engine.rerankers import score_breakdown
 from msa_query.config import settings
 from msa_query.storage.db import connect_readonly
@@ -696,6 +698,27 @@ class QueryEngine:
                             f"added_candidates={added}"
                         )
 
+            caption_hits = []
+            if sqlite_conn is not None:
+                try:
+                    caption_hits = search_image_captions(
+                        sqlite_conn, search_text, limit=settings.rerank_top_k
+                    )
+                except sqlite3.Error as exc:
+                    logger.warning("Stored image-caption search unavailable: {}", exc)
+
+            candidate_by_id = {str(m.get("id")): m for m in candidates if m.get("id") is not None}
+            for hit in caption_hits:
+                item_id = str(hit["id"])
+                item = candidate_by_id.get(item_id)
+                if item is None:
+                    item = {**hit, "_caption_only": True}
+                    candidates.append(item)
+                    candidate_by_id[item_id] = item
+                else:
+                    item["caption_excerpt"] = hit["caption_excerpt"]
+                item["_caption_match"] = True
+
             # 4.5) R6: drop tombstoned media before ranking/return — their
             # Qdrant points may outlive the SQLite soft-delete.
             candidates = _filter_deleted_media(sqlite_conn, candidates)
@@ -717,6 +740,13 @@ class QueryEngine:
 
             if inferred_filters:
                 candidates = apply_filters(candidates, inferred_filters)
+
+            filtered_caption_matches = {
+                str(m["id"]): m for m in candidates if m.get("_caption_match")
+            }
+            # Caption-only matches have no CLIP score; keep visual ranking untouched
+            # and append these matches deterministically after the visual results.
+            candidates = [m for m in candidates if not m.get("_caption_only")]
 
             # 6) rerank — write the reranked score back so the score field matches result order
             logger.debug(f"Candidates pre-filter: {len(candidates)}")
@@ -806,6 +836,7 @@ class QueryEngine:
                     "timestamp": m.get("timestamp"),
                     "shot_id": m.get("shot_id"),
                     "date": m.get("date"),
+                    "caption_excerpt": m.get("caption_excerpt"),
                     "why": f"{m.get('faces')} | {m.get('scene_tags')} | tags={m.get('tags')} | {m.get('caption')} | src={m.get('source')} score={m.get('score'):.3f}",
                     # the score_breakdown total (NN1) — preserved even when a learned model
                     # served and overwrote `score`, so baseline eval stays reconstructable.
@@ -814,6 +845,30 @@ class QueryEngine:
                 }
                 for m, feats in zip(ranked, feature_list)
             ]
+            returned_ids = {str(item["id"]) for item in results}
+            for media_id in (str(hit["id"]) for hit in caption_hits):
+                match = filtered_caption_matches.get(media_id)
+                if match is None or media_id in returned_ids:
+                    continue
+                excerpt = match["caption_excerpt"]
+                results.append({
+                    "id": media_id,
+                    "path": match.get("path"),
+                    "thumbnail": None,
+                    "score": None,
+                    "tags": match.get("tags", []),
+                    "type": None,
+                    "timestamp": None,
+                    "shot_id": None,
+                    "date": match.get("date"),
+                    "gps_lat": match.get("gps_lat"),
+                    "gps_lon": match.get("gps_lon"),
+                    "place": match.get("place"),
+                    "caption_excerpt": excerpt,
+                    "why": f"Caption match: {excerpt}",
+                })
+                returned_ids.add(media_id)
+
             logger.info(
                 f"Search complete results={len(results)} top_sources={[m.get('source') for m in ranked[:5]]}"
             )

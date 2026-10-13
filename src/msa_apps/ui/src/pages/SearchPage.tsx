@@ -34,7 +34,7 @@ export function SearchPage() {
   const allResults = data?.results
   const searchId = data?.search_id ?? null
   const results = minScore > 0
-    ? allResults?.filter(r => (r.score ?? 0) * 100 >= minScore)
+    ? allResults?.filter(r => r.caption_excerpt || (r.score ?? 0) * 100 >= minScore)
     : allResults
 
   const handleSubmit = (e: React.FormEvent) => {
@@ -118,6 +118,7 @@ export function SearchPage() {
                     type={item.type}
                     date={item.date}
                     place={item.place}
+                    captionExcerpt={item.caption_excerpt}
                     onClick={() => { setSelected(item); setSelectedSearchId(searchId) }}
                   />
                 ))}

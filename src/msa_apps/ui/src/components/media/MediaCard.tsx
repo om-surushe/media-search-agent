@@ -10,6 +10,7 @@ interface MediaCardProps {
   type?: 'image' | 'video' | null
   date?: string | null
   place?: string | null
+  captionExcerpt?: string | null
   duration?: number | null
   faces?: FaceOnMedia[]
   onClick: () => void
@@ -30,7 +31,7 @@ function formatDate(iso: string | null | undefined): string {
   }
 }
 
-export function MediaCard({ id, path: _path, type, date, place, duration, faces, onClick }: MediaCardProps) {
+export function MediaCard({ id, path: _path, type, date, place, captionExcerpt, duration, faces, onClick }: MediaCardProps) {
   const thumb = thumbnailUrl(id)
   return (
     <button
@@ -62,6 +63,11 @@ export function MediaCard({ id, path: _path, type, date, place, duration, faces,
 
       {/* Footer */}
       <div className="px-2 py-1.5 flex flex-col gap-1 min-h-[3rem]">
+        {captionExcerpt && (
+          <div className="text-xs text-indigo-700 dark:text-indigo-300 truncate" title={captionExcerpt}>
+            <span className="font-semibold">Caption match:</span> {captionExcerpt}
+          </div>
+        )}
         {(date || place) && (
           <div className="text-xs text-zinc-500 dark:text-zinc-400 truncate">
             {place ?? formatDate(date)}

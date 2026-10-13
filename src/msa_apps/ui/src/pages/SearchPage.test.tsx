@@ -85,7 +85,7 @@ describe('SearchPage', () => {
     vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
       const url = String(input)
       const body = url === '/search' ? {
-        results: [{ id: 'captioned-image', path: '/tmp/dog.jpg', thumbnail: null, score: 0.91, tags: [], type: null, timestamp: null, shot_id: null, date: null, gps_lat: null, gps_lon: null, place: null, why: '' }],
+        results: [{ id: 'captioned-image', path: '/tmp/dog.jpg', thumbnail: null, score: null, caption_excerpt: 'black dog', tags: [], type: null, timestamp: null, shot_id: null, date: null, gps_lat: null, gps_lon: null, place: null, why: 'Caption match' }],
         search_id: null,
       } : url.includes('/intelligence') ? payload : []
       return Promise.resolve({ ok: true, json: () => Promise.resolve(body) })
@@ -93,14 +93,14 @@ describe('SearchPage', () => {
     const { container } = renderPage()
     fireEvent.change(screen.getByPlaceholderText(/describe what you're looking for/i), { target: { value: 'dog' } })
     fireEvent.click(screen.getByRole('button', { name: 'Search' }))
-    await screen.findByRole('button', { name: '' })
+    expect(await screen.findByText(/caption match:/i)).toBeInTheDocument()
     const mediaButton = container.querySelector('button img[src*="captioned-image"]')?.closest('button')
     expect(mediaButton).not.toBeNull()
     fireEvent.click(mediaButton!)
 
     expect(await screen.findByText('A black dog at a fence.')).toBeInTheDocument()
-    expect(screen.getByText('mlx/model')).toBeInTheDocument()
-    expect(screen.getByText('caption-v1')).toBeInTheDocument()
+    expect(await screen.findByText('mlx/model')).toBeInTheDocument()
+    expect(await screen.findByText('caption-v1')).toBeInTheDocument()
     const calls = (fetch as unknown as { mock: { calls: [RequestInfo | URL, RequestInit?][] } }).mock.calls
     expect(calls.some(([url]) => String(url).includes('/media/captioned-image/intelligence'))).toBe(true)
     expect(calls.some(([url]) => String(url) === '/track/open')).toBe(false)
