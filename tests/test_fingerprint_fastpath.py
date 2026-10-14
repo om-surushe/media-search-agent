@@ -633,8 +633,15 @@ class _FakeQdrant:
 
 def _patch_pipeline_common(monkeypatch, pipeline, qdrant: _FakeQdrant):
     monkeypatch.setattr(pipeline, "resolve_for_access", lambda p: p)
-    monkeypatch.setattr(pipeline, "get_exif_basic", lambda _p: {})
-    monkeypatch.setattr(pipeline, "write_thumbnail", lambda *_a, **_k: None)
+    monkeypatch.setattr(pipeline, "get_exif_basic_result", lambda _p: ({}, True))
+
+    def write_thumbnail(_src, dst_dir, media_id):
+        out = Path(dst_dir) / f"{media_id}.jpg"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_bytes(b"test thumbnail")
+        return out
+
+    monkeypatch.setattr(pipeline, "write_thumbnail", write_thumbnail)
     monkeypatch.setattr(pipeline, "ClipEmbedder", _FakeClipEmbedder)
     monkeypatch.setattr(pipeline, "_load_historical_perf", lambda _p: (1.0, 30.0, 5.0))
     monkeypatch.setattr(pipeline, "_emit_indexer_summary", lambda **_p: None)
@@ -1154,7 +1161,9 @@ class TestFastPath:
         pipeline, config, _media_dir, paths, sha, _q = self._setup(tmp_path, monkeypatch)
         exif_calls = []
         monkeypatch.setattr(
-            pipeline, "get_exif_basic", lambda p: (exif_calls.append(str(p)) or {})
+            pipeline,
+            "get_exif_basic_result",
+            lambda p: (exif_calls.append(str(p)) or ({}, True)),
         )
         pipeline.run_index(config)
         assert len(exif_calls) == len(paths)

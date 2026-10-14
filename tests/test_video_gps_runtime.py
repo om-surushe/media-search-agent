@@ -24,8 +24,8 @@ def test_likely_has_embedded_gps_track_uses_exiftool_probe(monkeypatch):
 def test_extract_video_gps_track_parses_grouped_exiftool_records(monkeypatch):
     monkeypatch.setattr(
         video,
-        "_extract_embedded_gps_records",
-        lambda path: [{
+        "_extract_embedded_gps_records_result",
+        lambda path: ([{
             "SourceFile": str(path),
             "Doc1:GPSDateTime": "2026:02:27 01:17:13.200",
             "Doc1:GPSLatitude": 37.4170104,
@@ -39,7 +39,7 @@ def test_extract_video_gps_track_parses_grouped_exiftool_records(monkeypatch):
             "Doc1-1:GPSAltitude": 11.282,
             "Doc1-1:GPSMeasureMode": 3,
             "Doc1-1:SampleTime": 0.1,
-        }],
+        }], True),
     )
 
     samples = video.extract_video_gps_track(Path("/tmp/example.mp4"))
@@ -56,17 +56,29 @@ def test_extract_video_gps_track_parses_grouped_exiftool_records(monkeypatch):
 def test_extract_video_gps_track_returns_empty_when_no_gps_samples(monkeypatch):
     monkeypatch.setattr(
         video,
-        "_extract_embedded_gps_records",
-        lambda path: [{
+        "_extract_embedded_gps_records_result",
+        lambda path: ([{
             "SourceFile": str(path),
             "Doc1:SampleTime": 0.0,
             "Doc2:SampleTime": 1.0,
-        }],
+        }], True),
     )
 
-    samples = video.extract_video_gps_track(Path("/tmp/example.mp4"))
+    samples, read_succeeded = video.extract_video_gps_track_result(
+        Path("/tmp/example.mp4")
+    )
 
     assert samples == []
+    assert read_succeeded is True
+
+
+def test_video_gps_result_marks_missing_exiftool_as_retryable(monkeypatch):
+    monkeypatch.setattr(video, "_extract_embedded_gps_records_result", lambda _p: ([], False))
+
+    samples, read_succeeded = video.extract_video_gps_track_result("GX010123.MP4")
+
+    assert samples == []
+    assert read_succeeded is False
 
 
 def test_sample_video_gps_at_timestamp_interpolates_between_samples():

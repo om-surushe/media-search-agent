@@ -79,6 +79,15 @@ class _FingerprintNoOpsMixin:
     def resurrect_media(self, _media_id):
         pass
 
+    def set_pipeline_status(self, *_args, **_kwargs):
+        pass
+
+    def get_media_enrichment_status(self, *_args, **_kwargs):
+        return None
+
+    def set_media_enrichment_status(self, *_args, **_kwargs):
+        pass
+
 
 class _RecordingFakeSQLite(_FingerprintNoOpsMixin):
     """SQLite stub that counts commit() calls and pretends every file is new."""
@@ -296,7 +305,7 @@ def _common_pipeline_patches(monkeypatch, pipeline, image_paths, store_factory):
         lambda *_args, **_kwargs: [(p, os.stat(p)) for p in image_paths],
     )
     monkeypatch.setattr(pipeline, "sha256_of_file", lambda p: f"id-{p.name}")
-    monkeypatch.setattr(pipeline, "get_exif_basic", lambda _p: {})
+    monkeypatch.setattr(pipeline, "get_exif_basic_result", lambda _p: ({}, True))
     monkeypatch.setattr(pipeline, "write_thumbnail", lambda *_a, **_k: None)
     monkeypatch.setattr(pipeline, "SQLiteStore", store_factory)
     monkeypatch.setattr(pipeline, "ClipEmbedder", _FakeClipEmbedderWithVectors)
@@ -446,6 +455,10 @@ def test_skipped_run_emits_zero_commit_stats(tmp_path, monkeypatch):
     _common_pipeline_patches(
         monkeypatch, pipeline, image_paths, _make_skip_store
     )
+    thumb_dir = tmp_path / "thumbs"
+    thumb_dir.mkdir()
+    for image_path in image_paths:
+        (thumb_dir / f"id-{image_path.name}.jpg").write_bytes(b"existing thumbnail")
 
     summaries: list[dict] = []
     monkeypatch.setattr(

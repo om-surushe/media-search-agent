@@ -8,7 +8,7 @@ from .utils.logging import with_ctx
 from .io.scanner import ScanStats, iter_media, iter_media_entries
 from msa_settings.paths import resolve_for_access
 from msa_settings.config import object_detection_enabled, video_object_detection_enabled
-from .io.exif import get_exif_basic
+from .io.exif import get_exif_basic_result
 try:
     import reverse_geocoder as rg
     RG_AVAILABLE = True
@@ -17,8 +17,9 @@ except ImportError:
     RG_AVAILABLE = False
 from .io.video import (
     get_video_meta,
+    get_video_meta_result,
     extract_keyframes_from_shot,
-    extract_video_gps_track,
+    extract_video_gps_track_result,
     sample_video_gps_at_timestamp,
     should_extract_video_gps_track,
 )
@@ -43,6 +44,26 @@ from .db import qdrant_handoff
 
 IMAGE_EXT = {".jpg",".jpeg",".png",".heic",".tif",".tiff",".webp"}
 VIDEO_EXT = {".mp4",".mov",".m4v",".avi",".mkv",".wmv",".flv",".webm"}
+ENRICHMENT_VERSIONS = {
+    "image_exif": "1",
+    "video_metadata": "1",
+    "video_gps_track": "1",
+    "thumbnail": "1",
+}
+
+
+def _enrichment_is_complete(saved: dict | None, version: str, legacy_done: bool) -> bool:
+    if saved is None:
+        return legacy_done
+    return saved["status"] == "completed" and saved["extractor_version"] == version
+
+
+def _enrichment_needs_processing(
+    saved: dict | None, version: str, *, is_new: bool, force: bool, legacy_done: bool
+) -> bool:
+    if is_new or force:
+        return True
+    return not _enrichment_is_complete(saved, version, legacy_done)
 
 
 def _emit_indexer_summary(**payload) -> None:
@@ -215,7 +236,8 @@ def _count_phase_expects_free_skip(snap, *, model_version, is_image, is_video,
                                    video_objects_enabled=False,
                                    transcription_enabled=False,
                                    transcription_model=WHISPER_MODEL_NAME,
-                                   transcription_revision=WHISPER_MODEL_REVISION) -> bool:
+                                   transcription_revision=WHISPER_MODEL_REVISION,
+                                   thumbnail_exists=None) -> bool:
     """True iff a fingerprint stat-match on this media costs ~0 processing time
     — the only case the count-phase ETA may subtract it as a free skip
     (#208 review, Codex P2).
@@ -252,7 +274,20 @@ def _count_phase_expects_free_skip(snap, *, model_version, is_image, is_video,
     the file as work, so the ETA errs toward OVER-estimate, never the 0-ETA
     under-estimate.
     """
-    if snap is None:
+    if snap is None or thumbnail_exists is False:
+        return False
+    stages = ["video_metadata" if is_video else "image_exif", "thumbnail"]
+    if is_video:
+        stages.append("video_gps_track")
+    saved_stages = snap.get("enrichment_status", {})
+    if any(
+        stage in saved_stages
+        and (
+            saved_stages[stage]["status"] != "completed"
+            or saved_stages[stage]["extractor_version"] != ENRICHMENT_VERSIONS[stage]
+        )
+        for stage in stages
+    ):
         return False
     needs_gps, needs_objects, needs_faces, needs_embeddings = _base_needs_flags(
         snap,
@@ -459,7 +494,7 @@ def get_place_name(lat: float, lon: float) -> str | None:
                 parts.append(r['cc'])
             return ", ".join(parts) if parts else None
     except Exception as e:
-        logger.debug(f"Reverse geocoding failed for ({lat}, {lon}): {e}")
+        logger.debug("Reverse geocoding failed ({})", type(e).__name__)
     
     return None
 
@@ -604,6 +639,7 @@ def run_index(config, stop_event=None):
     # uses the full estimate (correct — nothing cached).
     fp_by_source: dict[str, dict[str, tuple]] = {}
     snap_by_source: dict[str, dict[str, dict]] = {}
+    thumbnail_exists_by_media_id: dict[str, bool] = {}
     if (
         fingerprint_enabled
         and not verify_content
@@ -676,8 +712,13 @@ def run_index(config, stop_event=None):
             # Gate on the shared needs_* logic (bulk snapshot, no per-file SQL);
             # when in doubt, count as work (over-estimate).
             if fp is not None and fp[0] == st.st_size and fp[1] == st.st_mtime_ns:
+                media_id = fp[2]
+                if media_id not in thumbnail_exists_by_media_id:
+                    thumbnail_exists_by_media_id[media_id] = (
+                        Path(config.thumb_dir) / f"{media_id}.jpg"
+                    ).is_file()
                 if _count_phase_expects_free_skip(
-                    src_snap.get(fp[2]),
+                    src_snap.get(media_id),
                     model_version=count_model_version,
                     is_image=is_image,
                     is_video=is_video,
@@ -685,6 +726,7 @@ def run_index(config, stop_event=None):
                     faces_enabled=faces_enabled,
                     video_objects_enabled=video_objects_enabled,
                     transcription_enabled=transcription_enabled,
+                    thumbnail_exists=thumbnail_exists_by_media_id[media_id],
                 ):
                     if is_image:
                         expected_image_hits += 1
@@ -1244,10 +1286,52 @@ def run_index(config, stop_event=None):
                 elif ext in VIDEO_EXT and db.media_has_unembedded_keyframes(media_id):
                     needs_embeddings = True
 
+            force_metadata = bool(getattr(config, "reprocess_gps", False))
+            metadata_stage = "image_exif" if ext in IMAGE_EXT else "video_metadata"
+            metadata_version = ENRICHMENT_VERSIONS[metadata_stage]
+            metadata_state = db.get_media_enrichment_status(media_id, metadata_stage)
+            needs_metadata = _enrichment_needs_processing(
+                metadata_state,
+                metadata_version,
+                is_new=not media_exists,
+                force=force_metadata,
+                legacy_done=bool(status.get("gps_processed", False)),
+            )
+
+            track_applicable = ext in VIDEO_EXT and should_extract_video_gps_track(p)
+            track_version = ENRICHMENT_VERSIONS["video_gps_track"]
+            track_state = (
+                db.get_media_enrichment_status(media_id, "video_gps_track")
+                if track_applicable else None
+            )
+            needs_video_gps_track = track_applicable and _enrichment_needs_processing(
+                track_state,
+                track_version,
+                is_new=not media_exists,
+                force=force_metadata,
+                legacy_done=bool(status.get("gps_processed", False)),
+            )
+            needs_gps = needs_metadata or needs_video_gps_track
+
+            thumbnail_version = ENRICHMENT_VERSIONS["thumbnail"]
+            thumbnail_state = db.get_media_enrichment_status(media_id, "thumbnail")
+            thumbnail_path = Path(config.thumb_dir) / f"{media_id}.jpg"
+            needs_thumbnail = (
+                not media_exists
+                or not thumbnail_path.is_file()
+                or (
+                    thumbnail_state is not None
+                    and (
+                        thumbnail_state["status"] != "completed"
+                        or thumbnail_state["extractor_version"] != thumbnail_version
+                    )
+                )
+            )
+
             # Optimization: Skip files that don't need ANY processing
-            # This only helps when no reprocessing flags are set (normal incremental indexing)
             if media_exists and not (
-                needs_gps or needs_objects or needs_faces or needs_embeddings or needs_transcription
+                needs_gps or needs_thumbnail or needs_objects or needs_faces
+                or needs_embeddings or needs_transcription
             ):
                 log.info("Skipping - no processing needed")
                 skipped_count += 1
@@ -1255,38 +1339,99 @@ def run_index(config, stop_event=None):
                 continue
 
             # Track what was processed for this file (for summary log)
-            processed_gps = None  # None = not processed, True = GPS data found, False = processed but no GPS data
+            processed_gps = None  # None = not processed, True = GPS found, False = completed without GPS
             processed_face_count = 0
             processed_object_count = 0
             processed_shot_count = 0
             processed_embedding = False
             gps_data_mode = None
             video_gps_samples = []
-            
-            # EXIF / video meta (always read for new items, or if GPS reprocessing requested)
             meta = {}
-            if ext in IMAGE_EXT:
-                if needs_gps or not media_exists:
-                    meta.update(get_exif_basic(p))
-            elif ext in VIDEO_EXT:
-                if needs_gps or not media_exists:
-                    extract_gopro_gps_track = should_extract_video_gps_track(p)
-                    meta.update(get_video_meta(p))
-                    if extract_gopro_gps_track:
-                        video_gps_samples = extract_video_gps_track(p)
-                        if video_gps_samples and (meta.get("gps_lat") is None or meta.get("gps_lon") is None):
-                            meta["gps_lat"] = video_gps_samples[0]["gps_lat"]
-                            meta["gps_lon"] = video_gps_samples[0]["gps_lon"]
+            metadata_result = None
+            metadata_error = None
+            video_track_result = None
+            video_track_error = None
+
+            if needs_metadata:
+                try:
+                    if ext in IMAGE_EXT:
+                        meta, read_succeeded = get_exif_basic_result(p)
+                    else:
+                        meta, read_succeeded = get_video_meta_result(p)
+                    metadata_result = "completed" if read_succeeded else "failed"
+                    if not read_succeeded:
+                        metadata_error = "MetadataReaderUnavailable"
+                except Exception as exc:
+                    metadata_result = "failed"
+                    metadata_error = type(exc).__name__
+                if metadata_result == "failed":
+                    log.warning(
+                        "Metadata unavailable for media {} ({}); continuing indexing",
+                        media_id,
+                        metadata_error,
+                    )
+
+            if needs_video_gps_track:
+                try:
+                    video_gps_samples, read_succeeded = extract_video_gps_track_result(p)
+                    video_track_result = "completed" if read_succeeded else "failed"
+                    if not read_succeeded:
+                        video_track_error = "GPSExtractorUnavailable"
+                except Exception as exc:
+                    video_track_result = "failed"
+                    video_track_error = type(exc).__name__
+                if video_track_result == "failed":
+                    log.warning(
+                        "Video GPS unavailable for media {} ({}); continuing indexing",
+                        media_id,
+                        video_track_error,
+                    )
+                if video_gps_samples and (meta.get("gps_lat") is None or meta.get("gps_lon") is None):
+                    meta["gps_lat"] = video_gps_samples[0]["gps_lat"]
+                    meta["gps_lon"] = video_gps_samples[0]["gps_lon"]
+
+            metadata_succeeded = (
+                metadata_result == "completed"
+                if metadata_result is not None
+                else _enrichment_is_complete(
+                    metadata_state, metadata_version, bool(status.get("gps_processed", False))
+                )
+            )
+            video_track_succeeded = (
+                video_track_result == "completed"
+                if video_track_result is not None
+                else not track_applicable
+                or _enrichment_is_complete(
+                    track_state, track_version, bool(status.get("gps_processed", False))
+                )
+            )
+            gps_metadata_available = metadata_succeeded and video_track_succeeded
 
             # Fallback to file modification time if no timestamp from EXIF/metadata
             if not meta.get("ts_utc") and not media_exists:
-                from datetime import datetime
-                meta["ts_utc"] = datetime.fromtimestamp(st.st_mtime).isoformat()
+                from datetime import datetime, timezone
+                try:
+                    meta["ts_utc"] = datetime.fromtimestamp(
+                        st.st_mtime, tz=timezone.utc
+                    ).isoformat()
+                except (OSError, OverflowError, ValueError) as exc:
+                    log.warning(
+                        "File timestamp unavailable for media {} ({}); continuing without timestamp",
+                        media_id,
+                        type(exc).__name__,
+                    )
 
-            # Reverse geocoding: convert GPS to place name
+            # Reverse geocoding is optional enrichment of already-extracted GPS.
             place_name = None
             if needs_gps and meta.get("gps_lat") is not None and meta.get("gps_lon") is not None:
-                place_name = get_place_name(meta["gps_lat"], meta["gps_lon"])
+                try:
+                    place_name = get_place_name(meta["gps_lat"], meta["gps_lon"])
+                except Exception as exc:
+                    log.warning(
+                        "Place lookup unavailable for media {} ({}); retaining coordinates",
+                        media_id,
+                        type(exc).__name__,
+                    )
                 if place_name:
                     log.debug(f"Reverse geocoded to: {place_name}")
             if needs_gps:
@@ -1297,15 +1442,28 @@ def run_index(config, stop_event=None):
                 else:
                     gps_data_mode = "none"
 
-            # Thumbnail: generate for new files only.
-            # Named <media_id>.jpg to avoid filename collisions (e.g. DSC_1248.JPG in many folders).
-            if not media_exists:
-                if ext in IMAGE_EXT:
-                    write_thumbnail(p, config.thumb_dir, media_id)
-                    log.debug("Wrote image thumbnail")
-                elif ext in VIDEO_EXT:
-                    write_video_thumbnail(p, config.thumb_dir, media_id)
-                    log.debug("Wrote video thumbnail")
+            # Retry missing/failed thumbnails independently from metadata extraction.
+            thumbnail_result = None
+            thumbnail_error = None
+            if needs_thumbnail:
+                try:
+                    thumbnail = (
+                        write_thumbnail(p, config.thumb_dir, media_id)
+                        if ext in IMAGE_EXT
+                        else write_video_thumbnail(p, config.thumb_dir, media_id)
+                    )
+                    thumbnail_result = "completed" if thumbnail is not None else "failed"
+                    if thumbnail is None:
+                        thumbnail_error = "NoThumbnailProduced"
+                except Exception as exc:
+                    thumbnail_result = "failed"
+                    thumbnail_error = type(exc).__name__
+                if thumbnail_result == "failed":
+                    log.warning(
+                        "Thumbnail unavailable for media {} ({}); continuing indexing",
+                        media_id,
+                        thumbnail_error,
+                    )
 
             # upsert media row - only if new file or updating GPS/metadata
             # Skip metadata upsert when doing selective feature reprocessing (faces, objects, embeddings)
@@ -1317,24 +1475,37 @@ def run_index(config, stop_event=None):
                 row = dict(
                     media_id=media_id, path=str(p), source_name=source_name, rel_path=rel, size_bytes=size_bytes,
                     mime=("image" if ext in IMAGE_EXT else "video") + "/" + ext.strip("."),
-                    ts_utc=meta.get("ts_utc") if meta.get("ts_utc") else None,
-                    place=place_name, camera=meta.get("camera"), lens=meta.get("lens"),
-                    width=meta.get("width"), height=meta.get("height"),
-                    duration=meta.get("duration"), hash_blake3=None
                 )
-                # Only write GPS if we extracted it this run (avoid overwriting with None if reprocessing other stages)
-                if needs_gps and meta:
-                    row["gps_lat"] = meta.get("gps_lat")
-                    row["gps_lon"] = meta.get("gps_lon")
-                # Mark GPS as processed if we attempted extraction, regardless of whether GPS data was found
-                # Absence of GPS data can be determined later by checking if lat/lon values are None
+                metadata_fields = {
+                    "ts_utc": meta.get("ts_utc"),
+                    "place": place_name,
+                    "camera": meta.get("camera"),
+                    "lens": meta.get("lens"),
+                    "width": meta.get("width"),
+                    "height": meta.get("height"),
+                    "duration": meta.get("duration"),
+                }
+                # Reprocessing can produce partial metadata (notably video has no
+                # capture-time parser); don't erase previously known values with None.
+                row.update({
+                    key: value for key, value in metadata_fields.items()
+                    if value is not None or not media_exists
+                })
                 if needs_gps:
-                    row["gps_processed"] = 1
-                    row["gps_data_mode"] = gps_data_mode
-                    # Track whether GPS data was actually found
+                    row["gps_processed"] = int(gps_metadata_available)
+                    if gps_data_mode is not None:
+                        row["gps_data_mode"] = gps_data_mode
                     gps_lat = meta.get("gps_lat")
                     gps_lon = meta.get("gps_lon")
-                    processed_gps = bool(video_gps_samples) or (gps_lat is not None and gps_lon is not None)
+                    if gps_lat is not None and gps_lon is not None:
+                        # Preserve useful output from a successful stage even
+                        # when another independent metadata stage failed.
+                        row["gps_lat"] = gps_lat
+                        row["gps_lon"] = gps_lon
+                    if gps_metadata_available:
+                        processed_gps = bool(video_gps_samples) or (
+                            gps_lat is not None and gps_lon is not None
+                        )
                 db.upsert_media(row)
                 content_changed = True
                 log.debug(f"Upserted media row: {row}")
@@ -1369,6 +1540,22 @@ def run_index(config, stop_event=None):
                     media_id, scan_id,
                 )
                 fp_pending = None
+
+            if metadata_result is not None:
+                db.set_media_enrichment_status(
+                    media_id, metadata_stage, metadata_result,
+                    extractor_version=metadata_version, error_type=metadata_error,
+                )
+            if video_track_result is not None:
+                db.set_media_enrichment_status(
+                    media_id, "video_gps_track", video_track_result,
+                    extractor_version=track_version, error_type=video_track_error,
+                )
+            if thumbnail_result is not None:
+                db.set_media_enrichment_status(
+                    media_id, "thumbnail", thumbnail_result,
+                    extractor_version=thumbnail_version, error_type=thumbnail_error,
+                )
         
             transcription_processed = False
             transcription_status = None

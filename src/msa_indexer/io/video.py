@@ -87,10 +87,10 @@ def likely_has_embedded_gps_track(path: str | Path) -> bool:
     return _probe_embedded_gps_via_exiftool(path)
 
 
-def _extract_embedded_gps_records(path: str | Path) -> list[dict[str, Any]]:
+def _extract_embedded_gps_records_result(path: str | Path) -> tuple[list[dict[str, Any]], bool]:
     exe = shutil.which("exiftool")
     if not exe:
-        return []
+        return [], False
     try:
         proc = subprocess.run(
             [
@@ -113,19 +113,28 @@ def _extract_embedded_gps_records(path: str | Path) -> list[dict[str, Any]]:
             text=True,
             check=False,
         )
-        if proc.returncode != 0 or not proc.stdout.strip():
-            return []
+        if proc.returncode != 0:
+            return [], False
+        if not proc.stdout.strip():
+            return [], True
         payload = json.loads(proc.stdout)
-        return payload if isinstance(payload, list) else []
+        return (payload, True) if isinstance(payload, list) else ([], False)
     except Exception:
-        return []
+        return [], False
 
 
-def extract_video_gps_track(path: str | Path) -> list[dict[str, Any]]:
-    """Extract a timed GPS track and normalize it into ordered GPS samples."""
-    payload = _extract_embedded_gps_records(path)
-    if not payload:
-        return []
+def _extract_embedded_gps_records(path: str | Path) -> list[dict[str, Any]]:
+    """Compatibility wrapper returning records without parser status."""
+    return _extract_embedded_gps_records_result(path)[0]
+
+
+def extract_video_gps_track_result(
+    path: str | Path,
+) -> tuple[list[dict[str, Any]], bool]:
+    """Return normalized GPS samples and whether ExifTool read the file."""
+    payload, read_succeeded = _extract_embedded_gps_records_result(path)
+    if not read_succeeded or not payload:
+        return [], read_succeeded
 
     flat = payload[0]
     docs: dict[str, dict[str, Any]] = {}
@@ -137,7 +146,7 @@ def extract_video_gps_track(path: str | Path) -> list[dict[str, Any]]:
         docs.setdefault(doc_id, {})[field] = value
 
     if not docs:
-        return []
+        return [], True
 
     samples: list[dict[str, Any]] = []
     first_dt: Optional[datetime] = None
@@ -179,7 +188,12 @@ def extract_video_gps_track(path: str | Path) -> list[dict[str, Any]]:
         })
 
     samples.sort(key=lambda s: float(s["t_offset_sec"]))
-    return samples
+    return samples, True
+
+
+def extract_video_gps_track(path: str | Path) -> list[dict[str, Any]]:
+    """Extract a timed GPS track and normalize it into ordered GPS samples."""
+    return extract_video_gps_track_result(path)[0]
 
 
 def sample_video_gps_at_timestamp(
@@ -313,19 +327,23 @@ def _scan_track_for_location(track: Any) -> Optional[Tuple[float, float]]:
                 pass
     return None
 
-def get_video_meta(path, *, allow_exiftool_gps: bool = True):
+def get_video_meta_result(
+    path, *, allow_exiftool_gps: bool = True
+) -> tuple[dict[str, Any], bool]:
     duration = None
     width = None
     height = None
     gps_lat = None
     gps_lon = None
+    read_succeeded = False
 
     if MediaInfo is not None:
         try:
             mi = MediaInfo.parse(path)
         except Exception as e:
-            logger.warning(f"MediaInfo parse failed for {path}: {e}")
+            logger.warning("MediaInfo parse failed ({})", type(e).__name__)
         else:
+            read_succeeded = True
             for t in mi.tracks:
                 try:
                     if t.track_type == "Video":
@@ -346,6 +364,7 @@ def get_video_meta(path, *, allow_exiftool_gps: bool = True):
         try:
             cap = cv2.VideoCapture(str(path))
             if cap.isOpened():
+                read_succeeded = True
                 fps = cap.get(cv2.CAP_PROP_FPS)
                 frame_count = cap.get(cv2.CAP_PROP_FRAME_COUNT)
                 if duration is None and fps and fps > 0 and frame_count and frame_count > 0:
@@ -358,7 +377,7 @@ def get_video_meta(path, *, allow_exiftool_gps: bool = True):
                     height = frame_height or height
             cap.release()
         except Exception as e:
-            logger.debug(f"OpenCV metadata fallback failed for {path}: {e}")
+            logger.debug("OpenCV metadata fallback failed ({})", type(e).__name__)
     # Fallback: try exiftool for cheap static/file-level GPS. Timed track
     # extraction is gated separately to avoid scanning every video with -ee3.
     if allow_exiftool_gps and (gps_lat is None or gps_lon is None):
@@ -366,6 +385,7 @@ def get_video_meta(path, *, allow_exiftool_gps: bool = True):
             latlon = _extract_gps_with_exiftool(path)
             if latlon:
                 gps_lat, gps_lon = latlon
+                read_succeeded = True
         except Exception:
             pass
 
@@ -373,7 +393,12 @@ def get_video_meta(path, *, allow_exiftool_gps: bool = True):
     if gps_lat is not None and gps_lon is not None:
         meta["gps_lat"] = gps_lat
         meta["gps_lon"] = gps_lon
-    return meta
+    return meta, read_succeeded
+
+
+def get_video_meta(path, *, allow_exiftool_gps: bool = True) -> dict[str, Any]:
+    """Extract video metadata; see get_video_meta_result for parser status."""
+    return get_video_meta_result(path, allow_exiftool_gps=allow_exiftool_gps)[0]
 
 
 def _extract_gps_with_exiftool(path: str | Path) -> Optional[Tuple[float, float]]:

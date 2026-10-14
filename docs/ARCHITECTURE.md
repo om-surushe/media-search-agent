@@ -161,8 +161,10 @@ For each file the pipeline:
    track extractor pulls per-second coordinates and aligns them to the
    shots picked by the shot detector — so a 10-shot clip ends up with up
    to 10 representative GPS points instead of one. All GPS points get
-   reverse-geocoded to place names.
-3. Writes a thumbnail to disk.
+   reverse-geocoded to place names. Metadata, GPS-track, and thumbnail
+   extraction have independent SQLite outcomes; a successful read with no
+   tags is complete, while a failed stage is retried on a later index run.
+3. Writes a thumbnail to disk; failed or missing thumbnails are retried.
 4. Runs the model pipeline:
    - **Images** — CLIP image embedding, RT-DETR objects, facenet-pytorch faces.
    - **Videos** — shot detection (PySceneDetect), then per keyframe: CLIP,
@@ -191,7 +193,7 @@ export watermark.
 
 | Store | Role | On disk |
 |---|---|---|
-| **SQLite** (`media.sqlite`) | Canonical store: media metadata, tags, faces, people, embeddings as float32 BLOBs, transcript segments, and transcription state. Transcript FTS5 is a derived in-database index. WAL mode for concurrent reads while indexing. | App data dir (see [INSTALL.md](INSTALL.md#what-it-installs-and-where)) |
+| **SQLite** (`media.sqlite`) | Canonical store: media metadata, tags, faces, people, embeddings as float32 BLOBs, transcript segments, transcription state, and per-stage enrichment status/attempts. Transcript FTS5 is a derived in-database index. WAL mode for concurrent reads while indexing. | App data dir (see [INSTALL.md](INSTALL.md#what-it-installs-and-where)) |
 | **Qdrant** (embedded) | Vector index for nearest-neighbour search across image, video keyframe, and face embeddings. Rebuilt from SQLite on demand. | Same data dir, separate subdirectory |
 | **Thumbnails** | One small JPEG per indexed image, plus face crops. Written once, served by FastAPI. | Same data dir |
 

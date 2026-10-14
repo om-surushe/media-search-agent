@@ -10,6 +10,7 @@ try:
 except Exception:
     exifread = None
 from datetime import datetime
+from typing import Any
 
 
 def _dms_to_decimal(dms, ref):
@@ -88,20 +89,23 @@ def _extract_gps_from_exif(exif):
     return _dms_to_decimal(lat, lat_ref), _dms_to_decimal(lon, lon_ref)
 
 
-def get_exif_basic(path):
+def get_exif_basic_result(path) -> tuple[dict[str, Any], bool]:
     """Extract a minimal set of EXIF metadata including timestamp, camera/lens, size, and GPS.
 
-    Returns dict keys: ts_utc, camera, lens, width, height, gps_lat, gps_lon (lat/lon may be None).
+    Returns metadata and whether a parser read the file successfully.
     """
     im = None
     exif_dict = {}
     gps_lat = None
     gps_lon = None
+    pillow_succeeded = False
+    exifread_succeeded = False
     try:
         im = Image.open(path)
         exif = im.getexif()
         exif_dict = {ExifTags.TAGS.get(k, k): v for k, v in exif.items()}
         gps_lat, gps_lon = _extract_gps_from_exif(exif)
+        pillow_succeeded = True
     except Exception:
         # Fall back to empty exif if anything fails
         exif_dict = {}
@@ -111,6 +115,7 @@ def get_exif_basic(path):
         try:
             with open(path, 'rb') as f:
                 tags = exifread.process_file(f, details=False)
+            exifread_succeeded = bool(tags)
             lat_vals = tags.get('GPS GPSLatitude')
             lat_ref = tags.get('GPS GPSLatitudeRef')
             lon_vals = tags.get('GPS GPSLongitude')
@@ -172,4 +177,8 @@ def get_exif_basic(path):
         "height": height,
         "gps_lat": gps_lat,
         "gps_lon": gps_lon,
-    }
+    }, pillow_succeeded or exifread_succeeded
+
+def get_exif_basic(path) -> dict[str, Any]:
+    """Extract basic metadata, discarding the parser status."""
+    return get_exif_basic_result(path)[0]

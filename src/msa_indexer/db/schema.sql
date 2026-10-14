@@ -55,6 +55,22 @@ CREATE TABLE IF NOT EXISTS media_pipeline_status (
 CREATE INDEX IF NOT EXISTS idx_media_pipeline_status_media
   ON media_pipeline_status(media_id, pipeline);
 
+-- Independent retry state for metadata and thumbnail extraction stages.
+CREATE TABLE IF NOT EXISTS media_enrichment_status (
+  media_id TEXT NOT NULL,
+  stage TEXT NOT NULL CHECK (stage IN ('image_exif', 'video_metadata', 'video_gps_track', 'thumbnail')),
+  status TEXT NOT NULL CHECK (status IN ('completed', 'failed')),
+  extractor_version TEXT NOT NULL,
+  attempt_count INTEGER NOT NULL DEFAULT 1,
+  last_attempt_at TEXT NOT NULL DEFAULT (datetime('now')),
+  completed_at TEXT,
+  error_type TEXT,
+  PRIMARY KEY (media_id, stage),
+  FOREIGN KEY (media_id) REFERENCES media(media_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_media_enrichment_status_stage
+  ON media_enrichment_status(stage, status);
+
 CREATE TABLE IF NOT EXISTS tag (
   tag_id INTEGER PRIMARY KEY AUTOINCREMENT,
   name TEXT UNIQUE

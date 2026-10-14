@@ -1281,6 +1281,46 @@ class SQLiteStore:
             self.conn.execute(f"UPDATE media SET {column}=0 WHERE media_id=?", (media_id,))
         self._maybe_commit()
 
+    def get_media_enrichment_status(self, media_id: str, stage: str) -> dict[str, Any] | None:
+        row = self.conn.execute(
+            """SELECT status, extractor_version, attempt_count, error_type
+               FROM media_enrichment_status WHERE media_id=? AND stage=?""",
+            (media_id, stage),
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "status": row[0],
+            "extractor_version": row[1],
+            "attempt_count": row[2],
+            "error_type": row[3],
+        }
+
+    def set_media_enrichment_status(
+        self, media_id: str, stage: str, status: str, *,
+        extractor_version: str, error_type: str | None = None,
+    ) -> None:
+        if stage not in {"image_exif", "video_metadata", "video_gps_track", "thumbnail"}:
+            raise ValueError(f"Unsupported enrichment stage: {stage}")
+        if status not in {"completed", "failed"}:
+            raise ValueError(f"Unsupported enrichment status: {status}")
+        self.conn.execute(
+            """INSERT INTO media_enrichment_status(
+                   media_id, stage, status, extractor_version, attempt_count,
+                   last_attempt_at, completed_at, error_type
+               ) VALUES (?, ?, ?, ?, 1, datetime('now'),
+                         CASE WHEN ?='completed' THEN datetime('now') ELSE NULL END, ?)
+               ON CONFLICT(media_id, stage) DO UPDATE SET
+                   status=excluded.status,
+                   extractor_version=excluded.extractor_version,
+                   attempt_count=media_enrichment_status.attempt_count + 1,
+                   last_attempt_at=datetime('now'),
+                   completed_at=excluded.completed_at,
+                   error_type=excluded.error_type""",
+            (media_id, stage, status, extractor_version, status, error_type),
+        )
+        self._maybe_commit()
+
     def get_total_changes(self) -> int:
         return int(self.conn.total_changes)
 
@@ -1430,6 +1470,7 @@ class SQLiteStore:
                     continue
                 out[media_id] = {
                     "gps_processed": bool(row[1]),
+                    "enrichment_status": {},
                     "object_detection_done": bool(row[2]),
                     "face_detection_done": bool(row[3]),
                     "embeddings_version": row[4],
@@ -1441,6 +1482,18 @@ class SQLiteStore:
                     "transcription_model": row[10],
                     "transcription_revision": row[11],
                 }
+            enrichment_rows = self.conn.execute(
+                f"""SELECT media_id, stage, status, extractor_version
+                    FROM media_enrichment_status
+                    WHERE media_id IN ({placeholders})""",
+                chunk,
+            ).fetchall()
+            for media_id, stage, stage_status, version in enrichment_rows:
+                if media_id in out:
+                    out[media_id]["enrichment_status"][stage] = {
+                        "status": stage_status,
+                        "extractor_version": version,
+                    }
         return out
 
     def upsert_fingerprint(

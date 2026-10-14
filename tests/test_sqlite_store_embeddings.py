@@ -83,6 +83,34 @@ def test_pipeline_status_keeps_failed_detection_retryable(store, media_row):
     ).fetchone()[0] == 1
 
 
+def test_enrichment_status_tracks_retry_and_completion(store, media_row):
+    store.set_media_enrichment_status(
+        media_row, "image_exif", "failed",
+        extractor_version="exif-v1", error_type="OSError",
+    )
+    failed = store.get_media_enrichment_status(media_row, "image_exif")
+    assert failed["status"] == "failed"
+    assert failed["attempt_count"] == 1
+    assert failed["error_type"] == "OSError"
+
+    store.set_media_enrichment_status(
+        media_row, "image_exif", "completed", extractor_version="exif-v1"
+    )
+    completed = store.get_media_enrichment_status(media_row, "image_exif")
+    assert completed["status"] == "completed"
+    assert completed["attempt_count"] == 2
+    assert completed["error_type"] is None
+    assert store.conn.execute(
+        "SELECT completed_at IS NOT NULL FROM media_enrichment_status WHERE media_id=? AND stage='image_exif'",
+        (media_row,),
+    ).fetchone()[0] == 1
+    snapshot = store.get_processing_snapshot_for_media_ids([media_row])[media_row]
+    assert snapshot["enrichment_status"]["image_exif"] == {
+        "status": "completed",
+        "extractor_version": "exif-v1",
+    }
+
+
 def test_schema_drops_legacy_vec_meta_table_on_fresh_db(store):
     # vec_meta was the original-commit legacy table; new DBs should not
     # carry it (existing DBs harmlessly retain an empty one).

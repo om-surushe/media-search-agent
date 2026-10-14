@@ -57,6 +57,12 @@ class _FingerprintNoOpsMixin:
     def set_pipeline_status(self, *_args, **_kwargs):
         pass
 
+    def get_media_enrichment_status(self, *_args, **_kwargs):
+        return None
+
+    def set_media_enrichment_status(self, *_args, **_kwargs):
+        pass
+
 
 def _patch_walk(monkeypatch, pipeline, paths):
     """Patch the metadata scan used to build the processing queue."""
@@ -287,7 +293,27 @@ def _reset_fake_store_state():
     _FakeFaissStore.fail_on_save = False
 
 
-def test_processing_order_and_bad_image_do_not_stop_later_items(tmp_path, monkeypatch):
+def test_enrichment_status_retries_failure_and_version_change():
+    from msa_indexer.pipeline import _enrichment_needs_processing
+
+    assert _enrichment_needs_processing(
+        {"status": "failed", "extractor_version": "1"},
+        "1", is_new=False, force=False, legacy_done=True,
+    )
+    assert not _enrichment_needs_processing(
+        {"status": "completed", "extractor_version": "1"},
+        "1", is_new=False, force=False, legacy_done=False,
+    )
+    assert _enrichment_needs_processing(
+        {"status": "completed", "extractor_version": "1"},
+        "2", is_new=False, force=False, legacy_done=True,
+    )
+
+
+@pytest.mark.parametrize("failed_stage", [None, "exif", "thumbnail"])
+def test_metadata_or_thumbnail_failure_does_not_prevent_cataloging(
+    tmp_path, monkeypatch, failed_stage
+):
     from msa_indexer import pipeline
 
     unreadable_path = tmp_path / "unreadable.jpg"
@@ -303,6 +329,8 @@ def test_processing_order_and_bad_image_do_not_stop_later_items(tmp_path, monkey
     hash_order = []
     embedding_calls = []
     summaries = []
+    cataloged_rows = []
+    stage_results = []
 
     class _TrackingEmbedder(_FakeClipEmbedderWithVectors):
         def image_embed(self, images):
@@ -317,10 +345,29 @@ def test_processing_order_and_bad_image_do_not_stop_later_items(tmp_path, monkey
             raise OSError("fixture read failure")
         return f"{path.stem}-id"
 
+    def get_exif(_path):
+        if failed_stage == "exif":
+            raise OSError("fixture EXIF failure")
+        return {}, True
+
+    def write_thumbnail(*_args, **_kwargs):
+        if failed_stage == "thumbnail":
+            raise OSError("fixture thumbnail failure")
+        return tmp_path / "thumbnail.jpg"
+
+    class _TrackingStore(_FakeSQLiteStoreNeedsProcessing):
+        def upsert_media(self, row):
+            cataloged_rows.append(row)
+
+        def set_media_enrichment_status(
+            self, media_id, stage, status, *, extractor_version, error_type=None
+        ):
+            stage_results.append((media_id, stage, status, extractor_version, error_type))
+
     monkeypatch.setattr(pipeline, "sha256_of_file", fake_hash)
-    monkeypatch.setattr(pipeline, "get_exif_basic", lambda _p: {})
-    monkeypatch.setattr(pipeline, "write_thumbnail", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(pipeline, "SQLiteStore", _FakeSQLiteStoreNeedsProcessing)
+    monkeypatch.setattr(pipeline, "get_exif_basic_result", get_exif)
+    monkeypatch.setattr(pipeline, "write_thumbnail", write_thumbnail)
+    monkeypatch.setattr(pipeline, "SQLiteStore", _TrackingStore)
     monkeypatch.setattr(pipeline, "ClipEmbedder", _TrackingEmbedder)
     monkeypatch.setattr(pipeline, "_load_historical_perf", lambda _p: (1.0, 30.0, 5.0))
     monkeypatch.setattr(pipeline, "_emit_indexer_summary", lambda **payload: summaries.append(payload))
@@ -352,6 +399,15 @@ def test_processing_order_and_bad_image_do_not_stop_later_items(tmp_path, monkey
     assert complete["processing_order"] == "newest"
     assert complete["total_found"] == 3
     assert embedding_calls == [1]
+    good_row = next(row for row in cataloged_rows if row["media_id"] == "good-id")
+    if failed_stage == "exif":
+        assert good_row["gps_processed"] == 0
+        assert ("good-id", "image_exif", "failed", "1", "OSError") in stage_results
+    else:
+        assert good_row["gps_processed"] == 1
+        assert ("good-id", "image_exif", "completed", "1", None) in stage_results
+    expected_thumbnail_status = "failed" if failed_stage == "thumbnail" else "completed"
+    assert ("good-id", "thumbnail", expected_thumbnail_status, "1", None if expected_thumbnail_status == "completed" else "OSError") in stage_results
 
 
 def test_per_run_override_enables_image_detection_without_config_change(tmp_path, monkeypatch):
@@ -372,7 +428,7 @@ def test_per_run_override_enables_image_detection_without_config_change(tmp_path
     monkeypatch.setattr(pipeline, "resolve_for_access", lambda p: p)
     _patch_walk(monkeypatch, pipeline, [image_path])
     monkeypatch.setattr(pipeline, "sha256_of_file", lambda _p: "image-id")
-    monkeypatch.setattr(pipeline, "get_exif_basic", lambda _p: {})
+    monkeypatch.setattr(pipeline, "get_exif_basic_result", lambda _p: ({}, True))
     monkeypatch.setattr(pipeline, "write_thumbnail", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(pipeline, "SQLiteStore", _FakeSQLiteStoreNeedsProcessing)
     monkeypatch.setattr(pipeline, "ClipEmbedder", _FakeClipEmbedderWithVectors)
@@ -419,7 +475,7 @@ def test_complete_summary_counts_up_to_date_videos(tmp_path, monkeypatch):
     monkeypatch.setattr(pipeline, "resolve_for_access", lambda p: p)
     _patch_walk(monkeypatch, pipeline, [image_path, video_path])
     monkeypatch.setattr(pipeline, "sha256_of_file", lambda p: "img-id" if p.suffix.lower() == ".jpg" else "vid-id")
-    monkeypatch.setattr(pipeline, "get_video_meta", lambda _p, **_kwargs: {"duration": 5.0})
+    monkeypatch.setattr(pipeline, "get_video_meta_result", lambda _p, **_kwargs: ({"duration": 5.0}, True))
     monkeypatch.setattr(pipeline, "SQLiteStore", _FakeSQLiteStore)
     monkeypatch.setattr(pipeline, "ClipEmbedder", _FakeClipEmbedder)
     monkeypatch.setattr(pipeline, "_load_historical_perf", lambda _p: (1.0, 30.0, 5.0))
@@ -443,6 +499,10 @@ def test_complete_summary_counts_up_to_date_videos(tmp_path, monkeypatch):
         processing_order="default",
         media_sources=[SimpleNamespace(name="photos", path=str(tmp_path), enabled=True)],
     )
+    thumb_dir = tmp_path / "thumbs"
+    thumb_dir.mkdir()
+    for media_id in ("img-id", "vid-id"):
+        (thumb_dir / f"{media_id}.jpg").write_bytes(b"existing thumbnail")
 
     pipeline.run_index(config)
 
@@ -531,7 +591,7 @@ def test_noop_run_skips_qdrant_export_by_default(tmp_path, monkeypatch):
     monkeypatch.setattr(pipeline, "resolve_for_access", lambda p: p)
     _patch_walk(monkeypatch, pipeline, [image_path, video_path])
     monkeypatch.setattr(pipeline, "sha256_of_file", lambda p: "img-id" if p.suffix.lower() == ".jpg" else "vid-id")
-    monkeypatch.setattr(pipeline, "get_video_meta", lambda _p, **_kwargs: {"duration": 5.0})
+    monkeypatch.setattr(pipeline, "get_video_meta_result", lambda _p, **_kwargs: ({"duration": 5.0}, True))
     monkeypatch.setattr(pipeline, "SQLiteStore", _FakeSQLiteStore)
     monkeypatch.setattr(pipeline, "ClipEmbedder", _FakeClipEmbedder)
     monkeypatch.setattr(pipeline, "_load_historical_perf", lambda _p: (1.0, 30.0, 5.0))
@@ -565,7 +625,10 @@ def test_noop_run_skips_qdrant_export_by_default(tmp_path, monkeypatch):
     assert export_calls == []
 
 
-def test_video_gps_track_extraction_is_limited_to_gopro_names(tmp_path, monkeypatch):
+@pytest.mark.parametrize("video_metadata_fails", [False, True])
+def test_video_gps_track_extraction_is_limited_to_gopro_names(
+    tmp_path, monkeypatch, video_metadata_fails
+):
     from msa_indexer import pipeline
 
     regular_video = tmp_path / "IMG_0001.mp4"
@@ -577,6 +640,11 @@ def test_video_gps_track_extraction_is_limited_to_gopro_names(tmp_path, monkeypa
 
     meta_calls = []
     gps_track_calls = []
+    upserted_rows = []
+
+    class _TrackingStore(_FakeSQLiteStore):
+        def upsert_media(self, row):
+            upserted_rows.append(row)
 
     monkeypatch.setattr(pipeline, "resolve_for_access", lambda p: p)
     _patch_walk(monkeypatch, pipeline, [regular_video, gopro_video, renamed_gopro_video])
@@ -589,7 +657,7 @@ def test_video_gps_track_extraction_is_limited_to_gopro_names(tmp_path, monkeypa
             renamed_gopro_video: "renamed-gopro-id",
         }[p],
     )
-    monkeypatch.setattr(pipeline, "SQLiteStore", _FakeSQLiteStore)
+    monkeypatch.setattr(pipeline, "SQLiteStore", _TrackingStore)
     monkeypatch.setattr(pipeline, "ClipEmbedder", _FakeClipEmbedder)
     monkeypatch.setattr(pipeline, "_load_historical_perf", lambda _p: (1.0, 30.0, 5.0))
     monkeypatch.setattr(pipeline, "_emit_indexer_summary", lambda **_payload: None)
@@ -598,7 +666,9 @@ def test_video_gps_track_extraction_is_limited_to_gopro_names(tmp_path, monkeypa
 
     def fake_get_video_meta(path, *, allow_exiftool_gps=True):
         meta_calls.append((path.name, allow_exiftool_gps))
-        return {"duration": 5.0}
+        if video_metadata_fails:
+            raise OSError("fixture metadata failure")
+        return {"duration": 5.0}, True
 
     def fake_extract_video_gps_track(path):
         gps_track_calls.append(path.name)
@@ -611,8 +681,12 @@ def test_video_gps_track_extraction_is_limited_to_gopro_names(tmp_path, monkeypa
             "gps_fix": 3,
         }]
 
-    monkeypatch.setattr(pipeline, "get_video_meta", fake_get_video_meta)
-    monkeypatch.setattr(pipeline, "extract_video_gps_track", fake_extract_video_gps_track)
+    monkeypatch.setattr(pipeline, "get_video_meta_result", fake_get_video_meta)
+    monkeypatch.setattr(
+        pipeline,
+        "extract_video_gps_track_result",
+        lambda path: (fake_extract_video_gps_track(path), True),
+    )
 
     config = SimpleNamespace(
         sqlite_path=str(tmp_path / "test.db"),
@@ -639,6 +713,14 @@ def test_video_gps_track_extraction_is_limited_to_gopro_names(tmp_path, monkeypa
         ("trimmed_gopro_gps_01.mp4", True),
     ]
     assert gps_track_calls == ["GX010123.MP4", "trimmed_gopro_gps_01.mp4"]
+    assert len(upserted_rows) == 3
+    assert all("ts_utc" not in row for row in upserted_rows)
+    assert all("width" not in row and "height" not in row for row in upserted_rows)
+    expected_gps_status = 0 if video_metadata_fails else 1
+    assert all(row["gps_processed"] == expected_gps_status for row in upserted_rows)
+    for media_id in ("gopro-id", "renamed-gopro-id"):
+        row = next(row for row in upserted_rows if row["media_id"] == media_id)
+        assert (row.get("gps_lat"), row.get("gps_lon")) == (1.0, 2.0)
 
 
 def test_changed_run_auto_exports_to_qdrant(tmp_path, monkeypatch):
@@ -652,7 +734,7 @@ def test_changed_run_auto_exports_to_qdrant(tmp_path, monkeypatch):
     monkeypatch.setattr(pipeline, "resolve_for_access", lambda p: p)
     _patch_walk(monkeypatch, pipeline, [image_path])
     monkeypatch.setattr(pipeline, "sha256_of_file", lambda _p: "img-id")
-    monkeypatch.setattr(pipeline, "get_exif_basic", lambda _p: {})
+    monkeypatch.setattr(pipeline, "get_exif_basic_result", lambda _p: ({}, True))
     monkeypatch.setattr(pipeline, "write_thumbnail", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(pipeline, "SQLiteStore", _FakeSQLiteStoreNeedsProcessing)
     monkeypatch.setattr(pipeline, "ClipEmbedder", _FakeClipEmbedderWithVectors)
@@ -700,7 +782,7 @@ def test_force_export_runs_even_when_no_processing_was_needed(tmp_path, monkeypa
     monkeypatch.setattr(pipeline, "resolve_for_access", lambda p: p)
     _patch_walk(monkeypatch, pipeline, [image_path, video_path])
     monkeypatch.setattr(pipeline, "sha256_of_file", lambda p: "img-id" if p.suffix.lower() == ".jpg" else "vid-id")
-    monkeypatch.setattr(pipeline, "get_video_meta", lambda _p, **_kwargs: {"duration": 5.0})
+    monkeypatch.setattr(pipeline, "get_video_meta_result", lambda _p, **_kwargs: ({"duration": 5.0}, True))
     monkeypatch.setattr(pipeline, "SQLiteStore", _FakeSQLiteStore)
     monkeypatch.setattr(pipeline, "ClipEmbedder", _FakeClipEmbedder)
     monkeypatch.setattr(pipeline, "_load_historical_perf", lambda _p: (1.0, 30.0, 5.0))
@@ -756,7 +838,7 @@ def test_stop_requested_still_exports_after_local_index_changes(tmp_path, monkey
     monkeypatch.setattr(pipeline, "resolve_for_access", lambda p: p)
     _patch_walk(monkeypatch, pipeline, [image_path])
     monkeypatch.setattr(pipeline, "sha256_of_file", lambda _p: "img-id")
-    monkeypatch.setattr(pipeline, "get_exif_basic", lambda _p: {})
+    monkeypatch.setattr(pipeline, "get_exif_basic_result", lambda _p: ({}, True))
     monkeypatch.setattr(pipeline, "write_thumbnail", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(pipeline, "SQLiteStore", _FakeSQLiteStoreNeedsProcessing)
     monkeypatch.setattr(pipeline, "ClipEmbedder", _FakeClipEmbedderWithVectors)
@@ -880,7 +962,7 @@ def test_unavailable_shot_detection_uses_synthetic_full_video_fallback(
     db_path = tmp_path / "index.sqlite"
 
     monkeypatch.setattr(pipeline, "ClipEmbedder", lambda *_args, **_kwargs: object())
-    monkeypatch.setattr(pipeline, "get_video_meta", lambda *_args, **_kwargs: {"duration": 5.0})
+    monkeypatch.setattr(pipeline, "get_video_meta_result", lambda *_args, **_kwargs: ({"duration": 5.0}, True))
     monkeypatch.setattr(pipeline, "write_video_thumbnail", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(pipeline, "extract_keyframes_from_shot", lambda *_args, **_kwargs: [])
     monkeypatch.setattr(pipeline, "_load_historical_perf", lambda _path: (0.0, 0.0, 0.0))
@@ -960,7 +1042,7 @@ def test_video_detection_override_avoids_repeat_embedding_and_preserves_tags(tmp
 
     monkeypatch.setattr(pipeline, "ClipEmbedder", _Embedder)
     monkeypatch.setattr(pipeline, "ObjectDetector", _Detector)
-    monkeypatch.setattr(pipeline, "get_video_meta", lambda *_args, **_kwargs: {"duration": 5.0})
+    monkeypatch.setattr(pipeline, "get_video_meta_result", lambda *_args, **_kwargs: ({"duration": 5.0}, True))
     monkeypatch.setattr(pipeline, "write_video_thumbnail", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(
         pipeline, "extract_keyframes_from_shot",
