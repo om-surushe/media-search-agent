@@ -173,6 +173,7 @@ def merge_video_scene_matches(
         result["caption_excerpt"] = hit["caption_excerpt"]
         result["scene_timestamp"] = hit["timestamp"]
         result["scene_matches"] = hit["scene_matches"]
+        result["user_tags"] = hit.get("user_tags", result.get("user_tags", []))
         merged.append(result)
 
     for hit in scene_hits:
@@ -186,6 +187,7 @@ def merge_video_scene_matches(
             "thumbnail": None,
             "score": None,
             "tags": hit.get("tags", []),
+            "user_tags": hit.get("user_tags", []),
             "type": "video",
             "timestamp": hit["timestamp"],
             "scene_timestamp": hit["timestamp"],

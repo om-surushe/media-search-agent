@@ -2,6 +2,7 @@ export interface SearchFilters {
   people?: string[]
   place?: string[]
   tags?: string[]
+  user_tags?: string[]
   media_type?: 'image' | 'video' | null
   date_from?: string
   date_to?: string
@@ -27,6 +28,7 @@ export interface SearchItem {
   expansion_boost?: number | null
   expansion_multiplier?: number | null
   tags: string[] | null
+  user_tags?: string[] | null
   type: 'video' | null
   timestamp: number | null
   shot_id: number | null
@@ -57,6 +59,7 @@ export interface MediaItem {
   gps_lon: number | null
   place: string | null
   tags?: string[] | null
+  user_tags?: string[] | null
 }
 
 export interface MediaListResponse {
@@ -195,6 +198,7 @@ export interface MediaFilters {
   date_to?: string
   place?: string
   tags?: string[]
+  user_tags?: string[]
   people?: string[]
   people_mode?: 'any' | 'all' | 'only'
   sort_by?: 'date' | 'path'

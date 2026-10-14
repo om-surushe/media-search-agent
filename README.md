@@ -27,6 +27,8 @@ This project was developed using agentic workflow with AI coding agents as code 
 - 🎬 **Video Shot detection** — shot-based keyframe extraction; semantic search jumps to the moment within a clip, not just to the file.
 - 👥 **People browser** — faces are detected during indexing. Label one face and use similarity search to pull in the rest of that person's photos and video appearances.
 - 🏷️ **Object & scene tagging** — object detection across images and video frames; query "show me photos with dogs."
+- 🗂️ **Virtual collections and personal tags** — organize indexed media without moving or copying originals.
+- 🧩 **Local MCP integration** — stdio tools for search, browsing, timestamped scenes, asset details, thumbnails, and opt-in organization writes.
 - 📍 **GPS & metadata** — EXIF location (including GoPro GPS data), camera, lens, timestamp all parsed and searchable.
 - 🔒 **Fully offline** — Apple Silicon MPS, NVIDIA CUDA, or CPU. Nothing phones home.
 - ⚡ **Fast** — embedded Qdrant for vector search, SQLite for metadata. No external services.
@@ -108,6 +110,7 @@ see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 - [Quick Start](docs/QUICKSTART.md) — first-run walkthrough
 - [Configuration](docs/CONFIGURATION.md) — `config.yaml` reference
 - [CLI](docs/CLI.md) — `msa` command-line reference
+- [MCP](docs/MCP.md) — local MCP client setup, tool permissions, and current packaging status
 - [Search](docs/features/search.md) — scoring, threshold tips
 - [People](docs/features/people.md) — face labeling user guide
 - [Video](docs/features/video.md) — keyframe extraction and video search

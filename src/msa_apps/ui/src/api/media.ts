@@ -14,6 +14,7 @@ export async function getMedia(
   if (filters.date_to) params.set('date_to', filters.date_to)
   if (filters.place) params.set('place', filters.place)
   if (filters.tags && filters.tags.length > 0) params.set('tags', filters.tags.join(','))
+  if (filters.user_tags && filters.user_tags.length > 0) params.set('user_tags', filters.user_tags.join(','))
   if (filters.people && filters.people.length > 0) params.set('people', filters.people.join(','))
   if (filters.people && filters.people.length > 0 && filters.people_mode) params.set('people_mode', filters.people_mode)
   if (filters.sort_by) params.set('sort_by', filters.sort_by)

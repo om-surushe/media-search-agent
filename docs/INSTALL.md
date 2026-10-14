@@ -165,6 +165,14 @@ command for headless indexing (`msa index run`) and scripting. Open Settings →
 the tool inside the app-private runtime). Uninstalling the app removes the
 link. Headless Linux installs already put `msa` on the PATH.
 
+## Local MCP server
+
+The source includes a stdio MCP server and client configuration for macOS in
+[MCP setup](MCP.md). Its tools use the app's existing local index; writes for
+user tags and virtual collections are disabled until explicitly opted in. The
+packaged fresh-user MCP workflow has not yet passed its release gate, so do not
+assume an already-published installer contains this integration.
+
 ## Updating
 
 The app never updates itself or checks for new versions in the background — you

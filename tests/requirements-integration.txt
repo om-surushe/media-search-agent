@@ -43,9 +43,10 @@ pillow-heif
 
 # Web / API / Serving (for integration tests)
 fastapi==0.115.0
-uvicorn[standard]==0.30.6
-pydantic==2.9.2
+uvicorn[standard]==0.31.1
+pydantic==2.12.5
 pydantic-settings
+mcp==2.3.0
 qdrant-client==1.11.3
 # `requests` is a runtime dep of facenet-pytorch (its inception_resnet_v1
 # imports it at module load); listed because --no-deps suppresses

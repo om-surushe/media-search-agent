@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import type { MediaFilters } from '../../api/types'
 import { getPeople, getTags } from '../../api/faces'
+import { getUserTags } from '../../api/organization'
 
 interface FilterBarProps {
   filters: MediaFilters
@@ -38,6 +39,7 @@ function inferPreset(date_from?: string, date_to?: string): DatePreset | null {
 export function FilterBar({ filters, onChange }: FilterBarProps) {
   const [peopleInput, setPeopleInput] = useState('')
   const [tagInput, setTagInput] = useState('')
+  const [userTagInput, setUserTagInput] = useState('')
   const [datePreset, setDatePreset] = useState<DatePreset | null>(
     () => inferPreset(filters.date_from, filters.date_to)
   )
@@ -62,10 +64,17 @@ export function FilterBar({ filters, onChange }: FilterBarProps) {
     staleTime: 30_000,
   })
 
+  const { data: userTagSuggestions } = useQuery({
+    queryKey: ['user-tags'],
+    queryFn: getUserTags,
+    staleTime: 30_000,
+  })
+
   const normalizeFilters = (next: MediaFilters): MediaFilters => {
     const normalized: MediaFilters = { ...next }
     if (!normalized.place) delete normalized.place
     if (!normalized.tags) delete normalized.tags
+    if (!normalized.user_tags) delete normalized.user_tags
     if (!normalized.date_from) delete normalized.date_from
     if (!normalized.date_to) delete normalized.date_to
     if (!normalized.media_type) delete normalized.media_type
@@ -115,6 +124,22 @@ export function FilterBar({ filters, onChange }: FilterBarProps) {
   const removeTag = (tag: string) => {
     const nextTags = (filters.tags ?? []).filter(item => item !== tag)
     set({ tags: nextTags })
+  }
+
+  const addUserTag = (rawTag: string) => {
+    const tag = rawTag.trim()
+    if (!tag) return
+    const current = filters.user_tags ?? []
+    if (current.some(item => item.toLowerCase() === tag.toLowerCase())) {
+      setUserTagInput('')
+      return
+    }
+    set({ user_tags: [...current, tag] })
+    setUserTagInput('')
+  }
+
+  const removeUserTag = (tag: string) => {
+    set({ user_tags: (filters.user_tags ?? []).filter(item => item !== tag) })
   }
 
   return (
@@ -205,6 +230,21 @@ export function FilterBar({ filters, onChange }: FilterBarProps) {
             <option key={tag} value={tag} />
           ))}
         </datalist>
+      </div>
+
+      <div className="flex items-center gap-2 flex-wrap rounded border border-indigo-200 dark:border-indigo-900 bg-indigo-50/50 dark:bg-indigo-950/20 px-2 py-1.5 min-w-[16rem]">
+        <span className="text-xs text-indigo-700 dark:text-indigo-300">Your tags</span>
+        {(filters.user_tags ?? []).map(tag => (
+          <button key={tag} type="button" onClick={() => removeUserTag(tag)} title={`Remove ${tag}`} className="inline-flex items-center gap-1 rounded-full bg-indigo-100 dark:bg-indigo-900 px-2 py-0.5 text-xs text-indigo-800 dark:text-indigo-100">
+            <span>{tag}</span><span aria-hidden="true">x</span>
+          </button>
+        ))}
+        <input list="browse-user-tag-options" type="text" placeholder="Your tags…" value={userTagInput}
+          onChange={e => setUserTagInput(e.target.value)}
+          onKeyDown={e => { if (e.key === 'Enter' || e.key === ',') { e.preventDefault(); addUserTag(userTagInput) } }}
+          onBlur={() => { if (userTagInput.trim()) addUserTag(userTagInput) }}
+          className="min-w-[7rem] flex-1 bg-transparent text-xs text-zinc-700 dark:text-zinc-200 placeholder-zinc-400 focus:outline-none" />
+        <datalist id="browse-user-tag-options">{(userTagSuggestions ?? []).map(tag => <option key={tag} value={tag} />)}</datalist>
       </div>
 
       {/* Media type */}

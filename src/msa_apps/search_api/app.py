@@ -1,7 +1,7 @@
 import asyncio
 import json
 from contextlib import asynccontextmanager, contextmanager
-from fastapi import FastAPI, Depends, HTTPException, WebSocket
+from fastapi import FastAPI, Depends, HTTPException, WebSocket, Query
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -15,6 +15,9 @@ from msa_apps.search_api.schemas import (
     PersonSuggestion, FaceSuggestionsResponse,
     BatchFaceSuggestionsRequest, BatchFaceSuggestionsResponse, BatchFaceSuggestionItem,
     TrackOpenRequest,
+    MediaTagsRequest,
+    CollectionCreateRequest,
+    CollectionMediaRequest,
     AssetIntelligenceResponse,
     PipelineStateOut,
     EmbeddingInfo,
@@ -517,6 +520,7 @@ def list_media(
     people: Optional[str] = None,
     people_mode: Optional[str] = "any",
     tags: Optional[str] = None,
+    user_tags: Optional[str] = None,
     date_from: Optional[str] = None,
     date_to: Optional[str] = None,
     place: Optional[str] = None,
@@ -627,6 +631,27 @@ def list_media(
         if tag_list:
             join_tags = True
 
+        user_tag_list = [tag.strip() for tag in (user_tags or "").split(",") if tag.strip()]
+        if len(user_tag_list) > 50:
+            raise HTTPException(status_code=422, detail="At most 50 user tags may be filtered")
+        if user_tag_list:
+            conn = connect_readonly(db_path)
+            try:
+                has_user_tags = conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='user_tag'"
+                ).fetchone() is not None
+            finally:
+                conn.close()
+            if not has_user_tags:
+                return {"items": [], "count": 0, "limit": limit, "offset": offset}
+            placeholders = ",".join(["?"] * len(user_tag_list))
+            where.append(
+                "m.media_id IN (SELECT mut.media_id FROM media_user_tag mut "
+                "JOIN user_tag ut ON ut.tag_id=mut.tag_id "
+                f"WHERE ut.name IN ({placeholders}))"
+            )
+            params.extend(user_tag_list)
+
         # Base FROM and optional JOINs
         from_sql = "FROM media m"
         if join_tags:
@@ -675,6 +700,7 @@ def list_media(
             conn.close()
 
         tag_map: dict[str, list[str]] = {}
+        user_tag_map: dict[str, list[str]] = {}
         if rows:
             media_ids = [str(media_id) for media_id, *_ in rows]
             placeholders = ",".join(["?"] * len(media_ids))
@@ -694,6 +720,17 @@ def list_media(
                     if not tag_name:
                         continue
                     tag_map.setdefault(str(media_id), []).append(str(tag_name))
+                try:
+                    user_rows = conn.execute(
+                        f"SELECT mt.media_id,t.name FROM media_user_tag mt JOIN user_tag t USING(tag_id) "
+                        f"WHERE mt.media_id IN ({placeholders}) ORDER BY t.name COLLATE NOCASE",
+                        tuple(media_ids),
+                    ).fetchall()
+                    for media_id, tag_name in user_rows:
+                        user_tag_map.setdefault(str(media_id), []).append(str(tag_name))
+                except Exception as exc:
+                    if "no such table" not in str(exc).lower():
+                        raise
                 # Supplement with keyframe tags for videos that have none in media_tag
                 untagged = [mid for mid in media_ids if mid not in tag_map]
                 if untagged:
@@ -734,6 +771,7 @@ def list_media(
                 "gps_lon": gps_lon,
                 "place": place,
                 "tags": tag_map.get(str(media_id), []),
+                "user_tags": user_tag_map.get(str(media_id), []),
             })
 
         return {"items": items, "count": total, "limit": limit, "offset": offset}
@@ -1757,6 +1795,176 @@ def list_tags(request: Request):
             return []
         logger.error(f"GET /tags failed: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error")
+
+@contextmanager
+def _organization_connection(request: Request, *, writable: bool = False):
+    """Open the existing library DB; organization writes never create a new DB."""
+    import sqlite3
+    from msa_settings import load_config as _load_config
+    cfg = _get_config(request) or _load_config()
+    db_path = Path(cfg.sqlite_path)
+    if not db_path.is_file():
+        raise HTTPException(status_code=409, detail="Media library database is not initialized")
+    if writable:
+        if _search_browse_read_only():
+            raise HTTPException(status_code=409, detail="Writes are disabled in read-only mode")
+        from msa_indexer.db.sqlite_store import SQLiteStore
+        from msa_indexer.db.organization import ensure_organization_schema
+        store = SQLiteStore(db_path, create_if_missing=False)
+        try:
+            ensure_organization_schema(store.conn)
+            yield store.conn
+        finally:
+            store.close()
+    else:
+        conn = connect_readonly(db_path)
+        try:
+            yield conn
+        finally:
+            conn.close()
+
+
+@app.get("/user-tags", response_model=list[str])
+def list_user_tags(request: Request):
+    import sqlite3
+    from msa_indexer.db.organization import list_tags as _list_tags
+    try:
+        with _organization_connection(request) as conn:
+            return _list_tags(conn)
+    except HTTPException:
+        raise
+    except sqlite3.OperationalError as exc:
+        if "no such table" in str(exc).lower():
+            return []
+        raise HTTPException(status_code=500, detail="Could not read user tags") from exc
+
+
+@app.get("/media/{media_id}/tags")
+def get_user_media_tags(media_id: str, request: Request):
+    import sqlite3
+    from msa_indexer.db.organization import get_media_tags as _get_media_tags
+    try:
+        with _organization_connection(request) as conn:
+            if conn.execute("SELECT 1 FROM media WHERE media_id=? AND deleted=0", (media_id,)).fetchone() is None:
+                raise HTTPException(status_code=404, detail="Media not found")
+            return {"media_id": media_id, "tags": _get_media_tags(conn, media_id)}
+    except HTTPException:
+        raise
+    except sqlite3.OperationalError as exc:
+        if "no such table" in str(exc).lower():
+            return {"media_id": media_id, "tags": []}
+        raise HTTPException(status_code=500, detail="Could not read media tags") from exc
+
+
+@app.put("/media/{media_id}/tags")
+def set_user_media_tags(media_id: str, req: MediaTagsRequest, request: Request):
+    import sqlite3
+    from msa_indexer.db.organization import set_media_tags as _set_media_tags
+    try:
+        with _organization_connection(request, writable=True) as conn:
+            return {"media_id": media_id, "tags": _set_media_tags(conn, media_id, req.tags)}
+    except HTTPException:
+        raise
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except sqlite3.OperationalError as exc:
+        raise HTTPException(status_code=500, detail="Could not save media tags") from exc
+
+
+@app.get("/collections")
+def get_collections(request: Request, limit: int = Query(50, ge=1, le=100), offset: int = Query(0, ge=0)):
+    import sqlite3
+    from msa_indexer.db.organization import list_collections as _list_collections
+    try:
+        with _organization_connection(request) as conn:
+            items, total = _list_collections(conn, limit, offset)
+            return {"items": items, "count": total, "limit": limit, "offset": offset}
+    except HTTPException:
+        raise
+    except sqlite3.OperationalError as exc:
+        if "no such table" in str(exc).lower():
+            return {"items": [], "count": 0, "limit": limit, "offset": offset}
+        raise HTTPException(status_code=500, detail="Could not list collections") from exc
+
+
+@app.post("/collections", status_code=201)
+def post_collection(req: CollectionCreateRequest, request: Request):
+    import sqlite3
+    from msa_indexer.db.organization import create_collection as _create_collection
+    try:
+        with _organization_connection(request, writable=True) as conn:
+            return _create_collection(conn, req.name, req.description)
+    except HTTPException:
+        raise
+    except sqlite3.IntegrityError as exc:
+        raise HTTPException(status_code=409, detail="A collection with that name already exists") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.get("/collections/{collection_id}/items")
+def get_collection_items(collection_id: str, request: Request, limit: int = Query(50, ge=1, le=100), offset: int = Query(0, ge=0)):
+    import sqlite3
+    from msa_indexer.db.organization import collection_items as _collection_items
+    try:
+        with _organization_connection(request) as conn:
+            items, total = _collection_items(conn, collection_id, limit, offset)
+            return {"items": items, "count": total, "limit": limit, "offset": offset}
+    except HTTPException:
+        raise
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except sqlite3.OperationalError as exc:
+        if "no such table" in str(exc).lower():
+            raise HTTPException(status_code=404, detail="Collection not found") from exc
+        raise HTTPException(status_code=500, detail="Could not list collection items") from exc
+
+
+@app.post("/collections/{collection_id}/items")
+def post_collection_items(collection_id: str, req: CollectionMediaRequest, request: Request):
+    import sqlite3
+    from msa_indexer.db.organization import add_collection_media as _add_collection_media
+    try:
+        with _organization_connection(request, writable=True) as conn:
+            _add_collection_media(conn, collection_id, req.media_ids)
+            return {"added": len(set(req.media_ids))}
+    except HTTPException:
+        raise
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except sqlite3.IntegrityError as exc:
+        raise HTTPException(status_code=409, detail="Collection membership conflict") from exc
+
+
+@app.delete("/collections/{collection_id}/items/{media_id}", status_code=204)
+def delete_collection_item(collection_id: str, media_id: str, request: Request):
+    from msa_indexer.db.organization import remove_collection_media as _remove_collection_media
+    try:
+        with _organization_connection(request, writable=True) as conn:
+            _remove_collection_media(conn, collection_id, media_id)
+    except HTTPException:
+        raise
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return Response(status_code=204)
+
+
+@app.delete("/collections/{collection_id}", status_code=204)
+def delete_collection_route(collection_id: str, request: Request):
+    from msa_indexer.db.organization import delete_collection as _delete_collection
+    try:
+        with _organization_connection(request, writable=True) as conn:
+            _delete_collection(conn, collection_id)
+    except HTTPException:
+        raise
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return Response(status_code=204)
+
 
 @app.patch("/people/{person_id}", response_model=PersonOut)
 def rename_person(person_id: str, req: PersonRename, request: Request):

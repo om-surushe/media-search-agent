@@ -66,6 +66,35 @@ CREATE TABLE IF NOT EXISTS media_tag (
   FOREIGN KEY (media_id) REFERENCES media(media_id),
   FOREIGN KEY (tag_id) REFERENCES tag(tag_id)
 );
+
+-- User-authored organization metadata; kept separate from detector labels.
+CREATE TABLE IF NOT EXISTS user_tag (
+  tag_id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL UNIQUE COLLATE NOCASE
+);
+CREATE TABLE IF NOT EXISTS media_user_tag (
+  media_id TEXT NOT NULL,
+  tag_id INTEGER NOT NULL,
+  PRIMARY KEY (media_id, tag_id),
+  FOREIGN KEY (media_id) REFERENCES media(media_id) ON DELETE CASCADE,
+  FOREIGN KEY (tag_id) REFERENCES user_tag(tag_id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS media_collection (
+  collection_id TEXT PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+  description TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS media_collection_item (
+  collection_id TEXT NOT NULL,
+  media_id TEXT NOT NULL,
+  added_at TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (collection_id, media_id),
+  FOREIGN KEY (collection_id) REFERENCES media_collection(collection_id) ON DELETE CASCADE,
+  FOREIGN KEY (media_id) REFERENCES media(media_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_media_collection_item_media
+  ON media_collection_item(media_id);
 -- Person identities (labeled or clustered) - Create BEFORE face table for FK reference
 CREATE TABLE IF NOT EXISTS person (
   person_id TEXT PRIMARY KEY,            -- uuid

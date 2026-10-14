@@ -4,6 +4,7 @@ class SearchFilters(BaseModel):
     people: Optional[List[str]] = None
     place: Optional[List[str]] = None
     tags: Optional[List[str]] = None  # Object/scene detection tags
+    user_tags: Optional[List[str]] = Field(default=None, max_length=50)  # User-authored tags
     media_type: Optional[str] = None  # "image", "video", or None for all
     date_from: Optional[str] = None  # YYYY-MM-DD
     date_to: Optional[str] = None
@@ -32,6 +33,7 @@ class SearchItem(BaseModel):
     expansion_boost: Optional[float] = None
     expansion_multiplier: Optional[float] = None
     tags: Optional[List[str]] = None  # Object/scene detection tags
+    user_tags: Optional[List[str]] = None  # User-authored tags
     type: Optional[str] = None  # "video" or None for images
     timestamp: Optional[float] = None  # Video: seek position in seconds
     shot_id: Optional[int] = None  # Video: shot index
@@ -73,6 +75,16 @@ class TranscriptSearchResponse(BaseModel):
 class TrackOpenRequest(BaseModel):
     search_id: str
     media_id: str
+
+class MediaTagsRequest(BaseModel):
+    tags: List[str] = Field(default_factory=list, max_length=50)
+
+class CollectionCreateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=100)
+    description: str = Field(default="", max_length=1000)
+
+class CollectionMediaRequest(BaseModel):
+    media_ids: List[str] = Field(min_length=1, max_length=100)
 
 class KeyframeInfo(BaseModel):
     kf_index: int

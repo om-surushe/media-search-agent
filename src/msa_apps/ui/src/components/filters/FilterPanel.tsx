@@ -141,6 +141,15 @@ export function FilterPanel({ filters, onChange, minScore, onMinScoreChange }: F
         />
       </div>
 
+      {/* User-authored tags */}
+      <div>
+        <label className="block text-xs text-zinc-400 dark:text-zinc-500 uppercase tracking-wider mb-2" htmlFor="search-user-tags">Your tags</label>
+        <input id="search-user-tags" type="text" placeholder="family, trip"
+          value={(filters.user_tags ?? []).join(', ')}
+          onChange={e => set({ user_tags: e.target.value.split(',').map(tag => tag.trim()).filter(Boolean) })}
+          className="bg-slate-100 dark:bg-zinc-800 border border-slate-200 dark:border-zinc-700 rounded px-2 py-1 text-zinc-700 dark:text-zinc-200 text-xs w-full placeholder-zinc-400" />
+      </div>
+
       {/* Min score */}
       <div>
         <div className="text-xs text-zinc-400 dark:text-zinc-500 uppercase tracking-wider mb-2">Min score</div>

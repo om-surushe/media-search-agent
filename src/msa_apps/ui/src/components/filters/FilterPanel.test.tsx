@@ -89,7 +89,7 @@ describe('FilterPanel', () => {
 
     it('shows date inputs only when Custom is selected', async () => {
       render(<FilterPanel {...baseProps} />)
-      expect(screen.queryByDisplayValue('')).not.toHaveAttribute('type', 'date')
+      expect(screen.queryAllByDisplayValue('').some(el => el.getAttribute('type') === 'date')).toBe(false)
       await userEvent.selectOptions(screen.getByRole('combobox'), 'custom')
       expect(screen.getAllByDisplayValue('').some(el => el.getAttribute('type') === 'date')).toBe(true)
     })

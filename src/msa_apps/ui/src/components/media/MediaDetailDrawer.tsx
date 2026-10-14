@@ -4,6 +4,7 @@ import { useQuery } from '@tanstack/react-query'
 import { faceThumbnailUrl, getAssetIntelligence, imageUrl, videoUrl } from '../../api/media'
 import { trackOpen } from '../../api/search'
 import { FaceStrip } from './FaceStrip'
+import { MediaOrganizationControls } from './MediaOrganizationControls'
 import { cn } from '../../lib/utils'
 import type { VideoSceneSearchMatch } from '../../api/types'
 
@@ -287,6 +288,7 @@ export function MediaDetailDrawer({ item, onClose, searchId }: MediaDetailDrawer
 
               {/* File path — hover to reveal full path + copy */}
               {item.path && <PathRow path={item.path} />}
+              <MediaOrganizationControls mediaId={item.id} />
 
               {/* Date */}
               {item.date && (

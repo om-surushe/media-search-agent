@@ -71,9 +71,10 @@ pillow-heif
 
 # --- Web / API ---
 fastapi==0.115.0
-uvicorn[standard]==0.30.6
-pydantic==2.9.2
+uvicorn[standard]==0.31.1
+pydantic==2.12.5
 pydantic-settings
+mcp==2.3.0
 qdrant-client==1.11.3
 
 # Testing

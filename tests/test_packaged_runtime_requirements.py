@@ -42,6 +42,11 @@ def test_packaged_runtime_includes_local_transcription_dependencies():
     assert {"openai-whisper", "av"} <= packages
 
 
+def test_packaged_runtime_includes_official_mcp_sdk():
+    packages = _normalized_package_names(RUNTIME_REQUIREMENTS)
+    assert "mcp" in packages
+
+
 def test_packaged_runtime_omits_unused_sentence_transformers():
     packages = _normalized_package_names(RUNTIME_REQUIREMENTS)
     assert "sentence-transformers" not in packages, (

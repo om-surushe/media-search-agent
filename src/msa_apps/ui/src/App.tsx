@@ -9,6 +9,7 @@ import { BrowsePage } from '@/pages/BrowsePage'
 import { PeoplePage } from '@/pages/PeoplePage'
 import { IndexerPage } from '@/pages/IndexerPage'
 import { SettingsPage } from '@/pages/SettingsPage'
+import { CollectionsPage } from '@/pages/CollectionsPage'
 import { StartupGate } from '@/components/StartupGate'
 import { useIndexerRunning } from '@/hooks/useIndexerStatus'
 import { useCloseWhileIndexingGuard } from '@/hooks/useCloseWhileIndexing'
@@ -27,6 +28,7 @@ function MainApp() {
           <Route path="search"   element={<SearchPage />} />
           <Route path="browse"   element={<BrowsePage />} />
           <Route path="people"   element={<PeoplePage />} />
+          <Route path="collections" element={<CollectionsPage />} />
           <Route path="indexer"  element={<IndexerPage />} />
           <Route path="settings" element={<SettingsPage />} />
         </Route>

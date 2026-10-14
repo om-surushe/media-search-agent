@@ -432,6 +432,32 @@ def _enrich_people(conn: Any | None, candidates: List[Dict[str, Any]]) -> None:
             m["person_ids"] = sorted(idmap[mid])
 
 
+def _enrich_user_tags(conn: Any | None, candidates: List[Dict[str, Any]]) -> None:
+    """Hydrate manually assigned tags for filtering without altering detector labels."""
+    if conn is None or not candidates:
+        return
+    ids = sorted({str(m["id"]) for m in candidates if m.get("id") is not None})
+    if not ids:
+        return
+    placeholders = ",".join(["?"] * len(ids))
+    try:
+        rows = conn.execute(
+            "SELECT mt.media_id,t.name FROM media_user_tag mt "
+            "JOIN user_tag t USING(tag_id) "
+            f"WHERE mt.media_id IN ({placeholders}) ORDER BY t.name COLLATE NOCASE",
+            tuple(ids),
+        ).fetchall()
+    except sqlite3.OperationalError as exc:
+        if "no such table" in str(exc).lower():
+            return
+        raise
+    tag_map: Dict[str, List[str]] = {}
+    for media_id, name in rows:
+        tag_map.setdefault(str(media_id), []).append(str(name))
+    for item in candidates:
+        item["user_tags"] = tag_map.get(str(item.get("id")), [])
+
+
 # Preserve source-specific evidence before reranking so one media item can
 # carry both its strongest base score and supporting scores from other
 # collections. Example: an image hit at 0.31 plus a caption hit at 0.22 should
@@ -739,6 +765,8 @@ class QueryEngine:
                     )
                 except sqlite3.Error as exc:
                     logger.warning("Stored video-scene search unavailable: {}", exc)
+                if scene_hits:
+                    _enrich_user_tags(sqlite_conn, scene_hits)
                 if scene_hits and inferred_filters:
                     if inferred_filters.get("place"):
                         _enrich_places(sqlite_conn, scene_hits)
@@ -762,7 +790,8 @@ class QueryEngine:
             # Qdrant points may outlive the SQLite soft-delete.
             candidates = _filter_deleted_media(sqlite_conn, candidates)
 
-            # 5) filters (people, place, date, tags)
+            # 5) filters (people, place, date, detector tags, user tags)
+            _enrich_user_tags(sqlite_conn, candidates)
             # If place filter is requested, enrich candidates with latest place from SQLite before filtering
             if inferred_filters and inferred_filters.get("place"):
                 try:
@@ -871,6 +900,7 @@ class QueryEngine:
                     "expansion_boost": m.get("expansion_boost"),
                     "expansion_multiplier": m.get("expansion_multiplier"),
                     "tags": m.get("tags", []),
+                    "user_tags": m.get("user_tags", []),
                     "type": m.get("type"),
                     "timestamp": m.get("timestamp"),
                     "shot_id": m.get("shot_id"),
@@ -896,6 +926,7 @@ class QueryEngine:
                     "thumbnail": None,
                     "score": None,
                     "tags": match.get("tags", []),
+                    "user_tags": match.get("user_tags", []),
                     "type": None,
                     "timestamp": None,
                     "shot_id": None,

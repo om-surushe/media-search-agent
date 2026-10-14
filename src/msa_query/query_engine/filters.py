@@ -27,8 +27,10 @@ def apply_filters(items: List[Dict[str, Any]], f: Dict[str, Any]) -> List[Dict[s
         # Place filter supports substring matching (e.g., 'California' in 'San Jose, California, US')
         if not _match_contains(f.get("place"), [m.get("place"), m.get("country"), m.get("state")]):
             ok = False
-        # Object/scene tags filter
+        # Detector labels and user-authored tags remain independently filterable.
         if not _match(f.get("tags"), m.get("tags")):
+            ok = False
+        if not _match(f.get("user_tags"), m.get("user_tags")):
             ok = False
         # Media type filter (image/video)
         media_type_filter = f.get("media_type")
