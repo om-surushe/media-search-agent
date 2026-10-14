@@ -15,7 +15,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 # --- 1. Stage the uv binary -------------------------------------------------------------
-# Spike: copy the host's uv (pinned 0.5.21, matching the media-search-agent reference).
+# Copy the host's uv, pinned centrally in scripts/versions.env.
 # A real template/CI step downloads a pinned uv release per target arch instead.
 # Cross-platform: this script also runs under Git Bash on Windows, where uv is `uv.exe`.
 # (tauri.conf resources glob "bin/uv*" so it picks up either name. A native PowerShell

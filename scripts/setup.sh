@@ -231,31 +231,52 @@ fi
 
 log_info "Requirements: $REQS"
 
-# Build a filtered manifest for this platform:
-#   - numpy<2: native wheels in the mac runtime still load NumPy 1.x ABIs
-#   - torch>=2.4,<2.7: stay compatible with the current transitive transformers stack
-#   - skip sentence-transformers: not imported by the packaged runtime today, and
-#     recent versions can drag in a transformers/torch compatibility mismatch
-#   - facenet-pytorch excluded here; installed --no-deps after torch to prevent
-#     the facenet-pytorch torch-solver from downgrading the already-installed torch
-TMP_REQS="$(mktemp)"
-awk '
-  /^[[:space:]]*sentence-transformers([[:space:]\[<>=!~]|$)/ { next }
-  /^[[:space:]]*numpy([[:space:]\[<>=!~]|$)/ { next }
-  /^[[:space:]]*torch([[:space:]\[<>=!~]|$)/ { next }
-  /^[[:space:]]*facenet-pytorch([[:space:]\[<>=!~]|$)/ { next }
-  { print }
-' "$REQS" > "$TMP_REQS"
-cat >> "$TMP_REQS" <<'EOF'
+# macOS arm64 has version-locked runtime/dev sets. Keep the existing filtered
+# resolver for x86_64 until a compatible FAISS lock is available there.
+LOCKED_REQUIREMENTS=false
+LOCKED_DEV_REQUIREMENTS=false
+if [[ "$ARCH" == "arm64" ]]; then
+  if msa_is_macos_system_install; then
+    LOCK_FILE="$MSA_ROOT/requirements-api-macos-arm64.lock"
+  else
+    LOCK_FILE="$MSA_ROOT/requirements-dev-macos-arm64.lock"
+  fi
+  if [[ -f "$LOCK_FILE" ]]; then
+    log_info "Syncing exact dependencies from $(basename "$LOCK_FILE")"
+    "$UV_BIN" pip sync --python "$VENV/bin/python" "$LOCK_FILE"
+    LOCKED_REQUIREMENTS=true
+    if ! msa_is_macos_system_install; then
+      LOCKED_DEV_REQUIREMENTS=true
+    fi
+  fi
+fi
+
+if [[ "$LOCKED_REQUIREMENTS" != true ]]; then
+  # numpy<2: native wheels still load NumPy 1.x ABIs. Keep torch in the tested
+  # range; facenet is installed below without allowing its solver to downgrade it.
+  TMP_REQS="$(mktemp)"
+  awk '
+    /^[[:space:]]*sentence-transformers([[:space:]\[<>=!~]|$)/ { next }
+    /^[[:space:]]*numpy([[:space:]\[<>=!~]|$)/ { next }
+    /^[[:space:]]*torch([[:space:]\[<>=!~]|$)/ { next }
+    /^[[:space:]]*facenet-pytorch([[:space:]\[<>=!~]|$)/ { next }
+    { print }
+  ' "$REQS" > "$TMP_REQS"
+  cat >> "$TMP_REQS" <<'EOF'
 numpy<2
 torch>=2.4,<2.7
 EOF
+  "$UV_BIN" pip install --python "$VENV/bin/python" -r "$TMP_REQS"
+  rm -f "$TMP_REQS"
+fi
 
-"$UV_BIN" pip install --python "$VENV/bin/python" -r "$TMP_REQS"
-rm -f "$TMP_REQS"
-
-# Install facenet-pytorch without letting its solver re-resolve torch.
-"$UV_BIN" pip install --python "$VENV/bin/python" "facenet-pytorch>=2.6.0" --no-deps
+# Install FaceNet without letting its declared torch>=2.2,<2.3 constraint
+# override the explicitly pinned torch build.
+if [[ "$LOCKED_REQUIREMENTS" == true ]]; then
+  "$UV_BIN" pip install --python "$VENV/bin/python" "facenet-pytorch==2.6.0" --no-deps
+else
+  "$UV_BIN" pip install --python "$VENV/bin/python" "facenet-pytorch>=2.6.0" --no-deps
+fi
 
 if msa_is_macos_system_install; then
   # /Applications/MediaSearchAgent is root-owned. Even a non-editable
@@ -274,7 +295,7 @@ else
   "$UV_BIN" pip install --python "$VENV/bin/python" -e "$MSA_ROOT"
 
   TEST_REQS="$MSA_ROOT/tests/requirements-ci.txt"
-  if [[ -f "$TEST_REQS" ]]; then
+  if [[ "$LOCKED_DEV_REQUIREMENTS" != true && -f "$TEST_REQS" ]]; then
     log_info "Test requirements: $TEST_REQS"
     # facenet-pytorch was already installed --no-deps above; filter it here so
     # the solver does not re-evaluate its torch constraints and downgrade torch.

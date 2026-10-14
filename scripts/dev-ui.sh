@@ -11,4 +11,4 @@ if [[ ! -d "$UI_DIR/node_modules" ]]; then
 fi
 
 export VITE_API_ORIGIN="${VITE_API_ORIGIN:-http://127.0.0.1:8500}"
-exec npm --prefix "$UI_DIR" run dev -- --host 127.0.0.1
+exec npm --prefix "$UI_DIR" run dev -- --host 127.0.0.1 --strictPort

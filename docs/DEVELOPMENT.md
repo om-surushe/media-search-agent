@@ -10,8 +10,26 @@ bash scripts/dev-setup.sh
 
 This provisions the pinned project Python and Node major versions, creates the
 `.venv`, installs the API/test requirements, installs the UI dependencies, and
-opens the project development shell. It is safe to re-run. Do not use the
-system-installed app's Python environment for repository development.
+opens the project development shell. On Apple Silicon macOS, setup syncs the
+version-locked API/dev set; other platforms still use their existing manifests.
+Do not use the installed app's Python environment for normal repository work.
+Use `MSA_DEV_VENV_DIR` only as a deliberate override.
+
+## Caption worker environment
+
+On macOS Apple Silicon 14+, provision the separate MLX environment once:
+
+```bash
+./scripts/setup-caption-env.sh
+```
+
+The API runner automatically uses `.venv-caption/bin/python` when present and
+defaults its model cache to the ignored `models/caption-hub/`. Model weights
+are separate from Python packages; this setup does not download SmolVLM2.
+
+Regenerate the checked-in Apple Silicon locks after changing requirement
+inputs with `./scripts/lock-macos-arm64.sh`. The caption lock is generated on
+the current Mac because MLX wheel availability depends on the host macOS ABI.
 
 ## Run the app with live reload
 
@@ -34,8 +52,9 @@ and under `logs/`.
 ./scripts/dev-ui.sh
 ```
 
-Open <http://localhost:5173>. Vite hot-reloads UI edits and proxies API/WebSocket
-requests to the development backend. Override the proxy target with
+Open <http://127.0.0.1:5173>. Use this explicit IPv4 URL to avoid another
+local app bound to IPv6 `localhost`. Vite hot-reloads UI edits and proxies
+API/WebSocket requests to the development backend. Override the proxy target with
 `VITE_API_ORIGIN` if the backend port differs.
 
 **Terminal 3 — one indexing run** (optional):

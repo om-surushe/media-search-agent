@@ -3,7 +3,7 @@
 set -euo pipefail
 
 MSA_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-VENV="${MSA_DEV_VENV_DIR:-${MSA_VENV_DIR:-$MSA_ROOT/.venv}}"
+VENV="${MSA_DEV_VENV_DIR:-$MSA_ROOT/.venv}"
 CLI="$VENV/bin/msa"
 
 if [[ ! -x "$CLI" ]]; then

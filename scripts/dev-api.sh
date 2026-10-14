@@ -3,7 +3,7 @@
 set -euo pipefail
 
 MSA_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-VENV="${MSA_DEV_VENV_DIR:-${MSA_VENV_DIR:-$MSA_ROOT/.venv}}"
+VENV="${MSA_DEV_VENV_DIR:-$MSA_ROOT/.venv}"
 PYTHON="$VENV/bin/python"
 UVICORN="$VENV/bin/uvicorn"
 
@@ -15,6 +15,10 @@ fi
 # Do not accidentally load an installed-app config or data directory.
 unset MSA_CONFIG_PATH MSA_DATA_DIR MSA_LOG_DIR MSA_CACHE_DIR MSA_VENV_DIR MSA_DEV_VENV_DIR
 export MSA_ROOT MSA_DEV=1
+export MSA_CAPTION_CACHE_DIR="${MSA_CAPTION_CACHE_DIR:-$MSA_ROOT/models/caption-hub}"
+if [[ -z "${MSA_CAPTION_PYTHON:-}" && -x "$MSA_ROOT/.venv-caption/bin/python" ]]; then
+  export MSA_CAPTION_PYTHON="$MSA_ROOT/.venv-caption/bin/python"
+fi
 
 read -r CONFIG_HOST CONFIG_PORT < <("$PYTHON" - "$MSA_ROOT/config.yaml" <<'PY'
 import sys
