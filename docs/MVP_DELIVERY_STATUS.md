@@ -23,7 +23,7 @@
 
 ## Release gates still open
 
-- Fresh-user packaged launch, indexing, and restart persistence were not run. Completing that flow could require model setup/weight activity prohibited by the current constraint; no installed personal app or protected app data was used. Packaged-first-run behavior is therefore unverified.
+- **Packaged fresh-user BVT attempted and failed at startup.** Ran `tests/real_media/scripts/validate-installed-desktop-macos.sh` against the DMG in a disposable `/tmp` HOME under a sandbox denying access to the installed app/data and denying repository writes. The GUI opened, but the sidecar exited before health readiness: `cannot resolve bundled bin/uv: unknown path`; the UI reported “Could not reach the Media Search Agent backend.” No model weights were downloaded and indexing/restart checks were not reached. Logs: `/tmp/lmi-final-sprint-acceptance.aYjTUZ/desktop-bvt.log` and `.../msa-desktop-home/Library/Logs/MediaSearchAgent/app-stdout.log`. The test process and app are stopped.
 - Manual browser verification of result interaction, timestamp seeking within the same video, and collection/tag workflows remains outstanding.
 - No end-to-end offline acceptance or before/after original-file integrity run was performed against a fresh packaged library.
 - The local `.app`/`.dmg` are not notarized; distribution/Gatekeeper acceptance is unverified. The built `.dmg` has no Finder layout embellishments.
