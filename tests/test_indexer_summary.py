@@ -862,9 +862,13 @@ def test_stale_qdrant_state_triggers_export_even_without_local_changes(tmp_path,
 # behavior is exercised by the pipeline's commit-failure try/except path.
 
 
-def test_disabled_shot_detection_uses_synthetic_full_video_fallback(tmp_path, monkeypatch):
+@pytest.mark.parametrize("shot_detector_raises", [False, True])
+def test_unavailable_shot_detection_uses_synthetic_full_video_fallback(
+    tmp_path, monkeypatch, shot_detector_raises
+):
     import hashlib
     import sqlite3
+    from types import ModuleType
 
     from msa_indexer import pipeline
 
@@ -884,6 +888,15 @@ def test_disabled_shot_detection_uses_synthetic_full_video_fallback(tmp_path, mo
     monkeypatch.setattr(pipeline, "get_qdrant_export_version", lambda: None)
     monkeypatch.setattr(pipeline, "record_qdrant_export_version", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(pipeline, "_do_qdrant_export", lambda *_args, **_kwargs: None)
+    if shot_detector_raises:
+        shot_detection = ModuleType("msa_indexer.io.shot_detection")
+
+        def fail_shot_detection(*_args, **_kwargs):
+            raise RuntimeError("fixture shot detector failure")
+
+        shot_detection.detect_shots = fail_shot_detection
+        shot_detection.ContentDetector = object
+        monkeypatch.setitem(__import__("sys").modules, shot_detection.__name__, shot_detection)
 
     config = SimpleNamespace(
         sqlite_path=str(db_path),
@@ -898,7 +911,7 @@ def test_disabled_shot_detection_uses_synthetic_full_video_fallback(tmp_path, mo
         device="cpu",
         enable_object_detection=False,
         enable_face_recognition=False,
-        enable_video_shot_detection=False,
+        enable_video_shot_detection=shot_detector_raises,
         incremental=SimpleNamespace(fingerprint_enabled=False, deletion_sweep=False),
         media_sources=[SimpleNamespace(name="videos", path=str(source), enabled=True)],
     )

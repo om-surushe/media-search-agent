@@ -1655,13 +1655,22 @@ def run_index(config, stop_event=None):
                         if shot_detector is not None:
                             log.debug("Starting shot detection for video")
                             scene_detect_start = time.perf_counter()
-                            shots = shot_detector(
-                                p,
-                                threshold=float(getattr(config, 'shot_detection_threshold', 30.0)),
-                                min_scene_len=int(getattr(config, 'min_shot_length_frames', 15)),
-                            )
-                            scene_detect_time = time.perf_counter() - scene_detect_start
-                            log.debug(f"Shot detection complete count={len(shots)} time={scene_detect_time:.2f}s")
+                            try:
+                                shots = shot_detector(
+                                    p,
+                                    threshold=float(getattr(config, 'shot_detection_threshold', 30.0)),
+                                    min_scene_len=int(getattr(config, 'min_shot_length_frames', 15)),
+                                )
+                                scene_detect_time = time.perf_counter() - scene_detect_start
+                                log.debug(f"Shot detection complete count={len(shots)} time={scene_detect_time:.2f}s")
+                            except Exception as exc:
+                                scene_detect_time = time.perf_counter() - scene_detect_start
+                                log.warning(
+                                    "Video shot detection unavailable for media {} ({}); trying full-video fallback",
+                                    media_id,
+                                    type(exc).__name__,
+                                )
+                                shots = []
                         
                         is_synthetic = False
                         if not shots:
