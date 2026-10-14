@@ -10,6 +10,7 @@ import json
 import os
 import re
 import resource
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -324,7 +325,13 @@ def _caption_video_scenes(args) -> int:
                 })
                 from huggingface_hub import snapshot_download
                 from msa_indexer.io.video import extract_frame_at_timestamp
+                from msa_indexer.io.video_frames import VideoFrameCache
 
+                frame_cache_dir = getattr(args, "frame_cache_dir", None)
+                frame_cache = (
+                    VideoFrameCache(store, frame_cache_dir)
+                    if frame_cache_dir is not None else None
+                )
                 model_path = Path(snapshot_download(
                     MODEL_ID, cache_dir=str(args.cache_dir), local_files_only=True
                 ))
@@ -381,12 +388,22 @@ def _caption_video_scenes(args) -> int:
                                 if hashes[video_id] != video_id.lower():
                                     raise ValueError("indexed video content changed")
                             path_by_video[video_id] = path
-                        frame = extract_frame_at_timestamp(path, float(candidate["timestamp"]))
-                        if frame is None:
-                            raise ValueError("could not decode the indexed keyframe timestamp")
+                        cached = (
+                            frame_cache.get_cached_image(candidate["frame_id"])
+                            if frame_cache is not None and candidate.get("frame_id") else None
+                        )
                         with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as temp_file:
                             temp_path = Path(temp_file.name)
-                        frame.convert("RGB").save(temp_path, format="JPEG", quality=95)
+                        if cached is not None:
+                            try:
+                                shutil.copyfile(cached[0], temp_path)
+                            except OSError:
+                                cached = None  # Cache eviction between lookup and copy; source is the fallback.
+                        if cached is None:
+                            frame = extract_frame_at_timestamp(path, float(candidate["timestamp"]))
+                            if frame is None:
+                                raise ValueError("could not decode the indexed keyframe timestamp")
+                            frame.convert("RGB").save(temp_path, format="JPEG", quality=95)
                         caption = provider.caption(
                             temp_path, args.max_tokens, prompt=VIDEO_SCENE_PROMPT,
                         )
@@ -480,6 +497,7 @@ def main() -> int:
     parser.add_argument("--source-root", type=Path, action="append", default=[], help=argparse.SUPPRESS)
     parser.add_argument("--stop-file", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--cache-dir", type=Path, required=True, help="local Hugging Face cache directory")
+    parser.add_argument("--frame-cache-dir", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--max-tokens", type=int, default=160)
     parser.add_argument("--database", type=Path, help="existing SQLite DB; enables caption persistence")
     parser.add_argument("--media-id", help="existing indexed image ID; requires --database")
@@ -498,6 +516,8 @@ def main() -> int:
             args.cache_dir = args.cache_dir.expanduser().resolve(strict=True)
             if not args.cache_dir.is_dir():
                 raise ValueError("--cache-dir must be a local directory")
+            if args.frame_cache_dir is not None:
+                args.frame_cache_dir = args.frame_cache_dir.expanduser().resolve()
             return _caption_video_scenes(args) if args.video_scenes else _caption_all_missing(args)
         except Exception as exc:
             _emit_batch_event(event="error", message=f"{type(exc).__name__}: {exc}")

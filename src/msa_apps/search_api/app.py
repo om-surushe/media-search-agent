@@ -1,8 +1,13 @@
 import asyncio
+import base64
+import ipaddress
+import io
 import json
+import tempfile
 from contextlib import asynccontextmanager, contextmanager
 from fastapi import FastAPI, Depends, HTTPException, WebSocket, Query
 from fastapi.responses import FileResponse, StreamingResponse
+from starlette.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from msa_settings.paths import resolve_for_access, display_path, is_wsl2
@@ -33,6 +38,7 @@ from msa_apps.search_api.schemas import (
     DescriptionOut,
     ImageCaptionOut,
     VideoSceneCaptionOut,
+    KeyframePreviewResponse,
 )
 from msa_apps.search_api.deps import get_query_engine
 from msa_query.storage.db import connect_readonly
@@ -72,6 +78,8 @@ def _resolve_app_version() -> str:
 
 
 _APP_VERSION = _resolve_app_version()
+_MAX_KEYFRAME_PREVIEW_UPLOAD_BYTES = 512 * 1024 * 1024
+_MAX_KEYFRAME_PREVIEW_FRAMES = 2000
 
 
 def _effective_api_url(cfg) -> str:
@@ -415,10 +423,122 @@ def create_app(config_override=None, query_engine_override=None, reset_dependenc
 
 # Backwards-compatible global app instance for production usage
 app = create_app()
+
+
+def _analyze_keyframe_preview(
+    video_path: Path,
+    sensitivity_percent: float = 8.0,
+    preview_temp_dir: Path | None = None,
+    shared_frame_cache_test: bool = False,
+    adaptive_selection_test: bool = False,
+    long_shot_coverage_test: bool = False,
+    adaptive_selection_settings: dict[str, bool | float | int] | None = None,
+) -> dict:
+    """Compare decoded frames and optionally exercise the shared cache in temp state."""
+    from msa_indexer.io.video import extract_change_keyframes
+
+    try:
+        result = extract_change_keyframes(
+            video_path,
+            sensitivity_percent=sensitivity_percent,
+            max_keyframes=_MAX_KEYFRAME_PREVIEW_FRAMES,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if preview_temp_dir is not None:
+        from .video_preview import exercise_shared_frame_cache, exercise_adaptive_selection
+        if adaptive_selection_test:
+            result["adaptive_selection_test"] = exercise_adaptive_selection(
+                video_path,
+                float(result["duration"]),
+                adaptive_selection_settings or {},
+                long_shot_coverage_test,
+            )
+        if shared_frame_cache_test:
+            result["frame_cache_test"] = exercise_shared_frame_cache(
+                video_path, preview_temp_dir, result["frames"]
+            )
+    for frame in result["frames"]:
+        image_data = base64.b64encode(frame.pop("image_jpeg")).decode("ascii")
+        frame["image_data_url"] = f"data:image/jpeg;base64,{image_data}"
+    return result
+
+
 @app.get("/health")
 def health(request: Request):
     ready = getattr(request.app.state, "_ready", False)
     return {"status": "ready" if ready else "starting"}
+@app.post("/video-keyframes/preview", response_model=KeyframePreviewResponse)
+async def preview_video_keyframes(
+    request: Request,
+    extension: str = Query(".mp4"),
+    sensitivity_percent: float = Query(8.0),
+    test_shared_frame_cache: bool = Query(False),
+    test_adaptive_selection: bool = Query(False),
+    test_long_shot_coverage: bool = Query(False),
+):
+    """Temporarily analyze one uploaded video; never add it to the media index."""
+    client_host = request.client.host if request.client else ""
+    try:
+        is_loopback = ipaddress.ip_address(client_host).is_loopback
+    except ValueError:
+        is_loopback = False
+    if not is_loopback:
+        raise HTTPException(status_code=403, detail="Video preview uploads are local-only.")
+
+    if not 1.0 <= sensitivity_percent <= 30.0:
+        raise HTTPException(status_code=400, detail="Sensitivity must be between 1 and 30 percent.")
+
+    extension = extension.lower()
+    if extension not in {".mp4", ".mov", ".m4v", ".avi", ".mkv", ".webm"}:
+        raise HTTPException(status_code=400, detail="Unsupported video extension.")
+
+    content_length = request.headers.get("content-length")
+    if content_length:
+        try:
+            if int(content_length) > _MAX_KEYFRAME_PREVIEW_UPLOAD_BYTES:
+                raise HTTPException(status_code=413, detail="Video exceeds the 512 MiB preview limit.")
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="Invalid Content-Length header.") from exc
+
+    config = _get_config(request)
+    with tempfile.TemporaryDirectory(prefix="lmi-keyframe-preview-") as temp_dir:
+        video_path = Path(temp_dir) / f"video{extension}"
+        written = 0
+        with video_path.open("wb") as video_file:
+            async for chunk in request.stream():
+                written += len(chunk)
+                if written > _MAX_KEYFRAME_PREVIEW_UPLOAD_BYTES:
+                    raise HTTPException(status_code=413, detail="Video exceeds the 512 MiB preview limit.")
+                video_file.write(chunk)
+        if written == 0:
+            raise HTTPException(status_code=400, detail="No video data was uploaded.")
+        return await run_in_threadpool(
+            _analyze_keyframe_preview,
+            video_path,
+            sensitivity_percent,
+            Path(temp_dir) if (test_shared_frame_cache or test_adaptive_selection) else None,
+            test_shared_frame_cache,
+            test_adaptive_selection,
+            test_long_shot_coverage,
+            {
+                "shot_detection_enabled": bool(getattr(config, "enable_video_shot_detection", False)),
+                "shot_detection_threshold": float(getattr(config, "shot_detection_threshold", 30.0)),
+                "min_shot_length_frames": int(getattr(config, "min_shot_length_frames", 15)),
+                "keyframes_per_shot": int(getattr(config, "keyframes_per_shot", 1)),
+                "adaptive_keyframe_sensitivity_percent": float(
+                    getattr(config, "adaptive_keyframe_sensitivity_percent", 8.0)
+                ),
+                "long_shot_min_duration_seconds": float(
+                    getattr(config, "long_shot_min_duration_seconds", 30.0)
+                ),
+                "long_shot_interval_seconds": float(
+                    getattr(config, "long_shot_interval_seconds", 10.0)
+                ),
+            },
+        )
+
+
 @app.post("/search", response_model=SearchResponse)
 def search(req: SearchRequest, request: Request, tasks: BackgroundTasks, qe = Depends(get_query_engine)):
     filters = req.filters.dict() if req.filters else None

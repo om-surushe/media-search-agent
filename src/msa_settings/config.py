@@ -148,6 +148,13 @@ class Config:
     thumb_dir: Path = Path("data/thumbnails")
     face_thumb_dir: Path = Path("data/face_thumbnails")
     models_dir: Path = Path("models")
+    video_frame_cache_dir: Path = Path("video_frames")
+    video_frame_cache_budget_mb: int = 1024
+    adaptive_video_keyframes_enabled: bool = False
+    adaptive_keyframe_sensitivity_percent: float = 8.0
+    long_shot_coverage_enabled: bool = False
+    long_shot_min_duration_seconds: float = 30.0
+    long_shot_interval_seconds: float = 10.0
     log_dir: Path = Path("logs")
     log_level: str = "INFO"
     model_name: str = "ViT-L-14"
@@ -362,7 +369,7 @@ _DATA_PATH_FIELDS = (
 
 # Fields that hold cache-directory paths (ML model weights).
 # Resolved under MSA_CACHE_DIR (or platform cache dir), not MSA_DATA_DIR.
-_CACHE_PATH_FIELDS = ('models_dir',)
+_CACHE_PATH_FIELDS = ('models_dir', 'video_frame_cache_dir')
 
 # Log directory — resolved against MSA_LOG_DIR (or platform log dir), not MSA_DATA_DIR.
 # MSA_LOG_DIR is the log directory itself, not a root; cfg.log_dir is set directly.

@@ -1,5 +1,6 @@
 from pathlib import Path
 from datetime import datetime
+from io import BytesIO
 import bisect
 from PIL import Image
 import cv2
@@ -438,12 +439,12 @@ def _extract_gps_with_exiftool(path: str | Path) -> Optional[Tuple[float, float]
     return None
 
 
-def extract_video_frames(video_path: Path, 
+def extract_video_frames(video_path: Path,
                         max_frames: int = 5,
                         strategy: str = "uniform") -> List[Image.Image]:
     """
     Extract frames from a video file for analysis.
-    
+
     Args:
         video_path: Path to the video file
         max_frames: Maximum number of frames to extract
@@ -451,29 +452,29 @@ def extract_video_frames(video_path: Path,
             - "uniform": Evenly spaced frames throughout the video
             - "keyframes": Extract actual keyframes (not implemented yet)
             - "first": Just the first frame
-    
+
     Returns:
         List of PIL Image objects
     """
     frames = []
-    
+
     try:
         cap = cv2.VideoCapture(str(video_path))
-        
+
         if not cap.isOpened():
             logger.warning(f"Could not open video file: {video_path}")
             return frames
-        
+
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         fps = cap.get(cv2.CAP_PROP_FPS)
         duration_sec = total_frames / fps if fps > 0 else 0
-        
+
         if total_frames <= 0:
             logger.warning(f"Video has no frames: {video_path}")
             return frames
-        
+
         logger.debug(f"Video {video_path.name}: {total_frames} frames, {fps:.1f} fps, {duration_sec:.1f}s duration")
-        
+
         # Determine which frames to extract
         if strategy == "first":
             frame_indices = [0]
@@ -488,12 +489,12 @@ def extract_video_frames(video_path: Path,
             logger.warning(f"Unknown frame extraction strategy: {strategy}, using 'uniform'")
             step = total_frames / max_frames
             frame_indices = [int(i * step) for i in range(max_frames)]
-        
+
         # Extract frames
         for frame_idx in frame_indices:
             cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
             ret, frame = cap.read()
-            
+
             if ret:
                 # Convert BGR (OpenCV) to RGB (PIL)
                 frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -501,23 +502,23 @@ def extract_video_frames(video_path: Path,
                 frames.append(pil_image)
             else:
                 logger.debug(f"Failed to read frame {frame_idx} from {video_path}")
-        
+
         cap.release()
         logger.debug(f"Extracted {len(frames)} frames from {video_path.name}")
-        
+
     except Exception as e:
         logger.warning(f"Error extracting frames from {video_path}: {e}")
-    
+
     return frames
 
 
 def get_video_representative_frame(video_path: Path) -> Optional[Image.Image]:
     """
     Extract a single representative frame from a video (middle frame).
-    
+
     Args:
         video_path: Path to the video file
-    
+
     Returns:
         PIL Image object or None if extraction fails
     """
@@ -559,23 +560,18 @@ def extract_keyframes_from_shot(
     """
     Extract 1-3 keyframes for a shot: middle only, start+end, or start+mid+end.
 
-    Returns list of (timestamp_sec, image) tuples. Image may be None if decoding fails.
+    Returns (requested_timestamp_sec, image) tuples. A failed seek stays None
+    rather than substituting an unrelated whole-video frame.
     """
     t0, t1 = shot
     try:
         if keyframes_per_shot <= 1:
             t_mid = (t0 + t1) / 2.0
             img = extract_frame_at_timestamp(video_path, t_mid)
-            if img is None:
-                img = get_video_representative_frame(video_path)
             return [(t_mid, img)]
         elif keyframes_per_shot == 2:
             img0 = extract_frame_at_timestamp(video_path, t0)
             img1 = extract_frame_at_timestamp(video_path, t1)
-            if img0 is None:
-                img0 = get_video_representative_frame(video_path)
-            if img1 is None:
-                img1 = get_video_representative_frame(video_path)
             return [
                 (t0, img0),
                 (t1, img1),
@@ -585,12 +581,6 @@ def extract_keyframes_from_shot(
             img0 = extract_frame_at_timestamp(video_path, t0)
             img_mid = extract_frame_at_timestamp(video_path, t_mid)
             img1 = extract_frame_at_timestamp(video_path, t1)
-            if img0 is None:
-                img0 = get_video_representative_frame(video_path)
-            if img_mid is None:
-                img_mid = get_video_representative_frame(video_path)
-            if img1 is None:
-                img1 = get_video_representative_frame(video_path)
             return [
                 (t0, img0),
                 (t_mid, img_mid),
@@ -599,3 +589,104 @@ def extract_keyframes_from_shot(
     except Exception as e:
         logger.error(f"Failed to extract keyframes from shot [{t0:.2f}, {t1:.2f}] in {video_path}: {e}")
         return []
+
+
+def extract_change_keyframes(
+    video_path: str | Path,
+    sensitivity_percent: float = 8.0,
+    min_interval_seconds: float = 0.25,
+    max_interval_seconds: float = 1.0,
+    max_keyframes: int = 2000,
+    include_images: bool = True,
+) -> dict[str, Any]:
+    """Select novel visual changes and skip near-duplicates during a full decode."""
+    if not 0 < sensitivity_percent <= 100:
+        raise ValueError("sensitivity_percent must be between 0 and 100")
+    if min_interval_seconds <= 0 or max_interval_seconds < min_interval_seconds:
+        raise ValueError("invalid keyframe sampling intervals")
+
+    capture = cv2.VideoCapture(str(video_path))
+    if not capture.isOpened():
+        capture.release()
+        raise ValueError("Could not decode this video file")
+
+    fps = capture.get(cv2.CAP_PROP_FPS)
+    frame_count = capture.get(cv2.CAP_PROP_FRAME_COUNT)
+    frames_scanned = change_frames = slow_change_frames = omitted_frames = 0
+    selected_frames: list[dict[str, Any]] = []
+    previous_proxy = last_selected_proxy = None
+    last_selected_time = 0.0
+
+    try:
+        while True:
+            ok, frame = capture.read()
+            if not ok:
+                break
+            timestamp = frames_scanned / fps if fps > 0 else capture.get(cv2.CAP_PROP_POS_MSEC) / 1000.0
+            proxy = cv2.cvtColor(cv2.resize(frame, (160, 90), interpolation=cv2.INTER_AREA), cv2.COLOR_BGR2GRAY)
+            frames_scanned += 1
+
+            if previous_proxy is None:
+                reason, change_percent = "start", 0.0
+            else:
+                previous_diff = cv2.absdiff(previous_proxy, proxy)
+                selected_diff = cv2.absdiff(last_selected_proxy, proxy)
+                previous_mask = cv2.threshold(previous_diff, 24, 255, cv2.THRESH_BINARY)[1]
+                selected_mask = cv2.threshold(selected_diff, 24, 255, cv2.THRESH_BINARY)[1]
+                previous_ratio = cv2.countNonZero(previous_mask) / previous_mask.size
+                novelty_ratio = cv2.countNonZero(selected_mask) / selected_mask.size
+                change_percent = novelty_ratio * 100.0
+                elapsed = timestamp - last_selected_time
+                # Coverage only emits a frame when the image is still novel; static footage stays sparse.
+                minimum_novelty = max(2.0, min(5.0, sensitivity_percent * 0.25)) / 100.0
+                is_new_frame = novelty_ratio >= minimum_novelty
+                if elapsed >= min_interval_seconds and is_new_frame and max(previous_ratio, novelty_ratio) >= sensitivity_percent / 100.0:
+                    reason = "change"
+                elif elapsed >= max_interval_seconds and is_new_frame:
+                    reason = "slow_change"
+                else:
+                    reason = ""
+
+            if reason:
+                if len(selected_frames) < max_keyframes:
+                    selected: dict[str, Any] = {
+                        "timestamp": round(timestamp, 3),
+                        "change_percent": round(change_percent, 1),
+                        "reason": reason,
+                    }
+                    if include_images:
+                        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                        image = Image.fromarray(rgb)
+                        image.thumbnail((256, 256))
+                        buffer = BytesIO()
+                        image.save(buffer, format="JPEG", quality=65)
+                        selected["image_jpeg"] = buffer.getvalue()
+                    selected_frames.append(selected)
+                else:
+                    omitted_frames += 1
+                if reason == "change":
+                    change_frames += 1
+                elif reason == "slow_change":
+                    slow_change_frames += 1
+                last_selected_proxy = proxy.copy()
+                last_selected_time = timestamp
+            previous_proxy = proxy
+    finally:
+        capture.release()
+
+    if frames_scanned == 0:
+        raise ValueError("No decodable video frames were found")
+
+    duration = frame_count / fps if fps > 0 and frame_count > 0 else frames_scanned / fps if fps > 0 else 0.0
+    if duration <= 0:
+        duration = float(selected_frames[-1]["timestamp"])
+
+    return {
+        "duration": round(duration, 3),
+        "frames_scanned": frames_scanned,
+        "change_frames": change_frames,
+        "slow_change_frames": slow_change_frames,
+        "omitted_frames": omitted_frames,
+        "sensitivity_percent": sensitivity_percent,
+        "frames": selected_frames,
+    }

@@ -367,6 +367,32 @@ class SQLiteStore:
         )
         self.conn.commit()
 
+        # Canonical video frames are additive. Existing keyframe IDs and
+        # intelligence remain intact; legacy rows acquire frame IDs when reprocessed.
+        try:
+            keyframe_columns = {
+                column[1] for column in self.conn.execute("PRAGMA table_info(video_keyframes)").fetchall()
+            }
+            if "frame_id" not in keyframe_columns:
+                self.conn.execute(
+                    "ALTER TABLE video_keyframes ADD COLUMN frame_id TEXT REFERENCES video_frame(frame_id)"
+                )
+            if "selection_version" not in keyframe_columns:
+                self.conn.execute(
+                    "ALTER TABLE video_keyframes ADD COLUMN selection_version TEXT NOT NULL DEFAULT 'midpoint-v1'"
+                )
+            if "requested_timestamp" not in keyframe_columns:
+                self.conn.execute(
+                    "ALTER TABLE video_keyframes ADD COLUMN requested_timestamp REAL"
+                )
+            self.conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_vkf_frame_id ON video_keyframes(frame_id)"
+            )
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+
         # Migration: Add face_detection_done column to media table if missing
         try:
             cursor = self.conn.execute("PRAGMA table_info(media)")
@@ -845,6 +871,190 @@ class SQLiteStore:
         ).fetchone()
         return int(row[0]) if row is not None else None
 
+    def get_video_keyframe_metadata(
+        self, video_id: str, shot_index: int, kf_index: int
+    ) -> Optional[dict[str, Any]]:
+        row = self.conn.execute(
+            """SELECT timestamp, requested_timestamp, selection_version, frame_id
+               FROM video_keyframes WHERE video_id=? AND shot_index=? AND kf_index=?""",
+            (video_id, int(shot_index), int(kf_index)),
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "timestamp": float(row[0]), "requested_timestamp": row[1],
+            "selection_version": str(row[2]), "frame_id": row[3],
+        }
+
+    def get_keyframe_frame_id(
+        self, video_id: str, shot_index: int, kf_index: int
+    ) -> Optional[str]:
+        row = self.conn.execute(
+            "SELECT frame_id FROM video_keyframes WHERE video_id=? AND shot_index=? AND kf_index=?",
+            (video_id, int(shot_index), int(kf_index)),
+        ).fetchone()
+        return str(row[0]) if row is not None and row[0] else None
+
+    def get_video_keyframe_for_frame_id(self, video_id: str, frame_id: str) -> Optional[dict[str, Any]]:
+        row = self.conn.execute(
+            """SELECT id, shot_index, kf_index, timestamp, selection_version
+               FROM video_keyframes WHERE video_id=? AND frame_id=? ORDER BY id LIMIT 1""",
+            (video_id, frame_id),
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "id": int(row[0]), "shot_index": int(row[1]), "kf_index": int(row[2]),
+            "timestamp": float(row[3]), "selection_version": str(row[4]),
+        }
+
+    def get_video_keyframe_selection_status(self, video_id: str, selector_version: str) -> Optional[dict[str, Any]]:
+        row = self.conn.execute(
+            """SELECT status, selected_count, error_type, updated_at
+               FROM video_keyframe_selection_state WHERE video_id=? AND selector_version=?""",
+            (video_id, selector_version),
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "status": str(row[0]), "selected_count": int(row[1]),
+            "error_type": row[2], "updated_at": row[3],
+        }
+
+    def set_video_keyframe_selection_status(
+        self, video_id: str, selector_version: str, status: str, *,
+        selected_count: int = 0, error_type: Optional[str] = None,
+    ) -> None:
+        if status not in {"in_progress", "completed", "failed"}:
+            raise ValueError("unsupported video keyframe selection status")
+        self.conn.execute(
+            """INSERT INTO video_keyframe_selection_state(
+                   video_id, selector_version, status, selected_count, error_type, updated_at
+               ) VALUES (?, ?, ?, ?, ?, datetime('now'))
+               ON CONFLICT(video_id, selector_version) DO UPDATE SET
+                   status=excluded.status, selected_count=excluded.selected_count,
+                   error_type=excluded.error_type, updated_at=excluded.updated_at""",
+            (video_id, selector_version, status, int(selected_count), error_type),
+        )
+        self._maybe_commit()
+
+    def upsert_video_frame(self, frame: dict[str, Any]) -> None:
+        self.conn.execute(
+            """INSERT INTO video_frame(
+                   frame_id, video_id, source_revision, stream_index, pts,
+                   time_base_num, time_base_den, frame_ordinal, actual_timestamp,
+                   frame_id_version
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(frame_id) DO UPDATE SET
+                   actual_timestamp=excluded.actual_timestamp""",
+            (
+                frame["frame_id"], frame["video_id"], frame["source_revision"],
+                int(frame["stream_index"]), frame["pts"], frame["time_base_num"],
+                frame["time_base_den"], frame["frame_ordinal"],
+                float(frame["actual_timestamp"]), int(frame["frame_id_version"]),
+            ),
+        )
+        self._maybe_commit()
+
+    def get_video_frames_by_pts(
+        self, source_revision: str, stream_index: int, pts: int,
+        time_base_num: int, time_base_den: int,
+    ) -> list[dict[str, Any]]:
+        rows = self.conn.execute(
+            """SELECT frame_id, frame_ordinal FROM video_frame
+               WHERE source_revision=? AND stream_index=? AND pts=?
+                 AND time_base_num=? AND time_base_den=? ORDER BY frame_id""",
+            (source_revision, int(stream_index), int(pts), int(time_base_num), int(time_base_den)),
+        ).fetchall()
+        return [{"frame_id": str(row[0]), "frame_ordinal": row[1]} for row in rows]
+
+    def get_video_frame(self, frame_id: str) -> Optional[dict[str, Any]]:
+        row = self.conn.execute(
+            """SELECT frame_id, video_id, source_revision, stream_index, pts,
+                      time_base_num, time_base_den, frame_ordinal, actual_timestamp,
+                      frame_id_version
+               FROM video_frame WHERE frame_id=?""",
+            (frame_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        names = (
+            "frame_id", "video_id", "source_revision", "stream_index", "pts",
+            "time_base_num", "time_base_den", "frame_ordinal", "actual_timestamp",
+            "frame_id_version",
+        )
+        return dict(zip(names, row))
+
+    def upsert_video_frame_rendition(self, rendition: dict[str, Any]) -> None:
+        self.conn.execute(
+            """INSERT INTO video_frame_rendition(
+                   rendition_id, frame_id, profile, cache_relpath, checksum_sha256,
+                   size_bytes, width, height, rotation_degrees
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(frame_id, profile) DO UPDATE SET
+                   rendition_id=excluded.rendition_id,
+                   cache_relpath=excluded.cache_relpath,
+                   checksum_sha256=excluded.checksum_sha256,
+                   size_bytes=excluded.size_bytes,
+                   width=excluded.width,
+                   height=excluded.height,
+                   rotation_degrees=excluded.rotation_degrees,
+                   last_accessed_at=datetime('now')""",
+            (
+                rendition["rendition_id"], rendition["frame_id"], rendition["profile"],
+                rendition["cache_relpath"], rendition["checksum_sha256"],
+                int(rendition["size_bytes"]), int(rendition["width"]),
+                int(rendition["height"]), int(rendition["rotation_degrees"]),
+            ),
+        )
+        self._maybe_commit()
+
+    def get_video_frame_rendition(
+        self, frame_id: str, profile: str
+    ) -> Optional[dict[str, Any]]:
+        row = self.conn.execute(
+            """SELECT rendition_id, frame_id, profile, cache_relpath,
+                      checksum_sha256, size_bytes, width, height, rotation_degrees
+               FROM video_frame_rendition WHERE frame_id=? AND profile=?""",
+            (frame_id, profile),
+        ).fetchone()
+        if row is None:
+            return None
+        names = (
+            "rendition_id", "frame_id", "profile", "cache_relpath",
+            "checksum_sha256", "size_bytes", "width", "height", "rotation_degrees",
+        )
+        return dict(zip(names, row))
+
+    def touch_video_frame_rendition(self, rendition_id: str) -> None:
+        self.conn.execute(
+            "UPDATE video_frame_rendition SET last_accessed_at=datetime('now') WHERE rendition_id=?",
+            (rendition_id,),
+        )
+        self._maybe_commit()
+
+    def video_frame_cache_size(self) -> int:
+        row = self.conn.execute(
+            "SELECT COALESCE(SUM(size_bytes), 0) FROM video_frame_rendition"
+        ).fetchone()
+        return int(row[0])
+
+    def oldest_video_frame_rendition(self) -> Optional[dict[str, Any]]:
+        row = self.conn.execute(
+            """SELECT rendition_id, cache_relpath, size_bytes
+               FROM video_frame_rendition
+               ORDER BY last_accessed_at, rendition_id LIMIT 1"""
+        ).fetchone()
+        if row is None:
+            return None
+        return {"rendition_id": row[0], "cache_relpath": row[1], "size_bytes": int(row[2])}
+
+    def delete_video_frame_rendition(self, rendition_id: str) -> None:
+        self.conn.execute(
+            "DELETE FROM video_frame_rendition WHERE rendition_id=?", (rendition_id,)
+        )
+        self._maybe_commit()
+
     @staticmethod
     def _serialize_embedding(vec) -> tuple[bytes, int]:
         """Convert a vector (numpy array, list, tuple) to a fixed-shape
@@ -1115,7 +1325,7 @@ class SQLiteStore:
                 )""", [*params[2:], model_id, prompt_version]
         ).fetchone()[0]
         rows = self.conn.execute(
-            f"""SELECT k.id, k.video_id, k.timestamp, k.shot_index, k.kf_index, m.path
+            f"""SELECT k.id, k.video_id, k.timestamp, k.shot_index, k.kf_index, m.path, k.frame_id
                 FROM video_keyframes k JOIN media m ON m.media_id=k.video_id
                 WHERE {scoped} AND NOT EXISTS (
                     SELECT 1 FROM video_scene_caption c
@@ -1125,7 +1335,7 @@ class SQLiteStore:
                 ORDER BY k.video_id, k.timestamp, k.shot_index, k.kf_index""",
             [*params[2:], model_id, prompt_version],
         ).fetchall()
-        fields = ("keyframe_id", "video_id", "timestamp", "shot_index", "kf_index", "path")
+        fields = ("keyframe_id", "video_id", "timestamp", "shot_index", "kf_index", "path", "frame_id")
         return [dict(zip(fields, row)) for row in rows], int(total), int(completed)
 
     def store_video_scene_caption(
@@ -2032,12 +2242,16 @@ class SQLiteStore:
             self.conn.execute(
                 """
                 INSERT INTO video_keyframes(
-                  video_id, shot_index, kf_index, timestamp, shot_start, shot_end, tags,
-                  gps_lat, gps_lon, gps_alt, gps_datetime_utc, gps_fix, gps_source, place
+                  video_id, shot_index, kf_index, timestamp, requested_timestamp, frame_id,
+                  selection_version, shot_start, shot_end, tags, gps_lat, gps_lon, gps_alt,
+                  gps_datetime_utc, gps_fix, gps_source, place
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(video_id, shot_index, kf_index) DO UPDATE SET
                   timestamp=excluded.timestamp,
+                  requested_timestamp=COALESCE(excluded.requested_timestamp, video_keyframes.requested_timestamp),
+                  frame_id=COALESCE(excluded.frame_id, video_keyframes.frame_id),
+                  selection_version=excluded.selection_version,
                   shot_start=excluded.shot_start,
                   shot_end=excluded.shot_end,
                   tags=COALESCE(excluded.tags, video_keyframes.tags),
@@ -2054,6 +2268,9 @@ class SQLiteStore:
                     int(e["shot_index"]),
                     int(e["kf_index"]),
                     float(e["timestamp"]),
+                    e.get("requested_timestamp"),
+                    e.get("frame_id"),
+                    e.get("selection_version", "midpoint-v1"),
                     float(e["shot_start"]),
                     float(e["shot_end"]),
                     tags_json,
@@ -2093,7 +2310,8 @@ class SQLiteStore:
                 """
                 SELECT vk.video_id, m.path, m.source_name, m.rel_path, m.place,
                        vk.shot_index, vk.kf_index, vk.timestamp, vk.shot_start, vk.shot_end, vk.tags,
-                       vk.gps_lat, vk.gps_lon, vk.gps_alt, vk.gps_datetime_utc, vk.gps_fix, vk.gps_source, vk.place
+                       vk.gps_lat, vk.gps_lon, vk.gps_alt, vk.gps_datetime_utc, vk.gps_fix, vk.gps_source, vk.place,
+                       vk.frame_id, vk.selection_version
                 FROM video_keyframes vk
                 JOIN media m ON m.media_id = vk.video_id
                 WHERE m.deleted = 0
@@ -2105,7 +2323,8 @@ class SQLiteStore:
                 """
                 SELECT vk.video_id, m.path, m.source_name, m.rel_path, m.place,
                        vk.shot_index, vk.kf_index, vk.timestamp, vk.shot_start, vk.shot_end, vk.tags,
-                       vk.gps_lat, vk.gps_lon, vk.gps_alt, vk.gps_datetime_utc, vk.gps_fix, vk.gps_source, vk.place
+                       vk.gps_lat, vk.gps_lon, vk.gps_alt, vk.gps_datetime_utc, vk.gps_fix, vk.gps_source, vk.place,
+                       vk.frame_id, vk.selection_version
                 FROM video_keyframes vk
                 JOIN media m ON m.media_id = vk.video_id
                 JOIN keyframe_embedding ke ON ke.keyframe_id = vk.id
@@ -2115,7 +2334,7 @@ class SQLiteStore:
                 """,
                 (int(since_seq),),
             )
-        for video_id, path, source_name, rel_path, media_place, s_idx, k_idx, ts, s_start, s_end, tags_json, gps_lat, gps_lon, gps_alt, gps_dt, gps_fix, gps_source, keyframe_place in cur:
+        for video_id, path, source_name, rel_path, media_place, s_idx, k_idx, ts, s_start, s_end, tags_json, gps_lat, gps_lon, gps_alt, gps_dt, gps_fix, gps_source, keyframe_place, frame_id, selection_version in cur:
             resolved_path = self._resolve_abs_path(path, source_name, rel_path)
             # Parse keyframe-level tags from JSON (if available)
             keyframe_tags = json.loads(tags_json) if tags_json else []
@@ -2154,6 +2373,8 @@ class SQLiteStore:
                 "shot_index": s_idx,
                 "kf_index": k_idx,
                 "timestamp": ts,
+                "frame_id": frame_id,
+                "selection_version": selection_version,
                 "shot_start": s_start,
                 "shot_end": s_end,
                 "tags": tags,

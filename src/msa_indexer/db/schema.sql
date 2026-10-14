@@ -189,6 +189,46 @@ CREATE TABLE IF NOT EXISTS keyframe_embedding (
   FOREIGN KEY (keyframe_id) REFERENCES video_keyframes(id) ON DELETE CASCADE
 );
 
+-- A decoded source frame is independent of shot numbering. The rendition cache
+-- below is disposable; this row and its PTS provenance are canonical metadata.
+CREATE TABLE IF NOT EXISTS video_frame (
+  frame_id TEXT PRIMARY KEY,
+  video_id TEXT NOT NULL,
+  source_revision TEXT NOT NULL,
+  stream_index INTEGER NOT NULL,
+  pts INTEGER,
+  time_base_num INTEGER,
+  time_base_den INTEGER,
+  frame_ordinal INTEGER,
+  actual_timestamp REAL NOT NULL,
+  frame_id_version INTEGER NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  CHECK (pts IS NOT NULL OR frame_ordinal IS NOT NULL),
+  FOREIGN KEY (video_id) REFERENCES media(media_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_video_frame_video_time
+  ON video_frame(video_id, actual_timestamp);
+CREATE INDEX IF NOT EXISTS idx_video_frame_pts
+  ON video_frame(source_revision, stream_index, pts, time_base_num, time_base_den);
+
+CREATE TABLE IF NOT EXISTS video_frame_rendition (
+  rendition_id TEXT PRIMARY KEY,
+  frame_id TEXT NOT NULL,
+  profile TEXT NOT NULL,
+  cache_relpath TEXT NOT NULL UNIQUE,
+  checksum_sha256 TEXT NOT NULL,
+  size_bytes INTEGER NOT NULL CHECK (size_bytes >= 0),
+  width INTEGER NOT NULL,
+  height INTEGER NOT NULL,
+  rotation_degrees INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  last_accessed_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (frame_id, profile),
+  FOREIGN KEY (frame_id) REFERENCES video_frame(frame_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_video_frame_rendition_lru
+  ON video_frame_rendition(last_accessed_at);
+
 -- Video shot boundaries (for video-semantic search)
 CREATE TABLE IF NOT EXISTS shots (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -210,7 +250,10 @@ CREATE TABLE IF NOT EXISTS video_keyframes (
   video_id TEXT NOT NULL,                 -- references media.media_id
   shot_index INTEGER NOT NULL,            -- shot index within the video
   kf_index INTEGER NOT NULL,              -- keyframe index within the shot
-  timestamp REAL NOT NULL,                -- seek position (seconds)
+  timestamp REAL NOT NULL,                -- actual decoded presentation time used for seek
+  requested_timestamp REAL,               -- selector request time; provenance only
+  frame_id TEXT REFERENCES video_frame(frame_id), -- stable temporal identity; null for legacy rows
+  selection_version TEXT NOT NULL DEFAULT 'midpoint-v1',
   shot_start REAL NOT NULL,
   shot_end REAL NOT NULL,
   tags TEXT,                              -- JSON array of object detection tags for this keyframe
@@ -226,6 +269,19 @@ CREATE TABLE IF NOT EXISTS video_keyframes (
 );
 
 CREATE INDEX IF NOT EXISTS idx_vkf_video ON video_keyframes(video_id);
+
+-- Selection versions are append-only: a failed/new selector never deletes the
+-- last successful keyframes; new versions use separate stable keyframe slots.
+CREATE TABLE IF NOT EXISTS video_keyframe_selection_state (
+  video_id TEXT NOT NULL,
+  selector_version TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('in_progress', 'completed', 'failed')),
+  selected_count INTEGER NOT NULL DEFAULT 0,
+  error_type TEXT,
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (video_id, selector_version),
+  FOREIGN KEY (video_id) REFERENCES media(media_id) ON DELETE CASCADE
+);
 
 -- One versioned visual caption per existing video keyframe.
 CREATE TABLE IF NOT EXISTS video_scene_caption (

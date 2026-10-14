@@ -18,10 +18,23 @@ except ImportError:
 from .io.video import (
     get_video_meta,
     get_video_meta_result,
-    extract_keyframes_from_shot,
     extract_video_gps_track_result,
     sample_video_gps_at_timestamp,
     should_extract_video_gps_track,
+)
+from .io.video_frames import (
+    FrameRequest,
+    VideoFrameCache,
+    VideoFrameExtractionCancelled,
+    keyframe_timestamps_for_shot,
+)
+from .io.video_selection import (
+    ADAPTIVE_SELECTOR_VERSION,
+    adaptive_keyframe_index,
+    adaptive_selector_policy_version,
+    baseline_keyframe_request,
+    baseline_keyframe_slot,
+    select_adaptive_frames,
 )
 from .io.thumbnails import write_thumbnail, write_video_thumbnail, write_face_thumbnail
 from .utils.hashes import sha256_of_file
@@ -199,7 +212,9 @@ def _transcription_needs_processing(status, *, model_name, model_revision) -> bo
 
 def _video_skip_predicate(*, has_shots, has_keyframes, has_unembedded_keyframes,
                           needs_embeddings, needs_objects, needs_faces,
-                          reprocess_embeddings, reprocess_objects) -> bool:
+                          reprocess_embeddings, reprocess_objects,
+                          needs_adaptive_selection=False,
+                          needs_baseline_rebuild=False) -> bool:
     """THE single definition of the runtime's video no-op skip, shared by the
     main loop's video branch and the count-phase ETA so neither re-derives (and
     drifts from) the other (#208 review, Codex P2).
@@ -228,7 +243,23 @@ def _video_skip_predicate(*, has_shots, has_keyframes, has_unembedded_keyframes,
     video_needs_objects = needs_objects or reprocess_objects
     return bool(has_shots) and bool(has_keyframes) and not (
         video_needs_embeddings or video_needs_objects or needs_faces
+        or needs_adaptive_selection or needs_baseline_rebuild
     )
+
+
+def _video_baseline_keyframes_need_rebuild(db, video_id, existing_shots, kps, fps) -> bool:
+    for fallback_index, shot in enumerate(existing_shots):
+        shot_index = int(shot.get("shot_index", fallback_index))
+        timestamps = keyframe_timestamps_for_shot((shot["t_start"], shot["t_end"]), kps)
+        for candidate_index, timestamp in enumerate(timestamps):
+            slot, version = baseline_keyframe_slot(kps, candidate_index)
+            prior = db.get_video_keyframe_metadata(video_id, shot_index, slot)
+            resolved_slot, resolved_version, _ = baseline_keyframe_request(
+                kps, candidate_index, timestamp, prior, fps
+            )
+            if prior is None or resolved_slot != slot or resolved_version != version:
+                return True
+    return False
 
 
 def _count_phase_expects_free_skip(snap, *, model_version, is_image, is_video,
@@ -237,6 +268,7 @@ def _count_phase_expects_free_skip(snap, *, model_version, is_image, is_video,
                                    transcription_enabled=False,
                                    transcription_model=WHISPER_MODEL_NAME,
                                    transcription_revision=WHISPER_MODEL_REVISION,
+                                   adaptive_video_keyframes_enabled=False,
                                    thumbnail_exists=None) -> bool:
     """True iff a fingerprint stat-match on this media costs ~0 processing time
     — the only case the count-phase ETA may subtract it as a free skip
@@ -302,6 +334,10 @@ def _count_phase_expects_free_skip(snap, *, model_version, is_image, is_video,
     if needs_gps:
         return False
     if is_video:
+        # Adaptive selection is opt-in and additive; conservatively count all
+        # videos as work while it is enabled rather than understate the ETA.
+        if adaptive_video_keyframes_enabled:
+            return False
         if transcription_enabled and _transcription_needs_processing(
             snap, model_name=transcription_model, model_revision=transcription_revision
         ):
@@ -629,6 +665,9 @@ def run_index(config, stop_event=None):
     # 0). Reuses the SAME gate as the detector init below.
     count_model_version = getattr(config, 'model_version', None)
     transcription_enabled = bool(getattr(config, "enable_speech_transcription", False))
+    adaptive_video_keyframes_enabled = bool(
+        getattr(config, "adaptive_video_keyframes_enabled", False)
+    )
     objects_enabled = _object_detection_enabled(config)
     video_objects_enabled = _video_object_detection_enabled(config)
     faces_enabled = bool(getattr(config, 'enable_face_recognition', False))
@@ -726,6 +765,7 @@ def run_index(config, stop_event=None):
                     faces_enabled=faces_enabled,
                     video_objects_enabled=video_objects_enabled,
                     transcription_enabled=transcription_enabled,
+                    adaptive_video_keyframes_enabled=adaptive_video_keyframes_enabled,
                     thumbnail_exists=thumbnail_exists_by_media_id[media_id],
                 ):
                     if is_image:
@@ -1757,6 +1797,8 @@ def run_index(config, stop_event=None):
             
             # Videos: shot detection and per-shot keyframes (no representative frame to image_emb)
             elif ext in VIDEO_EXT:
+                adaptive_run_started = False
+                adaptive_selector_version = ADAPTIVE_SELECTOR_VERSION
                 try:
                     # Check if shots already exist in database
                     existing_shots = db.get_shots_for_video(media_id)
@@ -1768,6 +1810,50 @@ def run_index(config, stop_event=None):
                     reprocess_objects = getattr(config, 'reprocess_objects', False)
                     has_unembedded_keyframes = (
                         has_keyframes and db.media_has_unembedded_keyframes(media_id)
+                    )
+                    adaptive_selection_enabled = bool(
+                        getattr(config, "adaptive_video_keyframes_enabled", False)
+                    )
+                    kps = min(max(int(getattr(config, "keyframes_per_shot", 1)), 1), 3)
+                    baseline_rebuild_needed = (
+                        has_keyframes and bool(existing_shots) and
+                        _video_baseline_keyframes_need_rebuild(
+                            db, media_id, existing_shots, kps, float(meta.get("fps") or 30.0)
+                        )
+                    )
+                    long_shot_coverage_enabled = (
+                        adaptive_selection_enabled
+                        and bool(getattr(config, "long_shot_coverage_enabled", False))
+                    )
+                    adaptive_sensitivity = float(getattr(
+                        config, "adaptive_keyframe_sensitivity_percent", 8.0
+                    ))
+                    adaptive_long_threshold = float(getattr(
+                        config, "long_shot_min_duration_seconds", 30.0
+                    ))
+                    adaptive_long_interval = float(getattr(
+                        config, "long_shot_interval_seconds", 10.0
+                    ))
+                    adaptive_selector_version = adaptive_selector_policy_version(
+                        include_long_shot_coverage=long_shot_coverage_enabled,
+                        sensitivity_percent=adaptive_sensitivity,
+                        shot_detection_enabled=shot_detector is not None,
+                        shot_detection_threshold=float(getattr(
+                            config, "shot_detection_threshold", 30.0
+                        )),
+                        min_shot_length_frames=int(getattr(
+                            config, "min_shot_length_frames", 15
+                        )),
+                        keyframes_per_shot=int(getattr(config, "keyframes_per_shot", 1)),
+                        long_shot_threshold_seconds=adaptive_long_threshold,
+                        long_shot_interval_seconds=adaptive_long_interval,
+                    )
+                    adaptive_state = (
+                        db.get_video_keyframe_selection_status(media_id, adaptive_selector_version)
+                        if adaptive_selection_enabled else None
+                    )
+                    needs_adaptive_selection = adaptive_selection_enabled and (
+                        adaptive_state is None or adaptive_state["status"] != "completed"
                     )
                     needs_video_embeddings = (
                         (not has_keyframes or reprocess_embeddings or has_unembedded_keyframes)
@@ -1788,6 +1874,8 @@ def run_index(config, stop_event=None):
                         needs_faces=needs_faces,
                         reprocess_embeddings=reprocess_embeddings,
                         reprocess_objects=reprocess_objects,
+                        needs_adaptive_selection=needs_adaptive_selection,
+                        needs_baseline_rebuild=baseline_rebuild_needed,
                     )
 
                     # Debug: log why video is or isn't being skipped
@@ -1882,7 +1970,7 @@ def run_index(config, stop_event=None):
                         other_ops_start = time.perf_counter()
                         
                         # Extract keyframes; metadata + per-keyframe embedding go to SQLite
-                        kps = int(getattr(config, 'keyframes_per_shot', 1))
+                        kps = min(max(int(getattr(config, 'keyframes_per_shot', 1)), 1), 3)
                         # Shared with the count-phase ETA (via
                         # _video_object_detection_enabled) so both agree on
                         # whether object detection runs on videos this session.
@@ -1894,21 +1982,130 @@ def run_index(config, stop_event=None):
                         
                         keyframe_entries = []
                         # (shot_index, kf_index, embedding) tuples — embeddings
-                        # are inserted into keyframe_embedding *after* add_keyframes
-                        # populates video_keyframes (FK requirement).
+                        # are inserted after add_keyframes creates their legacy rows.
                         kf_emb_pairs: list[tuple[int, int, object]] = []
                         first_keyframe_place = None
                         has_keyframe_gps = False
-                        for s_idx, shot in enumerate(shots):
-                            keyframes = extract_keyframes_from_shot(p, shot, keyframes_per_shot=kps)
-                            for k_idx, (t_sec, img) in enumerate(keyframes):
-                                if img is None:
+                        baseline_timestamps = [
+                            keyframe_timestamps_for_shot(shot, kps) for shot in shots
+                        ]
+                        requests_with_versions: list[tuple[FrameRequest, str]] = []
+                        video_fps = float(meta.get("fps") or 30.0)
+                        for s_idx, timestamps in enumerate(baseline_timestamps):
+                            for baseline_index, timestamp in enumerate(timestamps):
+                                current_slot, _current_version = baseline_keyframe_slot(
+                                    kps, baseline_index
+                                )
+                                prior_row = db.get_video_keyframe_metadata(
+                                    media_id, s_idx, current_slot
+                                )
+                                k_idx, baseline_version, request_timestamp = baseline_keyframe_request(
+                                    kps, baseline_index, timestamp, prior_row, video_fps
+                                )
+                                requests_with_versions.append((
+                                    FrameRequest(
+                                        s_idx, k_idx, request_timestamp,
+                                        existing_frame_id=db.get_keyframe_frame_id(media_id, s_idx, k_idx),
+                                    ),
+                                    baseline_version,
+                                ))
+                        adaptive_requests: set[tuple[int, int]] = set()
+                        adaptive_error = None
+                        adaptive_success_count = 0
+                        if adaptive_selection_enabled:
+                            selected_adaptive = select_adaptive_frames(
+                                p,
+                                shots,
+                                baseline_timestamps,
+                                sensitivity_percent=adaptive_sensitivity,
+                                long_shot_threshold_seconds=adaptive_long_threshold,
+                                long_shot_interval_seconds=adaptive_long_interval,
+                                include_long_shot_coverage=long_shot_coverage_enabled,
+                                selection_version=adaptive_selector_version,
+                            )
+                            selected_index_by_shot: dict[int, int] = {}
+                            for candidate in selected_adaptive:
+                                selection_index = selected_index_by_shot.get(candidate.shot_index, 0)
+                                selected_index_by_shot[candidate.shot_index] = selection_index + 1
+                                kf_index = adaptive_keyframe_index(
+                                    candidate.selection_version, selection_index
+                                )
+                                adaptive_requests.add((candidate.shot_index, kf_index))
+                                requests_with_versions.append((
+                                    FrameRequest(
+                                        candidate.shot_index,
+                                        kf_index,
+                                        candidate.timestamp,
+                                        existing_frame_id=db.get_keyframe_frame_id(
+                                            media_id, candidate.shot_index, kf_index
+                                        ),
+                                    ),
+                                    candidate.selection_version,
+                                ))
+                            if needs_adaptive_selection:
+                                db.set_video_keyframe_selection_status(
+                                    media_id, adaptive_selector_version, "in_progress"
+                                )
+                                adaptive_run_started = True
+                        requests_with_versions.sort(key=lambda item: (
+                            item[0].requested_timestamp, item[0].shot_index, item[0].keyframe_index
+                        ))
+                        frame_requests = [request for request, _version in requests_with_versions]
+                        frame_version_by_slot = {
+                            (request.shot_index, request.keyframe_index): version
+                            for request, version in requests_with_versions
+                        }
+                        cache_dir = getattr(config, "video_frame_cache_dir", None)
+                        if cache_dir is None:
+                            models_dir = getattr(
+                                config, "models_dir", Path(config.sqlite_path).parent / "models"
+                            )
+                            cache_dir = Path(models_dir) / "video_frames"
+                        frame_cache = VideoFrameCache(
+                            db,
+                            cache_dir,
+                            int(getattr(config, "video_frame_cache_budget_mb", 1024)),
+                        )
+                        for extracted in frame_cache.extract_batch(media_id, p, frame_requests, stop_event):
+                                s_idx = extracted.request.shot_index
+                                k_idx = extracted.request.keyframe_index
+                                t_sec = extracted.request.requested_timestamp
+                                slot = (s_idx, k_idx)
+                                selection_version = frame_version_by_slot[slot]
+                                is_adaptive_request = slot in adaptive_requests
+                                if extracted.reference is None:
+                                    if is_adaptive_request:
+                                        adaptive_error = extracted.error or "KeyframeDecodeError"
                                     if needs_objects:
-                                        video_object_error = video_object_error or "KeyframeDecodeError"
+                                        video_object_error = video_object_error or extracted.error or "KeyframeDecodeError"
                                     if needs_faces:
-                                        video_face_error = video_face_error or "KeyframeDecodeError"
+                                        video_face_error = video_face_error or extracted.error or "KeyframeDecodeError"
                                     continue
+                                if is_adaptive_request:
+                                    adaptive_success_count += 1
+                                try:
+                                    img = frame_cache.load_image(extracted.reference)
+                                except (OSError, ValueError):
+                                    if is_adaptive_request:
+                                        adaptive_error = "KeyframeCacheError"
+                                    if needs_objects:
+                                        video_object_error = video_object_error or "KeyframeCacheError"
+                                    if needs_faces:
+                                        video_face_error = video_face_error or "KeyframeCacheError"
+                                    continue
+                                actual_t_sec = extracted.reference.actual_timestamp
                                 existing_keyframe_id = db.get_keyframe_id(media_id, s_idx, k_idx)
+                                existing_frame = (
+                                    db.get_video_keyframe_for_frame_id(media_id, extracted.reference.frame_id)
+                                    if is_adaptive_request else None
+                                )
+                                if (
+                                    is_adaptive_request and existing_frame is not None
+                                    and (existing_frame["shot_index"], existing_frame["kf_index"]) != slot
+                                ):
+                                    # The frame is already represented by an older policy; keep
+                                    # the existing row and its intelligence rather than duplicate it.
+                                    continue
                                 if needs_video_embeddings or existing_keyframe_id is None:
                                     vec_kf = embedder.image_embed([img])[0]
                                     kf_emb_pairs.append((s_idx, k_idx, vec_kf))
@@ -1929,7 +2126,9 @@ def run_index(config, stop_event=None):
                                         log.warning("Object detection failed for keyframe {}:{} ({})", s_idx, k_idx, video_object_error)
                                 
                                 # Per-keyframe face detection
-                                if face_recognizer and needs_faces:
+                                if face_recognizer and (
+                                    needs_faces or (is_adaptive_request and existing_keyframe_id is None)
+                                ):
                                     # Track that we're processing this video with face detection
                                     # (only count once per video, not per keyframe)
                                     if s_idx == 0 and k_idx == 0:
@@ -1969,7 +2168,7 @@ def run_index(config, stop_event=None):
                                         log.warning("Face detection failed for keyframe {}:{} ({})", s_idx, k_idx, video_face_error)
                                 
                                 # Metadata row for SQLite
-                                gps_payload = sample_video_gps_at_timestamp(video_gps_samples, float(t_sec)) if video_gps_samples else None
+                                gps_payload = sample_video_gps_at_timestamp(video_gps_samples, float(actual_t_sec)) if video_gps_samples else None
                                 keyframe_place = None
                                 if gps_payload and gps_payload.get("gps_lat") is not None and gps_payload.get("gps_lon") is not None:
                                     cache_key = (
@@ -1987,9 +2186,12 @@ def run_index(config, stop_event=None):
                                 keyframe_entries.append({
                                     "shot_index": int(s_idx),
                                     "kf_index": int(k_idx),
-                                    "timestamp": float(t_sec),
-                                    "shot_start": float(shot[0]),
-                                    "shot_end": float(shot[1]),
+                                    "timestamp": float(actual_t_sec),
+                                    "requested_timestamp": float(t_sec),
+                                    "frame_id": extracted.reference.frame_id,
+                                    "selection_version": selection_version,
+                                    "shot_start": float(shots[s_idx][0]),
+                                    "shot_end": float(shots[s_idx][1]),
                                     "tags": keyframe_tags,
                                     "gps_lat": gps_payload.get("gps_lat") if gps_payload else None,
                                     "gps_lon": gps_payload.get("gps_lon") if gps_payload else None,
@@ -2035,6 +2237,22 @@ def run_index(config, stop_event=None):
                             log.warning(f"No valid keyframes extracted from {len(shots)} shots")
                             if needs_embeddings:
                                 embed_fail += 1
+
+                        if needs_adaptive_selection:
+                            adaptive_complete = (
+                                adaptive_error is None
+                                and adaptive_success_count == len(adaptive_requests)
+                            )
+                            db.set_video_keyframe_selection_status(
+                                media_id,
+                                adaptive_selector_version,
+                                "completed" if adaptive_complete else "failed",
+                                selected_count=adaptive_success_count,
+                                error_type=None if adaptive_complete else (
+                                    adaptive_error or "IncompleteAdaptiveFrameSet"
+                                ),
+                            )
+                            adaptive_run_started = False
 
                         if needs_faces:
                             db.set_pipeline_status(
@@ -2138,6 +2356,10 @@ def run_index(config, stop_event=None):
                 except Exception as e:
                     embed_fail += 1
                     error_type = type(e).__name__
+                    if adaptive_run_started:
+                        db.set_video_keyframe_selection_status(
+                            media_id, adaptive_selector_version, "failed", error_type=error_type
+                        )
                     if needs_objects:
                         db.set_pipeline_status(
                             media_id, "object_detection", "failed",

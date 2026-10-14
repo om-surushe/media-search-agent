@@ -51,6 +51,61 @@ class SearchResponse(BaseModel):
     semantic_search_available: bool = True
     semantic_search_message: str | None = None
 
+
+class KeyframePreviewFrame(BaseModel):
+    timestamp: float
+    change_percent: float
+    reason: str
+    image_data_url: str
+
+
+class KeyframeFrameCacheTestFrame(BaseModel):
+    requested_timestamp: float
+    actual_timestamp: Optional[float] = None
+    frame_id: Optional[str] = None
+    checksum_sha256: Optional[str] = None
+    reused: bool = False
+    error: Optional[str] = None
+
+
+class KeyframeFrameCacheTest(BaseModel):
+    selected_frames: int
+    tested_frames: int
+    cache_reuse_hits: int
+    frames: List[KeyframeFrameCacheTestFrame]
+    error: Optional[str] = None
+
+
+class AdaptiveKeyframeTestFrame(BaseModel):
+    shot_index: int
+    timestamp: float
+    reason: str
+    change_percent: float
+    selection_version: str
+    image_data_url: Optional[str] = None
+
+
+class AdaptiveKeyframeTest(BaseModel):
+    shots_detected: int
+    midpoint_frames: int
+    adaptive_frames: int
+    long_shot_coverage_enabled: bool
+    frames: List[AdaptiveKeyframeTestFrame]
+    error: Optional[str] = None
+
+
+class KeyframePreviewResponse(BaseModel):
+    duration: float
+    frames_scanned: int
+    change_frames: int
+    slow_change_frames: int
+    omitted_frames: int
+    sensitivity_percent: float
+    frames: List[KeyframePreviewFrame]
+    frame_cache_test: Optional[KeyframeFrameCacheTest] = None
+    adaptive_selection_test: Optional[AdaptiveKeyframeTest] = None
+
+
 class TranscriptSearchRequest(BaseModel):
     q: str = Field(min_length=1, max_length=512)
     limit: int = Field(default=20, ge=1, le=100)

@@ -485,6 +485,8 @@ def build_video_payload(row: Dict[str, Any]) -> Dict[str, Any]:
         "type": "video",
         "path": row.get("path"),
         "timestamp": float(row.get("timestamp") or 0.0),
+        "frame_id": row.get("frame_id"),
+        "selection_version": row.get("selection_version", "midpoint-v1"),
         "shot_id": int(row["shot_index"]),
         "shot_start": float(row.get("shot_start") or 0.0),
         "shot_end": float(row.get("shot_end") or 0.0),

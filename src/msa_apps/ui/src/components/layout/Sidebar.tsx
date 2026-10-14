@@ -1,5 +1,5 @@
 import { NavLink } from 'react-router-dom'
-import { Search, Images, Users, Activity, Settings, Sun, Moon, FolderOpen } from 'lucide-react'
+import { Search, Images, Users, Activity, Settings, Sun, Moon, FolderOpen, Film } from 'lucide-react'
 import { useTheme } from '../../lib/theme'
 
 const NAV_ITEMS = [
@@ -8,6 +8,7 @@ const NAV_ITEMS = [
   { to: '/people',   label: 'People',   Icon: Users    },
   { to: '/collections', label: 'Collections', Icon: FolderOpen },
   { to: '/indexer',  label: 'Indexer',  Icon: Activity },
+  { to: '/keyframes', label: 'Keyframes', Icon: Film },
 ]
 
 const UTILITY_ITEMS = [

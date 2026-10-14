@@ -66,6 +66,8 @@ PAYLOAD_SOURCES: dict[str, dict[str, frozenset]] = {
         "type": CONST,
         "path": _MEDIA_PATH_CELLS,
         "timestamp": frozenset({("video_keyframes", "timestamp")}),
+        "frame_id": frozenset({("video_keyframes", "frame_id")}),
+        "selection_version": frozenset({("video_keyframes", "selection_version")}),
         "shot_id": frozenset({("video_keyframes", "shot_index")}),
         "shot_start": frozenset({("video_keyframes", "shot_start")}),
         "shot_end": frozenset({("video_keyframes", "shot_end")}),
@@ -139,6 +141,8 @@ STAMP_RULES: dict[tuple[str, str], str] = {
     ("tag", "name"): "media_superset",
     # keyframe-level cells → that video's keyframe rows
     ("video_keyframes", "timestamp"): "keyframe_rows",
+    ("video_keyframes", "frame_id"): "keyframe_rows",
+    ("video_keyframes", "selection_version"): "keyframe_rows",
     ("video_keyframes", "shot_index"): "keyframe_rows",
     ("video_keyframes", "shot_start"): "keyframe_rows",
     ("video_keyframes", "shot_end"): "keyframe_rows",

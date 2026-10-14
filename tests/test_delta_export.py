@@ -1875,7 +1875,7 @@ class _DeltaFakeQdrant:
 
 def _patch_pipeline(monkeypatch, pipeline, qdrant: _DeltaFakeQdrant):
     monkeypatch.setattr(pipeline, "resolve_for_access", lambda p: p)
-    monkeypatch.setattr(pipeline, "get_exif_basic", lambda _p: {})
+    monkeypatch.setattr(pipeline, "get_exif_basic_result", lambda _p: ({}, True))
     monkeypatch.setattr(pipeline, "write_thumbnail", lambda *_a, **_k: None)
     monkeypatch.setattr(pipeline, "ClipEmbedder", _FakeClipEmbedder)
     monkeypatch.setattr(pipeline, "sha256_of_file", lambda p: "sha-" + Path(p).name)

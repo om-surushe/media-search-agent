@@ -102,6 +102,9 @@ def _run_captioning_worker(
     if video_ids is not None:
         for video_id in video_ids:
             command.extend(("--video-id", video_id))
+    frame_cache_dir = getattr(config, "video_frame_cache_dir", None)
+    if video_scenes and frame_cache_dir is not None:
+        command.extend(("--frame-cache-dir", str(frame_cache_dir)))
     for root in roots:
         command.extend(("--source-root", str(root)))
     if os.environ.get("MSA_INDEXER_STOP_FILE"):

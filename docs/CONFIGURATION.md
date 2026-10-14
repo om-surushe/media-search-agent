@@ -150,6 +150,36 @@ The defaults work well across most consumer video. Lower
 seeing too many fragmentary shots. When detection is disabled, videos with
 known duration use the existing synthetic full-video shot fallback.
 
+Selected frames are stored as reusable, normalized renditions under the app-owned
+cache. The cache is evictable; SQLite retains frame identity and timing metadata.
+
+```yaml
+video_frame_cache_dir: "video_frames"
+video_frame_cache_budget_mb: 1024
+```
+
+The directory resolves under the platform cache root (or `MSA_CACHE_DIR`). The
+budget is a soft limit while a frame is being consumed; older renditions are
+removed least-recently-used as new frames are written. Cache removal never
+removes source media, captions, detections, embeddings, or frame identity.
+
+Adaptive sampling is opt-in and additive: the current midpoint-per-shot rows
+remain available. Visual-change candidates are limited per shot; optional
+long-shot coverage only adds frames when the decoded image remains novel.
+Selector versions are recorded in SQLite, and rebuilds append a new version
+instead of deleting prior keyframes or derived search data. These flags remain
+off by default until benchmark and search/seek validation is accepted.
+
+```yaml
+adaptive_video_keyframes_enabled: false
+adaptive_keyframe_sensitivity_percent: 8.0
+long_shot_coverage_enabled: false
+long_shot_min_duration_seconds: 30.0
+long_shot_interval_seconds: 10.0
+```
+
+`long_shot_coverage_enabled` has no effect unless adaptive keyframes are enabled.
+
 ## Speech transcription
 
 Transcription is opt-in because it adds model storage and CPU/GPU work during video indexing.

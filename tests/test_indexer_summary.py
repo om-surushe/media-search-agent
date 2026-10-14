@@ -110,7 +110,16 @@ class _FakeSQLiteStore(_FingerprintNoOpsMixin):
         return 0
 
     def get_shots_for_video(self, _media_id: str):
-        return [{"t_start": 0.0, "t_end": 1.0}]
+        return [{"shot_index": 0, "t_start": 0.0, "t_end": 1.0}]
+
+    def get_video_keyframe_metadata(self, _media_id, _shot_index, _kf_index):
+        return {
+            "timestamp": 0.5, "requested_timestamp": 0.5,
+            "selection_version": "midpoint-v1", "frame_id": "test-frame",
+        }
+
+    def get_keyframe_frame_id(self, _media_id, _shot_index, _kf_index):
+        return "test-frame"
 
     def has_keyframes_for_video(self, _media_id: str) -> bool:
         return True
@@ -964,7 +973,15 @@ def test_unavailable_shot_detection_uses_synthetic_full_video_fallback(
     monkeypatch.setattr(pipeline, "ClipEmbedder", lambda *_args, **_kwargs: object())
     monkeypatch.setattr(pipeline, "get_video_meta_result", lambda *_args, **_kwargs: ({"duration": 5.0}, True))
     monkeypatch.setattr(pipeline, "write_video_thumbnail", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(pipeline, "extract_keyframes_from_shot", lambda *_args, **_kwargs: [])
+    class _NoFrames:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def extract_batch(self, _video_id, _path, requests, _stop_event=None):
+            for request in requests:
+                yield SimpleNamespace(request=request, reference=None, error="DecodeError")
+
+    monkeypatch.setattr(pipeline, "VideoFrameCache", _NoFrames)
     monkeypatch.setattr(pipeline, "_load_historical_perf", lambda _path: (0.0, 0.0, 0.0))
     monkeypatch.setattr(pipeline, "_emit_indexer_summary", lambda **_payload: None)
     monkeypatch.setattr(pipeline, "get_qdrant_export_version", lambda: None)
@@ -1044,10 +1061,34 @@ def test_video_detection_override_avoids_repeat_embedding_and_preserves_tags(tmp
     monkeypatch.setattr(pipeline, "ObjectDetector", _Detector)
     monkeypatch.setattr(pipeline, "get_video_meta_result", lambda *_args, **_kwargs: ({"duration": 5.0}, True))
     monkeypatch.setattr(pipeline, "write_video_thumbnail", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(
-        pipeline, "extract_keyframes_from_shot",
-        lambda *_args, **_kwargs: [(0.5, Image.new("RGB", (8, 8), color="white"))],
-    )
+    from msa_indexer.io.video_frames import make_frame_id
+
+    class _FakeFrameCache:
+        def __init__(self, store, *_args, **_kwargs):
+            self.store = store
+
+        def extract_batch(self, video_id, _path, requests, _stop_event=None):
+            for request in requests:
+                pts = round(request.requested_timestamp * 1000)
+                frame_id = make_frame_id(video_id, 0, pts, 1, 1000, None)
+                self.store.upsert_video_frame({
+                    "frame_id": frame_id, "video_id": video_id, "source_revision": video_id,
+                    "stream_index": 0, "pts": pts, "time_base_num": 1, "time_base_den": 1000,
+                    "frame_ordinal": None, "actual_timestamp": request.requested_timestamp,
+                    "frame_id_version": 1,
+                })
+                yield SimpleNamespace(
+                    request=request,
+                    reference=SimpleNamespace(
+                        frame_id=frame_id, actual_timestamp=request.requested_timestamp
+                    ),
+                    error=None
+                )
+
+        def load_image(self, _reference):
+            return Image.new("RGB", (8, 8), color="white")
+
+    monkeypatch.setattr(pipeline, "VideoFrameCache", _FakeFrameCache)
     monkeypatch.setattr(pipeline, "_load_historical_perf", lambda _path: (0.0, 0.0, 0.0))
     monkeypatch.setattr(pipeline, "_emit_indexer_summary", lambda **_payload: None)
     monkeypatch.setattr(pipeline, "get_qdrant_export_version", lambda: None)
@@ -1092,5 +1133,32 @@ def test_video_detection_override_avoids_repeat_embedding_and_preserves_tags(tmp
     assert len(detector_calls) == 1
 
     with sqlite3.connect(db_path) as conn:
-        tags = conn.execute("SELECT tags FROM video_keyframes").fetchone()[0]
+        tags = conn.execute("SELECT tags FROM video_keyframes WHERE kf_index=0").fetchone()[0]
     assert json.loads(tags) == ["dog"]
+
+    config.reprocess_embeddings = False
+    config.adaptive_video_keyframes_enabled = True
+    monkeypatch.setattr(
+        pipeline,
+        "select_adaptive_frames",
+        lambda *_args, **kwargs: [SimpleNamespace(
+            shot_index=0, timestamp=1.0, selection_version=kwargs["selection_version"]
+        )],
+    )
+    pipeline.run_index(config)
+    assert len(embed_calls) == 3
+    pipeline.run_index(config)  # A completed policy version is an incremental no-op.
+    assert len(embed_calls) == 3
+
+    with sqlite3.connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT kf_index, selection_version FROM video_keyframes ORDER BY kf_index"
+        ).fetchall()
+        state = conn.execute(
+            "SELECT status, selected_count FROM video_keyframe_selection_state "
+            "WHERE video_id=(SELECT video_id FROM video_keyframes LIMIT 1) "
+            "AND selector_version LIKE 'adaptive-v1:%'"
+        ).fetchone()
+    assert rows[0] == (0, "midpoint-v1")
+    assert rows[1][0] > 4000 and rows[1][1].startswith("adaptive-v1:")
+    assert state == ("completed", 1)

@@ -1,6 +1,6 @@
 # Implementation plan
 
-This plan is gated. Complete one stage, report actual results, and stop for user acceptance before starting another. Stages 0 and 1 are complete. The current authorized scope is Stage 2A only; stop for acceptance before Stage 2B or MCP work.
+This plan is gated. Complete approved work, report actual results, and stop for user review at the stated acceptance boundary. Stages 0 and 1 are complete. Stage 2A acceptance is pending. The user has explicitly authorized the standalone Stage 2C preview and the separate video-frame modernization A–D below; this does not accept Stage 2A or authorize Stage 2B or MCP work.
 
 ## Stage 0 — Audit and architecture (complete)
 
@@ -17,6 +17,25 @@ Added opt-in local Whisper transcription for videos: timestamped segments and mo
 Validation on Apple Silicon/macOS 26.6.2/Python 3.13.5: the pinned OpenAI Whisper base checkpoint downloaded once (145,262,807 bytes; SHA-256 `ed3a0b6b1c0edf879ad9b11b1af5a0e6ab5db9205f891f668f8b0e6c6326e34e`). A generated spoken-dialogue video transcribed to the expected phrase in 1.91 s on CPU with 716.3 MB peak process RSS; a second run was network-denied and searched SQLite successfully. Initial model setup (download + load) took 31.19 s. The source fixture's size, mtime, and SHA-256 were unchanged. A silent video produced `no_speech` without loading the model. Whisper's decoder cannot use this PyTorch MPS build, so macOS transcription deliberately uses CPU.
 
 Focused/regression command: `pytest -q tests/test_transcription.py tests/test_packaged_runtime_requirements.py tests/test_sqlite_store_embeddings.py tests/test_search_browse_api.py tests/test_query_engine.py tests/test_fingerprint_fastpath.py tests/test_config_roundtrip.py tests/test_settings_indexer_api.py tests/test_video_metadata_runtime.py tests/test_indexer_summary.py tests/test_pipeline_batch_commit.py` — 253 passed, 1 skipped, 1 warning. Broader `pytest -q` and `pytest -q -m 'not slow'` attempts timed out; they are not reported as passing. Await user acceptance before starting Stage 2B or MCP work.
+
+## Stage 2C — Interactive video change-frame preview (implementation complete; user acceptance pending)
+
+Build a local web page where a user uploads one video and inspects a chronological set of changing frames. Decode sequentially and compare every low-resolution grayscale frame with both its predecessor and the last selected frame. Select on a configurable changed-pixel threshold (default 8%), with a 0.25-second minimum spacing. A one-second coverage attempt is allowed only when the candidate is still visually novel; near-duplicates are skipped, so static scenes stay sparse. Cap previews at 2,000 frames and disclose omissions. This is a visual-change storyboard, not a semantic understanding model. Uploads are temporary, loopback-only, capped at 512 MiB, and deleted after analysis. An optional shared-frame-cache check uses a disposable SQLite database and bounded cache inside the upload's temporary directory, then deletes both; it does not touch the app's index/cache. Do not index the upload, persist its frames beyond the request, invoke AI models, or transmit media remotely.
+
+Validation: `tests/test_video_keyframe_preview_api.py tests/test_video_metadata_runtime.py tests/test_video_gps_runtime.py` — 20 passed; full UI suite — 20 files / 219 tests passed; `cd src/msa_apps/ui && npm run build` — passed. The active local API processed a generated six-second video: scanned all 90 source frames and selected 3 frames (initial plus 2 scene changes), skipping repeated static frames; the temporary upload was removed. No personal source media was used. Await user testing before further keyframe work.
+
+This stage is a user-authorized exploratory prototype and is independent of Stage 2A acceptance. It does not authorize Stage 2B or MCP work.
+
+## Video frame modernization — A → C → B → D (user-authorized)
+
+This is a separate video-indexing track, not Stage 2A speech transcription. Keep current PySceneDetect/midpoint indexing as the default until the user accepts benchmark/search evidence. Do not reindex the installed library or delete existing intelligence.
+
+- **A — Canonical frames/cache:** Implement stable PTS-based identities, actual decoded timestamps, normalized/checksummed renditions, bounded eviction, shared references for indexer/caption consumers, and focused isolated tests. Status: implemented; synthetic benchmark and timestamped-shot API validation completed.
+- **C — Safe versioned rebuilds:** Track selector status/version per video, retain existing midpoint rows and derived data, and append new policy output in disjoint keyframe slots. Failed builds remain retryable; no destructive cleanup. Status: implemented; versioned-slot and incremental-no-op tests pass.
+- **B — Adaptive representatives:** Add visual-change candidates per shot behind `adaptive_video_keyframes_enabled`; preserve midpoint rows. Status: implemented, off by default; selectable for disposable comparison in `/keyframes`.
+- **D — Long-shot coverage:** Add at most two novelty-gated gradual-change samples for shots meeting the configured duration threshold, separately gated by `long_shot_coverage_enabled`. Status: implemented, off by default; selectable for disposable comparison in `/keyframes`.
+
+Validation: focused video/pipeline suites — 62 passed, 4 skipped; storage/caption/delta/Qdrant-client regressions — 141 passed; settings/config tests — 86 passed; UI — 219 passed and production build passed. A broad non-slow Python run excluding `tests/real_media` is not clean: it also reports unrelated stale Qdrant test setup, incremental-ETA, and model-download-feedback failures; no full-suite success is claimed. A generated 12-second clip benchmark verified source-hash integrity and cache reuse (24 independent decoder opens vs. 1 grouped open, 16 cache hits), but grouped caching did not improve total elapsed time. See [Video frame indexing](VIDEO_INDEXING.md) for exact timings, module boundaries, limits, and manual checks. This track performs no full-library reindex and adds no dependencies. Selector-version rows are intentionally append-only; older results stay searchable, and pruning is deferred until rollback/history UX exists. All selector flags remain disabled in the checked-in config pending user review of representative local videos and search/seek results.
 
 ## Stage 2B — OCR (not started; requires approval)
 

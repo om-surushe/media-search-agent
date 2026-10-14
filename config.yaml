@@ -93,6 +93,14 @@ qdrant_path: "qdrant"
 thumb_dir: "data/thumbnails"
 face_thumb_dir: "data/face_thumbnails"
 models_dir: "models"
+video_frame_cache_dir: "video_frames"
+video_frame_cache_budget_mb: 1024
+# Both remain off until local benchmarks/user acceptance justify changing defaults.
+adaptive_video_keyframes_enabled: false
+adaptive_keyframe_sensitivity_percent: 8.0
+long_shot_coverage_enabled: false
+long_shot_min_duration_seconds: 30.0
+long_shot_interval_seconds: 10.0
 
 # ── Approximate nearest neighbor tuning ───────────────────────────────────────
 ann_method: "ivfflat"

@@ -31,6 +31,7 @@ __pycache__/
 *.pyc
 
 # Index artifacts
+index/.keyframe-preview/
 index/*.faiss
 index/*.faiss.*
 index/*.ids

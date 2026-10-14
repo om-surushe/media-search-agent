@@ -85,7 +85,7 @@ installs it serves the React UI directly in your browser at port 8000.
 | **ClipEmbedder** | Image and text encoder (CLIP, default `ViT-L-14` weights). Drives both indexing and search. |
 | **Object Detector** | RT-DETR (default `PekingU/rtdetr_r18vd`). Tags images and video keyframes. |
 | **Face Recognizer** | facenet-pytorch (MTCNN detector + InceptionResnetV1 / VGGFace2 embeddings). Detects faces and writes embeddings used for clustering and "find similar". |
-| **Video Shot Detector** | PySceneDetect content-aware shot boundary detection. Splits each video into shots, then samples representative keyframes per shot for the rest of the indexing pipeline. |
+| **Video Shot Detector** | PySceneDetect content-aware shot boundary detection. Splits each video into shots, then samples representative keyframes per shot for the rest of the indexing pipeline. Stable frame identity, cache reuse, opt-in selector versions, and validation are detailed in [Video frame indexing](VIDEO_INDEXING.md). |
 | **GPS Track Extractor** | Reads embedded GPS telemetry from action-cam videos (e.g. GoPro GPMF metadata tracks via `exiftool`). Per-keyframe coordinates align with the same shots picked by the shot detector, so a 10-shot clip ends up with up to 10 GPS points instead of one file-level coordinate. Stills use EXIF GPS as before. |
 | **SQLite** | Canonical store. Holds media metadata, tags, faces, people, and embeddings (as float32 BLOBs). WAL mode + per-batch commits. |
 | **Qdrant** | Vector index for fast nearest-neighbour search at query time. Embedded mode — stored on disk, no separate server. |

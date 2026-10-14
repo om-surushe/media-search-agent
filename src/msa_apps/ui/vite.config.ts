@@ -33,6 +33,7 @@ export default defineConfig(({ mode }) => {
         '/media':           apiOrigin,
         '/images':          apiOrigin,
         '/videos':          apiOrigin,
+        '/video-keyframes': apiOrigin,
         '/faces':           apiOrigin,
         '/people':          apiOrigin,
         '/indexer':         apiOrigin,

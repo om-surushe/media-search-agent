@@ -252,8 +252,32 @@ def test_video_scene_worker_reuses_one_provider_and_skips_completed_keyframes(st
         "source_name": "caption-test", "rel_path": video_path.name,
         "size_bytes": video_path.stat().st_size, "mime": "video/mp4",
     })
+    from msa_indexer.io.video_frames import FRAME_RENDITION_PROFILE, make_frame_id
+
+    frame_id = make_frame_id(video_id, 0, 2500, 1, 1000, None)
+    rendition_id = hashlib.sha256(
+        f"{frame_id}\\0{FRAME_RENDITION_PROFILE}".encode()
+    ).hexdigest()
+    frame_cache_dir = tmp_path / "video-frame-cache"
+    cached_image = frame_cache_dir / frame_id[:2] / f"{rendition_id}.jpg"
+    cached_image.parent.mkdir(parents=True)
+    Image.new("RGB", (4, 4), "white").save(cached_image, format="JPEG", quality=90)
+    with cached_image.open("rb") as cached_file:
+        cached_checksum = hashlib.file_digest(cached_file, "sha256").hexdigest()
+    store.upsert_video_frame({
+        "frame_id": frame_id, "video_id": video_id, "source_revision": video_id,
+        "stream_index": 0, "pts": 2500, "time_base_num": 1, "time_base_den": 1000,
+        "frame_ordinal": None, "actual_timestamp": 2.5, "frame_id_version": 1,
+    })
+    store.upsert_video_frame_rendition({
+        "rendition_id": rendition_id, "frame_id": frame_id,
+        "profile": FRAME_RENDITION_PROFILE,
+        "cache_relpath": f"{frame_id[:2]}/{rendition_id}.jpg",
+        "checksum_sha256": cached_checksum, "size_bytes": cached_image.stat().st_size,
+        "width": 4, "height": 4, "rotation_degrees": 0,
+    })
     store.add_keyframes(video_id, [
-        {"shot_index": 0, "kf_index": 0, "timestamp": 2.5, "shot_start": 0, "shot_end": 5},
+        {"shot_index": 0, "kf_index": 0, "timestamp": 2.5, "frame_id": frame_id, "shot_start": 0, "shot_end": 5},
         {"shot_index": 1, "kf_index": 0, "timestamp": 7.5, "shot_start": 5, "shot_end": 10},
     ])
     store.commit()
@@ -275,10 +299,14 @@ def test_video_scene_worker_reuses_one_provider_and_skips_completed_keyframes(st
 
     monkeypatch.setattr(script, "SmolVLM2Provider", FakeProvider)
     import msa_indexer.io.video as video
-    monkeypatch.setattr(video, "extract_frame_at_timestamp", lambda _path, _time: Image.new("RGB", (4, 4), "white"))
+    fallback_times = []
+    monkeypatch.setattr(
+        video, "extract_frame_at_timestamp",
+        lambda _path, timestamp: (fallback_times.append(timestamp) or Image.new("RGB", (4, 4), "white")),
+    )
     args = SimpleNamespace(
         database=store.path, source_root=[source_root], cache_dir=cache,
-        stop_file=None, video_id=[video_id], max_tokens=80,
+        frame_cache_dir=frame_cache_dir, stop_file=None, video_id=[video_id], max_tokens=80,
     )
 
     assert script._caption_video_scenes(args) == 0
@@ -288,6 +316,7 @@ def test_video_scene_worker_reuses_one_provider_and_skips_completed_keyframes(st
     assert rows == [(2.5, "Visible scene 1.", "completed"), (7.5, "Visible scene 2.", "completed")]
     assert len(set(seen)) == 1 and "single video frame" in seen[0]
     assert FakeProvider.loads == 1
+    assert fallback_times == [7.5]
 
     assert script._caption_video_scenes(args) == 0
     assert FakeProvider.loads == 1
