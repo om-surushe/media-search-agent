@@ -243,14 +243,16 @@ async def _lifespan(app: FastAPI):
             except Exception as _exc:
                 logger.warning("Could not resolve config for model setup: {}", _exc)
         _models_dir = getattr(_startup_cfg, 'models_dir', None) if _startup_cfg is not None else None
-        if _models_dir is not None:
+        if _models_dir is not None and not _search_browse_read_only():
             _setup_models.get_manager().start_if_needed(_models_dir)
+        elif _search_browse_read_only():
+            logger.info("Search/Browse read-only mode: skipping automatic model setup")
         # Reranker event ledger (ADR-012/013): build a best-effort LedgerWriter onto
         # app.state when msa_ranker is installed and event_logging is on. Absent package
         # or any failure → no writer → MSA behaves exactly as today.
         app.state.ledger_writer = None
         try:
-            if _LedgerWriter is not None and _startup_cfg is not None:
+            if _LedgerWriter is not None and _startup_cfg is not None and not _search_browse_read_only():
                 _rk = getattr(_startup_cfg, "ranker", None)
                 _logging_on = getattr(_rk, "event_logging", True) if _rk else True
                 if _logging_on:
@@ -280,6 +282,7 @@ async def _lifespan(app: FastAPI):
                 and _rk is not None
                 and getattr(_rk, "enable_learning_to_rank", False)
                 and getattr(_rk, "ltr_model_dir", None)
+                and not _search_browse_read_only()
             ):
                 _mdir = Path(_rk.ltr_model_dir).expanduser()
                 # `Ranker.load` RE-VALIDATES the full gate (beats_baseline + feature-version
@@ -422,6 +425,8 @@ def search(req: SearchRequest, request: Request, tasks: BackgroundTasks, qe = De
     # parameter (not shared engine state) so concurrent requests never race.
     results = qe.search(req.q, filters=filters, ranker=getattr(request.app.state, "ranker", None))
     query_context = getattr(results, "query_context", {})
+    semantic_search_available = query_context.pop("semantic_search_available", True)
+    semantic_search_message = query_context.pop("semantic_search_message", None)
     # Enrich results with GPS from SQLite
     try:
         S = _get_config(request)
@@ -471,6 +476,8 @@ def search(req: SearchRequest, request: Request, tasks: BackgroundTasks, qe = De
     return SearchResponse(
         results=[SearchItem(**{**r, "id": str(r["id"])}) for r in results],
         search_id=search_id,
+        semantic_search_available=semantic_search_available,
+        semantic_search_message=semantic_search_message,
     )
 
 
@@ -2266,6 +2273,10 @@ class _IndexerStart(_BaseModel):
     video_scene_captions_enabled: bool = False
 
 
+def _search_browse_read_only() -> bool:
+    return os.environ.get("MSA_SEARCH_BROWSE_READ_ONLY", "").strip().lower() in {"1", "true", "yes"}
+
+
 def _config_path(request: Request) -> str:
     # Prefer the explicit launcher-provided config path so installer builds do
     # not depend on uvicorn's working directory. Fall back to cwd/config.yaml in
@@ -2282,6 +2293,8 @@ def _venv_bin() -> str:
 @app.post("/indexer/start")
 def indexer_start(request: Request, body: Optional[_IndexerStart] = None):
     """Spawn msa-index run as a background subprocess."""
+    if _search_browse_read_only():
+        raise HTTPException(status_code=409, detail="Indexing is disabled in Search/Browse read-only mode.")
     try:
         result = indexer_manager.start(
             config_path=_config_path(request),
@@ -2319,8 +2332,8 @@ def indexer_stop():
 
 @app.get("/indexer/status")
 def indexer_status():
-    """Return current indexer state: idle | running | complete | stopped | error."""
-    return indexer_manager.get_status()
+    """Return current indexer state and whether indexing is disabled for this runtime."""
+    return {**indexer_manager.get_status(), "read_only_mode": _search_browse_read_only()}
 
 
 @app.get("/indexer/log")
@@ -2357,6 +2370,8 @@ def config_sources_get(request: Request):
 @app.post("/config/sources", status_code=201)
 def config_sources_add(body: _SourceAdd, request: Request):
     """Add a media source to config.yaml."""
+    if _search_browse_read_only():
+        raise HTTPException(status_code=409, detail="Source changes are disabled in Search/Browse read-only mode.")
     config_file = _config_path(request)
     try:
         ry = _ryaml()
@@ -2395,6 +2410,8 @@ def config_sources_add(body: _SourceAdd, request: Request):
 @app.delete("/config/sources/{source_name}")
 def config_sources_delete(source_name: str, request: Request):
     """Remove a media source from config.yaml by name."""
+    if _search_browse_read_only():
+        raise HTTPException(status_code=409, detail="Source changes are disabled in Search/Browse read-only mode.")
     config_file = _config_path(request)
     try:
         ry = _ryaml()
@@ -2849,7 +2866,10 @@ from msa_apps.search_api import setup_models as _setup_models  # noqa: E402
 
 @app.get("/api/setup/status")
 def get_setup_status(request: Request):
-    """Return whether all required model weights are present on disk."""
+    """Return readiness for the active runtime mode."""
+    if _search_browse_read_only():
+        # Search/Browse has model-free lexical paths; CLIP availability is reported per search.
+        return {"ready": True, "models": [], "read_only_mode": True}
     S = _get_config(request)
     models_dir: Path = S.models_dir
     manager = _setup_models.get_manager()
@@ -2889,7 +2909,7 @@ def get_setup_status(request: Request):
         }
         for mid, meta in _setup_models.MODEL_META.items()
     ]
-    return {"ready": all(present.values()), "models": models_out}
+    return {"ready": all(present.values()), "models": models_out, "read_only_mode": False}
 
 
 @app.post("/api/setup/retry", status_code=202)
@@ -2900,6 +2920,8 @@ def retry_setup(request: Request):
     that must never call ``start_if_needed``). Idempotent and safe: ``start_if_needed`` is a no-op
     when a download is already cleanly in flight or fully done, and only resets+restarts once every
     in-progress model has settled with at least one error."""
+    if _search_browse_read_only():
+        raise HTTPException(status_code=409, detail="Model downloads are disabled in Search/Browse read-only mode.")
     S = _get_config(request)
     _setup_models.get_manager().start_if_needed(S.models_dir)
     return {"status": "retrying"}
@@ -2958,7 +2980,7 @@ async def ws_indexer(websocket: WebSocket):
     await websocket.accept()
     try:
         while True:
-            status = indexer_manager.get_status()
+            status = {**indexer_manager.get_status(), "read_only_mode": _search_browse_read_only()}
             log_lines = indexer_manager.get_log_lines(tail=50)
             await websocket.send_json({
                 "type": "update",

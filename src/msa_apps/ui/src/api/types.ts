@@ -9,6 +9,12 @@ export interface SearchFilters {
   max_duration?: number
 }
 
+export interface VideoSceneSearchMatch {
+  keyframe_id: number
+  timestamp: number
+  caption_excerpt: string
+}
+
 export interface SearchItem {
   id: string
   path: string | null
@@ -29,12 +35,16 @@ export interface SearchItem {
   gps_lon: number | null
   place: string | null
   caption_excerpt?: string | null
+  scene_timestamp?: number | null
+  scene_matches?: VideoSceneSearchMatch[] | null
   why: string | null
 }
 
 export interface SearchResponse {
   results: SearchItem[]
   search_id?: string  // correlates a later /track/open back to this search (ADR-009)
+  semantic_search_available?: boolean
+  semantic_search_message?: string | null
 }
 
 export interface MediaItem {

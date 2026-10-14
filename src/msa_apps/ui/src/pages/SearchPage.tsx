@@ -93,6 +93,11 @@ export function SearchPage() {
           {submitted && isError && (
             <div className="text-red-500 dark:text-red-400 text-sm">Search failed. Is the API running?</div>
           )}
+          {data?.semantic_search_available === false && (
+            <div role="status" className="mb-3 rounded-lg bg-amber-100 dark:bg-amber-950 px-3 py-2 text-sm text-amber-900 dark:text-amber-200">
+              {data.semantic_search_message ?? 'Semantic visual search is unavailable; showing stored caption and scene matches.'}
+            </div>
+          )}
 
           {submitted && !isFetching && allResults?.length === 0 && (
             <div className="text-zinc-400 dark:text-zinc-500 text-sm">No results found for "{submitted}"</div>
@@ -119,6 +124,7 @@ export function SearchPage() {
                     date={item.date}
                     place={item.place}
                     captionExcerpt={item.caption_excerpt}
+                    sceneMatches={item.scene_matches}
                     onClick={() => { setSelected(item); setSelectedSearchId(searchId) }}
                   />
                 ))}

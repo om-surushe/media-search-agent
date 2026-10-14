@@ -61,6 +61,19 @@ describe('StartupGate', () => {
     expect(screen.queryByText('THE APP')).not.toBeInTheDocument() // app still gated behind the models
   })
 
+  it('opens Search/Browse in read-only mode without model weights', async () => {
+    stubHealth(
+      () => ({ status: 'ready' }),
+      () => ({ ready: true, read_only_mode: true, models: [] }),
+    )
+    render(
+      <StartupGate pollIntervalMs={5}>
+        <div>THE APP</div>
+      </StartupGate>,
+    )
+    expect(await screen.findByText('THE APP')).toBeInTheDocument()
+  })
+
   it('shows the branded provisioning stage, detail and pct from the responder', async () => {
     stubHealth(() => ({
       status: 'provisioning',

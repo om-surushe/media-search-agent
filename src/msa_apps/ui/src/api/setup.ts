@@ -15,6 +15,7 @@ export interface ModelInfo {
 export interface SetupStatus {
   ready: boolean
   models: ModelInfo[]
+  read_only_mode?: boolean
 }
 
 export interface ModelDownloadState {

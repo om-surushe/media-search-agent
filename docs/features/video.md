@@ -34,6 +34,15 @@ Click a video result and it opens in the detail drawer with the player
 file. The drawer shows the shot index, timestamp, EXIF/metadata,
 detected faces, and any GPS attached to that shot.
 
+## Stored video scene captions
+
+The Indexer can opt in to generating captions for the existing video keyframes
+using the local SmolVLM2 runtime. These are descriptions of individual still
+frames, not temporal summaries of the clip. Completed captions are stored in
+SQLite and searched lexically alongside visual search; a matching result shows
+its timestamp and opens paused at that scene. Searching reads the stored text
+only and does not run inference.
+
 ## Local speech transcripts
 
 Speech transcription is opt-in (`enable_speech_transcription: true`). The indexer
@@ -113,8 +122,10 @@ list.
   shot detector picks, but those keyframes are heavily weighted in the
   search index. If a single video is dominating your results, raising
   the threshold slider usually fixes it.
-- **No OCR or generated captions.** Stage 2A adds speech transcripts only;
-  OCR, MCP integration, and other Stage 2 work remain out of scope.
+- **No OCR or temporal video understanding from still captions.** Video scene
+  captions describe sampled keyframes individually. Speech transcription is a
+  separate, opt-in text source; neither source identifies who is speaking on
+  screen or infers events between frames.
 
 For the indexing pipeline at the architectural level — shot detector,
 GPS extractor, embedding flow — see

@@ -7,6 +7,7 @@ export interface IndexerStatus {
   finished_at: string | null
   elapsed_seconds: number | null
   return_code: number | null
+  read_only_mode?: boolean
   summary?: IndexerRunSummary | null
 }
 
@@ -120,6 +121,12 @@ export async function stopIndexer(): Promise<void> {
     const err = await res.json().catch(() => ({ detail: res.statusText }))
     throw new Error(err.detail ?? 'Failed to stop indexer')
   }
+}
+
+export async function getIndexerStatus(): Promise<IndexerStatus> {
+  const res = await fetch(apiUrl('/indexer/status'))
+  if (!res.ok) throw new Error(res.statusText)
+  return res.json()
 }
 
 export async function getIndexStats(): Promise<IndexStats> {

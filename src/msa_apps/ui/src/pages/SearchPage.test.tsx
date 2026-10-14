@@ -106,6 +106,65 @@ describe('SearchPage', () => {
     expect(calls.some(([url]) => String(url) === '/track/open')).toBe(false)
   })
 
+  it('labels lexical results when semantic visual search is unavailable', async () => {
+    const searchResult = {
+      id: 'lexical-video', path: '/tmp/clip.mp4', thumbnail: null, score: null,
+      tags: [], type: 'video', timestamp: 6.8, shot_id: 0, date: null,
+      gps_lat: null, gps_lon: null, place: null, caption_excerpt: 'people in pink shirts',
+      why: 'Video scene caption match',
+      scene_matches: [{ keyframe_id: 1, timestamp: 6.8, caption_excerpt: 'people in pink shirts' }],
+    }
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const body = String(input) === '/search'
+        ? { results: [searchResult], search_id: null, semantic_search_available: false,
+            semantic_search_message: 'Semantic visual search is unavailable; showing stored caption and scene matches.' }
+        : []
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(body) })
+    }))
+    renderPage()
+    fireEvent.change(screen.getByPlaceholderText(/describe what you're looking for/i), { target: { value: 'pink shirts' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Search' }))
+    expect(await screen.findByRole('status')).toHaveTextContent('Semantic visual search is unavailable')
+    expect(screen.getByTitle('6.8s · people in pink shirts')).toBeInTheDocument()
+  })
+
+  it('shows multiple timestamped scene matches and opens the video at the best scene', async () => {
+    const searchResult = {
+      id: 'video-match', path: '/tmp/clip.mp4', thumbnail: null, score: null,
+      tags: [], type: 'video', timestamp: 2.0, scene_timestamp: 6.8, shot_id: 0,
+      date: null, gps_lat: null, gps_lon: null, place: null,
+      caption_excerpt: 'people wearing pink shirts', why: 'Video scene caption match',
+      scene_matches: [
+        { keyframe_id: 11, timestamp: 6.8, caption_excerpt: 'people wearing pink shirts' },
+        { keyframe_id: 12, timestamp: 18.2, caption_excerpt: 'pink shirts near a window' },
+      ],
+    }
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      const body = url === '/search' ? { results: [searchResult], search_id: null }
+        : url.includes('/intelligence') ? null : []
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(body) })
+    }))
+    const { container } = renderPage()
+    fireEvent.change(screen.getByPlaceholderText(/describe what you're looking for/i), { target: { value: 'pink shirts' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Search' }))
+
+    const firstScene = await screen.findByTitle('6.8s · people wearing pink shirts')
+    expect(screen.getByTitle('18.2s · pink shirts near a window')).toBeInTheDocument()
+    fireEvent.click(firstScene.closest('button')!)
+
+    const video = container.querySelector('video')!
+    let currentTime = 0
+    Object.defineProperty(video, 'readyState', { configurable: true, value: 1 })
+    Object.defineProperty(video, 'currentTime', { configurable: true, get: () => currentTime, set: value => { currentTime = value } })
+    const pause = vi.spyOn(video, 'pause').mockImplementation(() => {})
+    const play = vi.spyOn(video, 'play').mockResolvedValue(undefined)
+    fireEvent.loadedMetadata(video)
+    expect(currentTime).toBe(6.8)
+    expect(pause).toHaveBeenCalled()
+    expect(play).not.toHaveBeenCalled()
+  })
+
   describe('indexer phase-aware banner (M-8/S-2)', () => {
     it('does not show a banner when indexer is idle', async () => {
       MockWebSocket.pendingMessage = idleUpdate

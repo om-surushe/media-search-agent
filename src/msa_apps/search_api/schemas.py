@@ -14,6 +14,12 @@ class SearchFilters(BaseModel):
 class SearchRequest(BaseModel):
     q: str
     filters: Optional[SearchFilters] = None
+class VideoSceneSearchMatch(BaseModel):
+    keyframe_id: int
+    timestamp: float
+    caption_excerpt: str
+
+
 class SearchItem(BaseModel):
     id: str
     path: str | None
@@ -33,11 +39,15 @@ class SearchItem(BaseModel):
     gps_lat: Optional[float] = None  # EXIF latitude (decimal degrees)
     gps_lon: Optional[float] = None  # EXIF longitude (decimal degrees)
     place: Optional[str] = None  # Human-readable place (e.g., "San Jose, California, US")
-    caption_excerpt: Optional[str] = None  # Present when stored image text matched the query
+    caption_excerpt: Optional[str] = None  # Present when stored caption text matched the query
+    scene_timestamp: Optional[float] = None
+    scene_matches: Optional[List[VideoSceneSearchMatch]] = None
     why: str | None
 class SearchResponse(BaseModel):
     results: List[SearchItem]
     search_id: Optional[str] = None  # correlates opens back to this search (ADR-009)
+    semantic_search_available: bool = True
+    semantic_search_message: str | None = None
 
 class TranscriptSearchRequest(BaseModel):
     q: str = Field(min_length=1, max_length=512)

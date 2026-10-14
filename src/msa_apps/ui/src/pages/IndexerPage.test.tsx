@@ -155,6 +155,14 @@ describe('IndexerPage', () => {
       expect(screen.getByRole('button', { name: /run indexer/i })).toBeTruthy()
     })
 
+    it('hides indexing controls in Search/Browse read-only mode', async () => {
+      mockFetch({ '/indexer/status': { status: 'idle', read_only_mode: true } })
+      renderPage()
+      await waitFor(() => expect(screen.getByRole('status').textContent).toContain('Indexing and source changes are disabled'))
+      expect(screen.queryByRole('button', { name: /run indexer/i })).toBeNull()
+      expect(screen.queryByText('Main library')).toBeNull()
+    })
+
     it('shows Running and Stop when WS reports running', async () => {
       MockWebSocket.pendingMessage = runningUpdate
       renderPage()

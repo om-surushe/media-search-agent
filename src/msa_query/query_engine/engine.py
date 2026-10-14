@@ -5,6 +5,10 @@ from msa_query.embeddings.text_encoder import TextEncoder
 from msa_query.query_engine.retrievers import Retriever
 from msa_query.query_engine.filters import apply_filters
 from msa_query.query_engine.image_caption_search import search_image_captions
+from msa_query.query_engine.video_scene_search import (
+    merge_video_scene_matches,
+    search_video_scene_captions,
+)
 from msa_query.query_engine.rerankers import score_breakdown
 from msa_query.config import settings
 from msa_query.storage.db import connect_readonly
@@ -539,14 +543,16 @@ class QueryEngine:
     def __init__(
         self,
         retriever: Retriever,
-        text_encoder: TextEncoder,
+        text_encoder: TextEncoder | None,
         sqlite_path: str | Path | None = None,
         search_score_trace: bool = False,
+        semantic_fallback_on_error: bool = False,
     ):
         self.retriever = retriever
         self.text_encoder = text_encoder
         self.sqlite_path = Path(sqlite_path) if sqlite_path is not None else None
         self.search_score_trace = search_score_trace
+        self.semantic_fallback_on_error = semantic_fallback_on_error
     
     def search(
         self, q: str, filters: Dict[str, Any] | None = None, ranker: Any = None
@@ -618,8 +624,26 @@ class QueryEngine:
                     f"inferred_people={query_parts['inferred_people']!r} "
                     f"inferred_date_filter={date_parts['date_filter']!r}"
                 )
-            # 1) embed query
-            qvec = self.text_encoder.encode(search_text)
+            # 1) Use CLIP when available; read-only search can fall back to stored text.
+            semantic_search_available = self.text_encoder is not None
+            semantic_search_message = None
+            qvec = None
+            if self.text_encoder is not None:
+                try:
+                    qvec = self.text_encoder.encode(search_text)
+                except Exception as exc:
+                    if not self.semantic_fallback_on_error:
+                        raise
+                    logger.warning("CLIP search unavailable; using stored-text matches: {}", exc)
+                    semantic_search_available = False
+            elif not self.semantic_fallback_on_error:
+                raise RuntimeError("A text encoder is required for semantic search")
+            if not semantic_search_available:
+                semantic_search_message = (
+                    "Semantic visual search is unavailable; showing stored caption and scene matches."
+                )
+            query_context["semantic_search_available"] = semantic_search_available
+            query_context["semantic_search_message"] = semantic_search_message
 
             # 2) Build Qdrant-native filter if tags are specified
             qdrant_filter = None
@@ -633,37 +657,38 @@ class QueryEngine:
             hits_cap: List[Dict[str, Any]] = []
             hits_asr: List[Dict[str, Any]] = []
 
-            # Try image collection (primary)
-            try:
-                hits_img = self.retriever.search(
-                    settings.vector_collection_image, qvec, k=settings.retrieval_top_k, query_filter=qdrant_filter
-                )
-            except Exception as e:
-                logger.warning(f"Could not search image collection '{settings.vector_collection_image}': {e}")
+            if qvec is not None:
+                # Try image collection (primary)
+                try:
+                    hits_img = self.retriever.search(
+                        settings.vector_collection_image, qvec, k=settings.retrieval_top_k, query_filter=qdrant_filter
+                    )
+                except Exception as e:
+                    logger.warning(f"Could not search image collection '{settings.vector_collection_image}': {e}")
 
-            # Try video keyframes collection
-            try:
-                hits_vid = self.retriever.search(
-                    settings.vector_collection_video, qvec, k=settings.retrieval_top_k, query_filter=qdrant_filter
-                )
-            except Exception as e:
-                logger.info(f"Video collection '{settings.vector_collection_video}' not available: {e}")
+                # Try video keyframes collection
+                try:
+                    hits_vid = self.retriever.search(
+                        settings.vector_collection_video, qvec, k=settings.retrieval_top_k, query_filter=qdrant_filter
+                    )
+                except Exception as e:
+                    logger.info(f"Video collection '{settings.vector_collection_video}' not available: {e}")
 
-            # Try caption collection (optional for now)
-            try:
-                hits_cap = self.retriever.search(
-                    settings.vector_collection_caption, qvec, k=settings.retrieval_top_k, query_filter=qdrant_filter
-                )
-            except Exception as e:
-                logger.info(f"Caption collection '{settings.vector_collection_caption}' not available: {e}")
+                # Try caption collection (optional for now)
+                try:
+                    hits_cap = self.retriever.search(
+                        settings.vector_collection_caption, qvec, k=settings.retrieval_top_k, query_filter=qdrant_filter
+                    )
+                except Exception as e:
+                    logger.info(f"Caption collection '{settings.vector_collection_caption}' not available: {e}")
 
-            # Try ASR collection (optional for now)
-            try:
-                hits_asr = self.retriever.search(
-                    settings.vector_collection_asr, qvec, k=settings.retrieval_top_k, query_filter=qdrant_filter
-                )
-            except Exception as e:
-                logger.info(f"ASR collection '{settings.vector_collection_asr}' not available: {e}")
+                # Try ASR collection (optional for now)
+                try:
+                    hits_asr = self.retriever.search(
+                        settings.vector_collection_asr, qvec, k=settings.retrieval_top_k, query_filter=qdrant_filter
+                    )
+                except Exception as e:
+                    logger.info(f"ASR collection '{settings.vector_collection_asr}' not available: {e}")
 
             logger.debug(
                 f"Retriever hits: img={len(hits_img)} vid={len(hits_vid)} cap={len(hits_cap)} asr={len(hits_asr)}"
@@ -699,6 +724,7 @@ class QueryEngine:
                         )
 
             caption_hits = []
+            scene_hits = []
             if sqlite_conn is not None:
                 try:
                     caption_hits = search_image_captions(
@@ -706,6 +732,19 @@ class QueryEngine:
                     )
                 except sqlite3.Error as exc:
                     logger.warning("Stored image-caption search unavailable: {}", exc)
+                try:
+                    scene_hits = search_video_scene_captions(
+                        sqlite_conn, search_text, limit=settings.rerank_top_k,
+                        filters=inferred_filters,
+                    )
+                except sqlite3.Error as exc:
+                    logger.warning("Stored video-scene search unavailable: {}", exc)
+                if scene_hits and inferred_filters:
+                    if inferred_filters.get("place"):
+                        _enrich_places(sqlite_conn, scene_hits)
+                    if inferred_filters.get("people") or query_parts["inferred_people"]:
+                        _enrich_people(sqlite_conn, scene_hits)
+                    scene_hits = apply_filters(scene_hits, inferred_filters)
 
             candidate_by_id = {str(m.get("id")): m for m in candidates if m.get("id") is not None}
             for hit in caption_hits:
@@ -868,6 +907,10 @@ class QueryEngine:
                     "why": f"Caption match: {excerpt}",
                 })
                 returned_ids.add(media_id)
+
+            # Stored scene text is a deterministic lexical supplement: it never changes
+            # visual scores, and merge_video_scene_matches keeps only one card per video.
+            results = merge_video_scene_matches(results, scene_hits)
 
             logger.info(
                 f"Search complete results={len(results)} top_sources={[m.get('source') for m in ranked[:5]]}"

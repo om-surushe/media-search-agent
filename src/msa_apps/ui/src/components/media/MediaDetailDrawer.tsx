@@ -5,6 +5,7 @@ import { faceThumbnailUrl, getAssetIntelligence, imageUrl, videoUrl } from '../.
 import { trackOpen } from '../../api/search'
 import { FaceStrip } from './FaceStrip'
 import { cn } from '../../lib/utils'
+import type { VideoSceneSearchMatch } from '../../api/types'
 
 interface DrawerItem {
   id: string
@@ -23,6 +24,8 @@ interface DrawerItem {
   tags?: string[] | null
   why?: string | null
   timestamp?: number | null
+  scene_timestamp?: number | null
+  scene_matches?: VideoSceneSearchMatch[] | null
   path?: string | null
   // People page: similarity score from face search (0–1)
   similarity?: number | null
@@ -143,11 +146,13 @@ export function MediaDetailDrawer({ item, onClose, searchId }: MediaDetailDrawer
   }
 
   useEffect(() => {
-    pendingVideoSeekRef.current = item?.type === 'video' ? item.timestamp ?? null : null
-    setSelectedKeyframeId(null)
+    pendingVideoSeekRef.current = item?.type === 'video'
+      ? item.scene_timestamp ?? item.scene_matches?.[0]?.timestamp ?? item.timestamp ?? null
+      : null
+    setSelectedKeyframeId(item?.scene_matches?.[0]?.keyframe_id ?? null)
     setVideoError(null)
     applyPendingVideoSeek()
-  }, [item?.id, item?.type, item?.timestamp])
+  }, [item?.id, item?.type, item?.timestamp, item?.scene_timestamp, item?.scene_matches?.[0]?.timestamp, item?.scene_matches?.[0]?.keyframe_id])
 
   // Close on Escape
   useEffect(() => {

@@ -381,15 +381,16 @@ development services before creating another staging stack. Automated tests
 must still follow the isolation rules in `AGENTS.md`: temporary databases and
 configs, copied fixtures, and no access to the installed personal app's state.
 
-Identify the active database and model locations from the API rather than
-copying a temporary path into notes or scripts:
+After confirming the listener is the development API, identify its active
+database and model locations rather than copying temporary paths into notes:
 
 ```bash
-curl -fsS http://127.0.0.1:8502/diagnostics | python3 -c '
-import json, sys
-p = json.load(sys.stdin)
-for key in ("config_file", "sqlite_path", "models_dir", "log_dir"):
-    print(f"{key}={p.get(key)}")
+curl -fsS http://127.0.0.1:8502/diagnostics | node -e '
+let s = ""; process.stdin.on("data", d => s += d).on("end", () => {
+  const p = JSON.parse(s);
+  for (const key of ["config_file", "sqlite_path", "models_dir", "log_dir"])
+    console.log(`${key}=${p[key]}`);
+});
 '
 ```
 
@@ -399,25 +400,88 @@ active development API process for the caption runtime settings:
 
 ```bash
 API_PID="$(lsof -nP -t -iTCP:8502 -sTCP:LISTEN | head -n 1)"
-ps eww -p "$API_PID" -o command= | grep -oE \
-  'MSA_(CONFIG_PATH|DATA_DIR|CACHE_DIR|LOG_DIR|CAPTION_PYTHON|CAPTION_CACHE_DIR)=[^[:space:]]+'
+ps eww -p "$API_PID" -o command= | tr ' ' '\n' | grep -E \
+  '^(MSA_(CONFIG_PATH|DATA_DIR|CACHE_DIR|LOG_DIR|CAPTION_PYTHON|CAPTION_CACHE_DIR)|HF_HUB_OFFLINE|TRANSFORMERS_OFFLINE|HF_DATASETS_OFFLINE)='
 ```
 
-These diagnostics can contain personal paths; keep their output local. Before
-restarting the API, preserve its active config/data/log environment. The
-caption worker uses a development-owned Python runtime, not the separately
-installed app's bundled interpreter. From the repository root, in that same
-development shell, relaunch with the stable worker venv and existing offline
-model cache:
+These diagnostics can contain personal paths; keep their output local. Capture
+and export the active `MSA_CONFIG_PATH`, `MSA_LOG_DIR`, data/cache settings,
+and caption-worker settings into the restart shell. Confirm that no Indexer is
+running. If the active config points into installed-app state, do not reuse it:
+make a development-owned config copy that preserves the existing database,
+index, and media paths, and set `models_dir` to a development-owned directory. For
+Search/Browse-only acceptance, set `MSA_SEARCH_BROWSE_READ_ONLY=1`. This mode
+starts without weights, skips all startup model setup, rejects Indexer starts,
+source edits, and model-download retries, and visibly disables Indexer controls.
+Lexical caption/scene search remains available; semantic CLIP search is reported
+unavailable unless a cached CLIP model loads successfully. The API forces offline
+model resolution in this mode. Never use the installed app's model directory.
+Normal indexing still requires all configured weights in development-owned storage.
+The API/Indexer and caption worker use separate development-owned Python 3.12
+virtual environments; never use the installed app's interpreter or site-packages.
+
+Create the persistent API/Indexer environment once from uv-managed Python, using
+the declared API requirements and the macOS NumPy/Torch constraints from
+`scripts/setup.sh`. `facenet-pytorch` is installed separately so its resolver
+cannot replace the supported Torch stack:
 
 ```bash
+UV="$HOME/.local/bin/uv"
+API_VENV="$HOME/.local/share/local-media-intelligence/api-indexer-3.12"
+BASE_PYTHON="$("$UV" python find 3.12)"
+
+# Run only if API_VENV does not already exist.
+env -u __PYVENV_LAUNCHER__ -u PYTHONHOME "$UV" venv --python "$BASE_PYTHON" "$API_VENV"
+REQS="$(mktemp)"
+awk '
+  /^[[:space:]]*sentence-transformers([[:space:][:punct:]]|$)/ { next }
+  /^[[:space:]]*numpy([[:space:][:punct:]]|$)/ { next }
+  /^[[:space:]]*torch([[:space:][:punct:]]|$)/ { next }
+  /^[[:space:]]*facenet-pytorch([[:space:][:punct:]]|$)/ { next }
+  { print }
+' requirements-api.txt > "$REQS"
+printf 'numpy<2\ntorch>=2.4,<2.7\n' >> "$REQS"
+env -u __PYVENV_LAUNCHER__ -u PYTHONHOME "$UV" pip install --python "$API_VENV/bin/python" -r "$REQS"
+rm -f "$REQS"
+env -u __PYVENV_LAUNCHER__ -u PYTHONHOME "$UV" pip install --python "$API_VENV/bin/python" 'facenet-pytorch>=2.6.0' --no-deps
+env -u __PYVENV_LAUNCHER__ -u PYTHONHOME "$UV" pip install --python "$API_VENV/bin/python" -e .
+```
+
+Before stopping the API, verify its PID is the repo's development Uvicorn and
+that the Indexer is idle. Check the active config's resolved database, media,
+and `models_dir` paths. **Do not restart if `models_dir` points into the
+installed app or if any required model weights are missing from development-owned
+storage.** In normal mode, API startup automatically starts CLIP, RT-DETR, and
+FaceNet model setup; offline Hugging Face flags do not block every downloader.
+For Search/Browse acceptance without weights, enable the read-only mode above:
+it skips all automatic setup, serves lexical results, and marks semantic search
+unavailable unless CLIP is already cached and loads successfully.
+
+After the preflight succeeds, stop only the verified development API PID and
+start it from the repository root, keeping the caption runtime and offline cache
+settings from the existing process:
+
+```bash
+API_PID="$(lsof -nP -t -iTCP:8502 -sTCP:LISTEN | head -n 1)"
+# Verify with ps/lsof that this is the development API in this repository; do not
+# kill an Indexer or any process belonging to the installed app.
+kill -TERM "$API_PID"
+
 export MSA_CAPTION_PYTHON="$HOME/.local/share/local-media-intelligence/caption-worker-3.12/bin/python"
 export MSA_CAPTION_CACHE_DIR="$HOME/Library/Caches/LocalMediaIntelligence-Stage4A1/hf-home/hub"
+export MSA_SEARCH_BROWSE_READ_ONLY=1  # omit only for intentional indexing/model setup
 export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 HF_DATASETS_OFFLINE=1
-# The worker strips macOS's inherited __PYVENV_LAUNCHER__; keep the API env intact.
-export PYTHONPATH="$PWD/src${PYTHONPATH:+:$PYTHONPATH}"
-python -m uvicorn msa_apps.search_api.app:app --host 127.0.0.1 --port 8502 --reload
+API_VENV="$HOME/.local/share/local-media-intelligence/api-indexer-3.12"
+env -u __PYVENV_LAUNCHER__ -u PYTHONHOME \
+  PATH="$API_VENV/bin:$PATH" PYTHONNOUSERSITE=1 PYTHONPATH="$PWD/src" \
+  "$API_VENV/bin/python" -m uvicorn msa_apps.search_api.app:app \
+  --host 127.0.0.1 --port 8502
 ```
+
+Clearing `__PYVENV_LAUNCHER__` before API startup is important on macOS: the
+Indexer subprocess inherits the API environment. Confirm `sys.executable`,
+`sys.base_prefix`, and `pyvenv.cfg` belong to this API venv before accepting the
+service. `MSA_CAPTION_PYTHON` remains the separate caption-worker interpreter.
 
 Fast focused checks during captioning changes (run from the repository root):
 

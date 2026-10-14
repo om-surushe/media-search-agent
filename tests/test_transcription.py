@@ -1,4 +1,5 @@
 import json
+import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -259,7 +260,10 @@ def test_transcriber_defers_model_loading_until_audio_is_processed(tmp_path):
     assert not (tmp_path / "whisper").exists()
 
 
-def test_transcript_search_api_returns_video_and_timestamp(transcript_db, tmp_path):
+def test_transcript_search_api_returns_video_and_timestamp(transcript_db, tmp_path, monkeypatch):
+    monkeypatch.setenv("MSA_SEARCH_BROWSE_READ_ONLY", "1")
+    with sqlite3.connect(f"file:{transcript_db}?mode=ro", uri=True) as conn:
+        before = conn.execute("SELECT COUNT(*) FROM transcript_segment").fetchone()[0]
     config = SimpleNamespace(
         sqlite_path=transcript_db,
         server=SimpleNamespace(qdrant_url="http://localhost:6333", qdrant_api_key=None),
@@ -267,6 +271,7 @@ def test_transcript_search_api_returns_video_and_timestamp(transcript_db, tmp_pa
         thumb_dir=tmp_path / "thumbnails",
         face_thumb_dir=tmp_path / "face_thumbnails",
         log_dir=tmp_path / "logs",
+        models_dir=tmp_path / "models",
         log_level="DEBUG",
     )
     config.thumb_dir.mkdir()
@@ -288,3 +293,6 @@ def test_transcript_search_api_returns_video_and_timestamp(transcript_db, tmp_pa
     assert match["segments"][0]["start"] == 2.4
     assert match["segments"][0]["end"] == 4.8
     assert match["segments"][0]["text"] == "Welcome to the park."
+    with sqlite3.connect(f"file:{transcript_db}?mode=ro", uri=True) as conn:
+        after = conn.execute("SELECT COUNT(*) FROM transcript_segment").fetchone()[0]
+    assert before == after

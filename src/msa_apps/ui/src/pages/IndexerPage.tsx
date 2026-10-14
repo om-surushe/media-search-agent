@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from 'react'
 import { useQuery, useMutation } from '@tanstack/react-query'
 import { Play, Square, ChevronDown, ChevronUp, Image, Film, User, Users, Maximize2, Minimize2 } from 'lucide-react'
 import {
-  startIndexer, stopIndexer, getIndexStats, getSources, getModelConfig,
+  startIndexer, stopIndexer, getIndexerStatus, getIndexStats, getSources, getModelConfig,
 } from '../api/indexer'
 import type { ProcessingOrder } from '../api/indexer'
 import { useIndexerWS } from '../hooks/useIndexerStatus'
@@ -66,6 +66,11 @@ export function IndexerPage() {
   const wsUpdate = useIndexerWS()
   const statusInfo = wsUpdate?.status ?? null
   const logLines   = wsUpdate?.log ?? []
+  const { data: apiStatus } = useQuery({
+    queryKey: ['indexer-status'],
+    queryFn: getIndexerStatus,
+    retry: false,
+  })
 
   const [logOpen, setLogOpen] = useState(false)
   const [logExpanded, setLogExpanded] = useState(false)
@@ -116,6 +121,7 @@ export function IndexerPage() {
 
   const status    = statusInfo?.status ?? 'idle'
   const isRunning = status === 'running'
+  const readOnlyMode = statusInfo?.read_only_mode ?? apiStatus?.read_only_mode ?? false
   const objectDetectionEnabled = objectDetectionOverride ?? modelConfig?.effective?.object_detection_enabled ?? false
   const detectionControlDisabled = isRunning || startMutation.isPending || startMutation.isSuccess || modelConfigLoading || modelConfigError
   const captionControlDisabled = isRunning || startMutation.isPending || startMutation.isSuccess
@@ -144,6 +150,11 @@ export function IndexerPage() {
   return (
     <div className="p-6 max-w-3xl mx-auto space-y-6">
       <h1 className="text-xl font-semibold text-zinc-900 dark:text-zinc-100">Indexer</h1>
+      {readOnlyMode && (
+        <div role="status" className="rounded-lg bg-amber-100 dark:bg-amber-950 px-4 py-3 text-sm text-amber-900 dark:text-amber-200">
+          Indexing and source changes are disabled in this Search/Browse read-only session.
+        </div>
+      )}
 
       {/* Stats bar */}
       <div className="space-y-1.5">
@@ -172,6 +183,7 @@ export function IndexerPage() {
         </div>
       </div>
 
+      {!readOnlyMode && <>
       <MediaSourcesPanel />
 
       {/* Control card */}
@@ -512,6 +524,7 @@ export function IndexerPage() {
           )}
         </div>
       )}
+      </>}
     </div>
   )
 }

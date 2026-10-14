@@ -1,7 +1,7 @@
 import { Film } from 'lucide-react'
 import { thumbnailUrl } from '../../api/media'
 import { FaceStrip } from './FaceStrip'
-import type { FaceOnMedia } from '../../api/types'
+import type { FaceOnMedia, VideoSceneSearchMatch } from '../../api/types'
 import { cn } from '../../lib/utils'
 
 interface MediaCardProps {
@@ -11,6 +11,7 @@ interface MediaCardProps {
   date?: string | null
   place?: string | null
   captionExcerpt?: string | null
+  sceneMatches?: VideoSceneSearchMatch[] | null
   duration?: number | null
   faces?: FaceOnMedia[]
   onClick: () => void
@@ -31,7 +32,7 @@ function formatDate(iso: string | null | undefined): string {
   }
 }
 
-export function MediaCard({ id, path: _path, type, date, place, captionExcerpt, duration, faces, onClick }: MediaCardProps) {
+export function MediaCard({ id, path: _path, type, date, place, captionExcerpt, sceneMatches, duration, faces, onClick }: MediaCardProps) {
   const thumb = thumbnailUrl(id)
   return (
     <button
@@ -63,7 +64,15 @@ export function MediaCard({ id, path: _path, type, date, place, captionExcerpt, 
 
       {/* Footer */}
       <div className="px-2 py-1.5 flex flex-col gap-1 min-h-[3rem]">
-        {captionExcerpt && (
+        {sceneMatches?.length ? (
+          <div className="space-y-0.5 text-xs text-indigo-700 dark:text-indigo-300">
+            {sceneMatches.slice(0, 3).map(match => (
+              <div key={`${match.keyframe_id}-${match.timestamp}`} className="truncate" title={`${match.timestamp.toFixed(1)}s · ${match.caption_excerpt}`}>
+                <span className="font-semibold">{match.timestamp.toFixed(1)}s ·</span> {match.caption_excerpt}
+              </div>
+            ))}
+          </div>
+        ) : captionExcerpt && (
           <div className="text-xs text-indigo-700 dark:text-indigo-300 truncate" title={captionExcerpt}>
             <span className="font-semibold">Caption match:</span> {captionExcerpt}
           </div>

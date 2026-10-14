@@ -176,6 +176,19 @@ class SetupManager:
             "facenet_pytorch": facenet_present,
         }
 
+    def has_valid_clip(self, models_dir: Path) -> bool:
+        """Return True only for a complete CLIP blob matching the pinned SHA-256."""
+        clip_cache = models_dir / "clip"
+        try:
+            candidates = list(clip_cache.rglob("open_clip_model.safetensors"))
+            candidates.extend(
+                f for bd in clip_cache.rglob("blobs") if bd.is_dir()
+                for f in bd.iterdir() if f.is_file() and f.stat().st_size > 100_000_000
+            )
+            return any(_verify_file(path, MODEL_META["clip"]["sha256"]) for path in candidates)
+        except OSError:
+            return False
+
     def is_ready(self, models_dir: Path) -> bool:
         return all(self.check_all_present(models_dir).values())
 

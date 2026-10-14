@@ -97,6 +97,35 @@ describe('MediaDetailDrawer', () => {
     expect(play).not.toHaveBeenCalled()
   })
 
+  it('re-seeks when the best scene changes for the same video result', async () => {
+    const firstItem = {
+      ...videoItem, timestamp: 1, scene_timestamp: 6.8,
+      scene_matches: [{ keyframe_id: 1, timestamp: 6.8, caption_excerpt: 'pink shirts' }],
+    }
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const renderDrawer = (item: typeof firstItem) => (
+      <QueryClientProvider client={client}>
+        <MemoryRouter><MediaDetailDrawer item={item} onClose={vi.fn()} /></MemoryRouter>
+      </QueryClientProvider>
+    )
+    const { container, rerender } = render(renderDrawer(firstItem))
+    const video = container.querySelector('video')!
+    let currentTime = 0
+    Object.defineProperty(video, 'readyState', { configurable: true, value: 1 })
+    Object.defineProperty(video, 'currentTime', { configurable: true, get: () => currentTime, set: value => { currentTime = value } })
+    const pause = vi.spyOn(video, 'pause').mockImplementation(() => {})
+    fireEvent.loadedMetadata(video)
+    expect(currentTime).toBe(6.8)
+
+    rerender(renderDrawer({
+      ...firstItem, scene_timestamp: 18.2,
+      scene_matches: [{ keyframe_id: 2, timestamp: 18.2, caption_excerpt: 'pink shirts' }],
+    }))
+
+    expect(currentTime).toBe(18.2)
+    expect(pause).toHaveBeenCalled()
+  })
+
   it('switches keyframes without reloading and preserves native playback controls', async () => {
     vi.stubGlobal('fetch', vi.fn(() => Promise.resolve({ ok: true, json: () => Promise.resolve(videoIntelligence) })))
     const { container } = wrap(<MediaDetailDrawer item={videoItem} onClose={vi.fn()} />)

@@ -91,6 +91,17 @@ class TestCheckAllPresentClip:
         assert SetupManager().check_all_present(tmp_path)["clip"] is True
 
 
+class TestHasValidClip:
+    def test_missing_or_hash_mismatched_clip_is_not_usable(self, tmp_path):
+        manager = SetupManager()
+        assert manager.has_valid_clip(tmp_path) is False
+
+        clip = tmp_path / "clip" / "open_clip_model.safetensors"
+        clip.parent.mkdir()
+        clip.write_bytes(b"not model weights")
+        assert manager.has_valid_clip(tmp_path) is False
+
+
 # ---------------------------------------------------------------------------
 # 2. check_all_present — facenet-pytorch presence check
 # ---------------------------------------------------------------------------

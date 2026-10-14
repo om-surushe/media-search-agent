@@ -73,6 +73,13 @@ result links directly to the matching moment within the clip — see the
 deduplicated so you don't get a result list flooded with near-identical
 adjacent frames.
 
+Search also checks completed, stored image captions and video scene captions
+using read-only lexical matching. This supplements, rather than reranks, CLIP
+results; caption-only matches follow the normal visual results. Scene matches
+show up to three timestamped excerpts per video, and opening the result seeks
+to its strongest lexical match. Use words that appear in the description (for
+example, `pink shirts`); this path does not run inference or update the index.
+
 ## When search returns nothing
 
 - The indexer's first run hasn't finished — semantic search comes online
@@ -80,7 +87,7 @@ adjacent frames.
 - The threshold slider is too high — drag it down.
 - Your filters exclude every candidate — clear filters and try again.
 - The query is asking for text-on-image (license plates, signs, dates).
-  CLIP can't help; try a tag or date filter instead.
+  CLIP can't help; try a tag, date filter, or stored caption text instead.
 
 For the technical details — model, vector dimensions, retrieval pipeline,
 reranking — see [ARCHITECTURE.md](../ARCHITECTURE.md#search-request-flow).

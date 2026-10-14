@@ -95,6 +95,7 @@ def client(db, tmp_path):
         thumb_dir=tmp_path / "thumbnails",
         face_thumb_dir=tmp_path / "face_thumbnails",
         log_dir=tmp_path / "logs",
+        models_dir=tmp_path / "models",
         log_level="DEBUG",
     )
     (test_config.thumb_dir).mkdir()
@@ -593,3 +594,96 @@ def test_video_file_supports_byte_ranges(client, db, tmp_path):
     unsatisfiable = client.get(f"/videos/{media_id}", headers={"Range": "bytes=10-"})
     assert unsatisfiable.status_code == 416
     assert unsatisfiable.headers["content-range"] == "bytes */10"
+
+
+def test_read_only_search_runtime_skips_setup_and_rejects_mutations(client, monkeypatch):
+    import msa_apps.search_api.app as api_module
+
+    monkeypatch.setenv("MSA_SEARCH_BROWSE_READ_ONLY", "1")
+    start_setup = MagicMock()
+    monkeypatch.setattr(api_module._setup_models.get_manager(), "start_if_needed", start_setup)
+
+    with client:
+        setup = client.get("/api/setup/status")
+        assert setup.status_code == 200
+        body = setup.json()
+        assert body == {"ready": True, "models": [], "read_only_mode": True}
+        start_setup.assert_not_called()
+
+        status = client.get("/indexer/status")
+        assert status.json()["read_only_mode"] is True
+        assert client.post("/indexer/start").status_code == 409
+        assert client.post("/api/setup/retry").status_code == 409
+        assert client.post("/config/sources", json={"name": "new", "path": "/tmp/new"}).status_code == 409
+
+
+def test_search_api_marks_lexical_only_results_and_preserves_database(client, db, monkeypatch):
+    import msa_apps.search_api.deps as deps
+    from msa_query.query_engine.engine import _SearchResults
+
+    monkeypatch.setenv("MSA_SEARCH_BROWSE_READ_ONLY", "1")
+    qe = client.app.dependency_overrides[deps.get_query_engine]()
+    results = _SearchResults([{
+        "id": "id_img_01", "path": "/mnt/p/Photos/beach.heic", "thumbnail": None,
+        "score": None, "tags": [], "type": None, "timestamp": None, "shot_id": None,
+        "date": None, "caption_excerpt": "stored caption hit", "why": "Caption match",
+    }])
+    results.query_context = {
+        "semantic_search_available": False,
+        "semantic_search_message": "Semantic visual search is unavailable; showing stored caption and scene matches.",
+    }
+    qe.search.return_value = results
+    with sqlite3.connect(f"file:{db}?mode=ro", uri=True) as conn:
+        before = conn.execute("SELECT COUNT(*) FROM media").fetchone()[0]
+
+    with client:
+        response = client.post("/search", json={"q": "chicken salad"})
+        with sqlite3.connect(f"file:{db}?mode=ro", uri=True) as conn:
+            after = conn.execute("SELECT COUNT(*) FROM media").fetchone()[0]
+
+    assert response.status_code == 200
+    assert response.json()["semantic_search_available"] is False
+    assert "unavailable" in response.json()["semantic_search_message"]
+    assert response.json()["results"][0]["caption_excerpt"] == "stored caption hit"
+    assert before == after
+
+
+def test_read_only_runtime_is_ready_without_any_model_weights(client, monkeypatch):
+    monkeypatch.setenv("MSA_SEARCH_BROWSE_READ_ONLY", "1")
+    with client:
+        body = client.get("/api/setup/status").json()
+        assert body == {"ready": True, "models": [], "read_only_mode": True}
+
+
+def test_read_only_query_engine_skips_encoder_when_clip_is_missing(monkeypatch, tmp_path):
+    import msa_apps.search_api.deps as deps
+
+    monkeypatch.setenv("MSA_SEARCH_BROWSE_READ_ONLY", "1")
+    cfg = SimpleNamespace(
+        models_dir=tmp_path / "models",
+        sqlite_path=tmp_path / "missing.db",
+        retrieval=SimpleNamespace(search_score_trace=False),
+    )
+    monkeypatch.setattr(deps, "load_config", lambda: cfg)
+    encoder = MagicMock(side_effect=AssertionError("must not initialize without cached CLIP"))
+    monkeypatch.setattr(deps, "TextEncoder", encoder)
+    deps.reset_query_engine()
+    try:
+        engine = deps.get_query_engine()
+        results = engine.search("no model needed")
+        assert results.query_context["semantic_search_available"] is False
+        assert results.query_context["semantic_search_message"]
+        encoder.assert_not_called()
+    finally:
+        deps.reset_query_engine()
+
+
+def test_normal_runtime_keeps_automatic_model_setup(client, monkeypatch):
+    import msa_apps.search_api.app as api_module
+
+    monkeypatch.delenv("MSA_SEARCH_BROWSE_READ_ONLY", raising=False)
+    start_setup = MagicMock()
+    monkeypatch.setattr(api_module._setup_models.get_manager(), "start_if_needed", start_setup)
+
+    with client:
+        start_setup.assert_called_once_with(client.app.state.S.models_dir)
