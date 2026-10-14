@@ -15,6 +15,22 @@ After a headless/Linux install the launcher lives at `~/.local/bin/msa`
 (macOS/Linux) or is dropped on `PATH` by the Windows bootstrap. Run `msa`
 with no arguments to see top-level help.
 
+## Repository development commands
+
+For checkout-based development, bootstrap with `bash scripts/dev-setup.sh`,
+then use separate terminals:
+
+```bash
+./scripts/dev-api.sh       # API with Python/YAML reload; logs in terminal
+./scripts/dev-ui.sh        # Vite client with HMR; opens at localhost:5173
+./scripts/dev-indexer.sh   # one foreground indexing pass; optional
+```
+
+These are development scripts, not installed `msa` subcommands. The API
+contains embedded Qdrant; per-feature extractors are stages in an indexing job,
+not separate daemons. See [DEVELOPMENT.md](DEVELOPMENT.md) for model setup and
+logs.
+
 ## Top-level commands
 
 ```text

@@ -89,12 +89,17 @@ Run tests:
 bash scripts/run-tests.sh
 ```
 
-Run the app locally:
+Run the app locally with live reload in separate terminals:
 
 ```bash
-bash scripts/start.sh
-# UI at http://localhost:8000
+./scripts/dev-api.sh       # FastAPI + embedded Qdrant; watches Python/YAML
+./scripts/dev-ui.sh        # Vite UI with hot module reload at localhost:5173
+./scripts/dev-indexer.sh   # optional one-shot index job; logs in this terminal
 ```
+
+The desktop shell is separate: `npm run dev` at the repository root starts
+Tauri. See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for model/cache setup,
+ports, and service boundaries.
 
 ## Workflow expectations
 
