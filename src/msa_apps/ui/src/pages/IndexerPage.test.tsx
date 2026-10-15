@@ -41,6 +41,22 @@ const runningUpdate: WSMessage = {
 
 function mockFetch(overrides: Record<string, object> = {}) {
   vi.stubGlobal('fetch', vi.fn((url: string, opts?: RequestInit) => {
+    if (url === '/indexer/settings' && opts?.method === 'PUT') {
+      const capabilities = {
+        image_captions: { available: true, reason: null },
+        video_scene_captions: { available: true, reason: null },
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ ...JSON.parse(String(opts.body)), capabilities }) })
+    }
+    if (url === '/indexer/settings')
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(overrides[url] ?? {
+        processing_order: 'default', object_detection_enabled: null,
+        image_captions_enabled: false, video_scene_captions_enabled: false,
+        capabilities: {
+          image_captions: { available: true, reason: null },
+          video_scene_captions: { available: true, reason: null },
+        },
+      }) })
     if (url === '/config/sources' && opts?.method === 'POST')
       return Promise.resolve({ ok: true, json: () => Promise.resolve({ status: 'ok' }) })
     if (url === '/config/sources')
@@ -182,6 +198,54 @@ describe('IndexerPage', () => {
       await waitFor(() =>
         expect(screen.getByText(/Indexing IMG_001\.heic/)).toBeTruthy()
       )
+    })
+
+    it('restores app-wide saved Indexer options', async () => {
+      mockFetch({ '/indexer/settings': {
+        processing_order: 'oldest', object_detection_enabled: true,
+        image_captions_enabled: false, video_scene_captions_enabled: true,
+        capabilities: {
+          image_captions: { available: true, reason: null },
+          video_scene_captions: { available: true, reason: null },
+        },
+      } })
+      renderPage()
+      await waitFor(() => expect(screen.getByRole('combobox', { name: /processing order/i })).toHaveValue('oldest'))
+      expect(screen.getByRole('checkbox', { name: /object detection/i })).toBeChecked()
+      expect(screen.getByRole('checkbox', { name: /ai video scene captions/i })).toBeChecked()
+    })
+
+    it('persists option changes app-wide', async () => {
+      renderPage()
+      await waitFor(() => expect(screen.getByRole('combobox', { name: /processing order/i })).toBeEnabled())
+      await userEvent.selectOptions(screen.getByRole('combobox', { name: /processing order/i }), 'newest')
+      await waitFor(() => expect(vi.mocked(fetch)).toHaveBeenCalledWith('/indexer/settings', expect.objectContaining({
+        method: 'PUT',
+        body: JSON.stringify({
+          processing_order: 'newest', object_detection_enabled: null,
+          image_captions_enabled: false, video_scene_captions_enabled: false,
+        }),
+      })))
+    })
+
+    it('disables unavailable captions and never sends them to the indexer', async () => {
+      mockFetch({ '/indexer/settings': {
+        processing_order: 'default', object_detection_enabled: null,
+        image_captions_enabled: true, video_scene_captions_enabled: false,
+        capabilities: {
+          image_captions: { available: false, reason: 'CPU Transformers BLIP runtime is unavailable.' },
+          video_scene_captions: { available: false, reason: 'CPU Transformers BLIP runtime is unavailable.' },
+        },
+      } })
+      renderPage()
+      const captions = await screen.findByRole('checkbox', { name: /ai image captions/i })
+      await waitFor(() => expect(captions).toBeChecked())
+      expect(captions).toBeDisabled()
+      expect(screen.getByText(/CPU Transformers BLIP runtime is unavailable/)).toBeTruthy()
+      await userEvent.click(screen.getByRole('button', { name: /run indexer/i }))
+      await waitFor(() => expect(vi.mocked(fetch)).toHaveBeenCalledWith('/indexer/start', expect.objectContaining({
+        body: JSON.stringify({ processing_order: 'default', object_detection_enabled: false }),
+      })))
     })
 
     it('sends the selected processing order when Run is clicked', async () => {

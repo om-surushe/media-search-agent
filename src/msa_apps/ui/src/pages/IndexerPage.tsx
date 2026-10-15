@@ -3,8 +3,9 @@ import { useQuery, useMutation } from '@tanstack/react-query'
 import { Play, Square, ChevronDown, ChevronUp, Image, Film, User, Users, Maximize2, Minimize2 } from 'lucide-react'
 import {
   startIndexer, stopIndexer, getIndexerStatus, getIndexStats, getSources, getModelConfig,
+  getIndexerSettings, saveIndexerSettings,
 } from '../api/indexer'
-import type { ProcessingOrder } from '../api/indexer'
+import type { IndexerSettingsUpdate, ProcessingOrder } from '../api/indexer'
 import { useIndexerWS } from '../hooks/useIndexerStatus'
 import { MediaSourcesPanel } from '../components/MediaSourcesPanel'
 import { cn } from '../lib/utils'
@@ -62,6 +63,29 @@ const STAT_ITEMS: { key: 'images' | 'videos' | 'faces' | 'people'; label: string
   { key: 'people',  label: 'People',  Icon: Users  },
 ]
 
+type IndexerOptions = {
+  processingOrder: ProcessingOrder
+  objectDetectionOverride: boolean | null
+  imageCaptionsEnabled: boolean
+  videoSceneCaptionsEnabled: boolean
+}
+
+const DEFAULT_INDEXER_OPTIONS: IndexerOptions = {
+  processingOrder: 'default',
+  objectDetectionOverride: null,
+  imageCaptionsEnabled: false,
+  videoSceneCaptionsEnabled: false,
+}
+
+function toSettingsUpdate(options: IndexerOptions): IndexerSettingsUpdate {
+  return {
+    processing_order: options.processingOrder,
+    object_detection_enabled: options.objectDetectionOverride,
+    image_captions_enabled: options.imageCaptionsEnabled,
+    video_scene_captions_enabled: options.videoSceneCaptionsEnabled,
+  }
+}
+
 export function IndexerPage() {
   const wsUpdate = useIndexerWS()
   const statusInfo = wsUpdate?.status ?? null
@@ -74,13 +98,17 @@ export function IndexerPage() {
 
   const [logOpen, setLogOpen] = useState(false)
   const [logExpanded, setLogExpanded] = useState(false)
-  const [processingOrder, setProcessingOrder] = useState<ProcessingOrder>('default')
-  const [objectDetectionOverride, setObjectDetectionOverride] = useState<boolean | null>(null)
-  const [imageCaptionsEnabled, setImageCaptionsEnabled] = useState(false)
-  const [videoSceneCaptionsEnabled, setVideoSceneCaptionsEnabled] = useState(false)
+  const [options, setOptions] = useState<IndexerOptions>(DEFAULT_INDEXER_OPTIONS)
+  const optionsRef = useRef(options)
+  const settingsLoadedRef = useRef(false)
   const logRef = useRef<HTMLDivElement>(null)
   const prevStatusRef = useRef<string | null>(null)
 
+  const { data: indexerSettings, isSuccess: settingsLoaded, isError: settingsLoadError } = useQuery({
+    queryKey: ['indexer-settings'],
+    queryFn: getIndexerSettings,
+    retry: false,
+  })
   const { data: stats, refetch: refetchStats } = useQuery({
     queryKey: ['indexer-stats'],
     queryFn: getIndexStats,
@@ -95,11 +123,35 @@ export function IndexerPage() {
     queryFn: getModelConfig,
   })
 
+  const saveSettingsMutation = useMutation({ mutationFn: saveIndexerSettings })
   const startMutation = useMutation({
-    mutationFn: (options: { processingOrder: ProcessingOrder; objectDetectionEnabled: boolean; imageCaptionsEnabled: boolean; videoSceneCaptionsEnabled: boolean }) =>
-      startIndexer(options.processingOrder, options.objectDetectionEnabled, options.imageCaptionsEnabled, options.videoSceneCaptionsEnabled),
+    mutationFn: (runOptions: { processingOrder: ProcessingOrder; objectDetectionEnabled: boolean; imageCaptionsEnabled: boolean; videoSceneCaptionsEnabled: boolean }) =>
+      startIndexer(runOptions.processingOrder, runOptions.objectDetectionEnabled, runOptions.imageCaptionsEnabled, runOptions.videoSceneCaptionsEnabled),
   })
   const stopMutation  = useMutation({ mutationFn: stopIndexer  })
+
+  useEffect(() => {
+    if (indexerSettings && !settingsLoadedRef.current) {
+      const loadedOptions: IndexerOptions = {
+        processingOrder: indexerSettings.processing_order,
+        objectDetectionOverride: indexerSettings.object_detection_enabled,
+        imageCaptionsEnabled: indexerSettings.image_captions_enabled,
+        videoSceneCaptionsEnabled: indexerSettings.video_scene_captions_enabled,
+      }
+      optionsRef.current = loadedOptions
+      setOptions(loadedOptions)
+      settingsLoadedRef.current = true
+    } else if (settingsLoadError) {
+      settingsLoadedRef.current = true
+    }
+  }, [indexerSettings, settingsLoadError])
+
+  const updateOptions = (changes: Partial<IndexerOptions>) => {
+    const next = { ...optionsRef.current, ...changes }
+    optionsRef.current = next
+    setOptions(next)
+    if (settingsLoaded || settingsLoadError) saveSettingsMutation.mutate(toSettingsUpdate(next))
+  }
 
   // Refetch stats and reset start mutation when indexer transitions running → terminal
   useEffect(() => {
@@ -122,13 +174,22 @@ export function IndexerPage() {
   const status    = statusInfo?.status ?? 'idle'
   const isRunning = status === 'running'
   const readOnlyMode = statusInfo?.read_only_mode ?? apiStatus?.read_only_mode ?? false
-  const objectDetectionEnabled = objectDetectionOverride ?? modelConfig?.effective?.object_detection_enabled ?? false
-  const detectionControlDisabled = isRunning || startMutation.isPending || startMutation.isSuccess || modelConfigLoading || modelConfigError
-  const captionControlDisabled = isRunning || startMutation.isPending || startMutation.isSuccess
+  const settingsReady = settingsLoaded || settingsLoadError
+  const objectDetectionEnabled = options.objectDetectionOverride ?? modelConfig?.effective?.object_detection_enabled ?? false
+  const detectionControlDisabled = isRunning || startMutation.isPending || startMutation.isSuccess || modelConfigLoading || modelConfigError || !settingsReady
+  const captionControlDisabled = isRunning || startMutation.isPending || startMutation.isSuccess || !settingsReady
+  const imageCaptionCapability = indexerSettings?.capabilities.image_captions
+  const videoCaptionCapability = indexerSettings?.capabilities.video_scene_captions
+  const runImageCaptions = options.imageCaptionsEnabled && Boolean(imageCaptionCapability?.available)
+  const runVideoCaptions = options.videoSceneCaptionsEnabled && Boolean(videoCaptionCapability?.available)
   const runOrder = statusInfo?.summary?.processing_order
 
   useEffect(() => {
-    if (isRunning && runOrder) setProcessingOrder(runOrder)
+    if (isRunning && runOrder) {
+      const next = { ...optionsRef.current, processingOrder: runOrder }
+      optionsRef.current = next
+      setOptions(next)
+    }
   }, [isRunning, runOrder])
   const hasSources = sources.length > 0
   const elapsed   = statusInfo?.elapsed_seconds ?? null
@@ -226,9 +287,9 @@ export function IndexerPage() {
             Processing order
             <select
               aria-label="Processing order"
-              value={processingOrder}
-              disabled={isRunning || startMutation.isPending}
-              onChange={event => setProcessingOrder(event.target.value as ProcessingOrder)}
+              value={options.processingOrder}
+              disabled={isRunning || startMutation.isPending || !settingsReady}
+              onChange={event => updateOptions({ processingOrder: event.target.value as ProcessingOrder })}
               className="rounded border border-zinc-300 dark:border-zinc-600 bg-white dark:bg-zinc-900 px-2 py-1 text-sm"
             >
               <option value="default">Default</option>
@@ -244,7 +305,7 @@ export function IndexerPage() {
               aria-label="Object Detection"
               checked={objectDetectionEnabled}
               disabled={detectionControlDisabled}
-              onChange={event => setObjectDetectionOverride(event.target.checked)}
+              onChange={event => updateOptions({ objectDetectionOverride: event.target.checked })}
             />
             Object Detection
           </label>
@@ -261,8 +322,13 @@ export function IndexerPage() {
             </button>
           ) : (
             <button
-              onClick={() => startMutation.mutate({ processingOrder, objectDetectionEnabled, imageCaptionsEnabled, videoSceneCaptionsEnabled })}
-              disabled={!hasSources || modelConfigLoading || modelConfigError || startMutation.isPending || (startMutation.isSuccess && !isRunning)}
+              onClick={() => startMutation.mutate({
+                processingOrder: options.processingOrder,
+                objectDetectionEnabled,
+                imageCaptionsEnabled: runImageCaptions,
+                videoSceneCaptionsEnabled: runVideoCaptions,
+              })}
+              disabled={!hasSources || !settingsReady || modelConfigLoading || modelConfigError || startMutation.isPending || (startMutation.isSuccess && !isRunning)}
               className="flex items-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-sm rounded-md transition-colors disabled:opacity-50"
             >
               <Play size={14} />
@@ -272,16 +338,16 @@ export function IndexerPage() {
         </div>
 
         <div className="text-xs text-zinc-500 dark:text-zinc-400">
-          Object Detection applies to photos and video keyframes for this run only.
+          Indexer options are saved app-wide and used for future runs.
         </div>
         <div className="space-y-1">
           <label className="flex items-center gap-2 text-sm text-zinc-700 dark:text-zinc-200">
             <input
               type="checkbox"
               aria-label="AI Image Captions"
-              checked={imageCaptionsEnabled}
-              disabled={captionControlDisabled}
-              onChange={event => setImageCaptionsEnabled(event.target.checked)}
+              checked={options.imageCaptionsEnabled}
+              disabled={captionControlDisabled || !imageCaptionCapability?.available}
+              onChange={event => updateOptions({ imageCaptionsEnabled: event.target.checked })}
             />
             AI Image Captions
           </label>
@@ -292,9 +358,9 @@ export function IndexerPage() {
             <input
               type="checkbox"
               aria-label="AI Video Scene Captions"
-              checked={videoSceneCaptionsEnabled}
-              disabled={captionControlDisabled}
-              onChange={event => setVideoSceneCaptionsEnabled(event.target.checked)}
+              checked={options.videoSceneCaptionsEnabled}
+              disabled={captionControlDisabled || !videoCaptionCapability?.available}
+              onChange={event => updateOptions({ videoSceneCaptionsEnabled: event.target.checked })}
             />
             AI Video Scene Captions
           </label>
@@ -302,18 +368,37 @@ export function IndexerPage() {
             Caption existing video keyframes offline. Completed scenes are skipped; frames are captioned sequentially.
           </div>
         </div>
+        {settingsReady && (!imageCaptionCapability?.available || !videoCaptionCapability?.available) && (
+          <div role="status" className="text-xs text-amber-700 dark:text-amber-300">
+            Captions unavailable: {[imageCaptionCapability, videoCaptionCapability]
+              .filter(capability => capability && !capability.available)
+              .map(capability => capability!.reason)
+              .filter((reason, index, reasons) => reason && reasons.indexOf(reason) === index)
+              .join(' ') || 'the runtime capability could not be checked.'} Use the <a className="underline" href="/adapters">Adapter Workbench</a> to prepare the pinned model.
+          </div>
+        )}
+        {settingsLoadError && (
+          <div role="alert" className="text-xs text-amber-700 dark:text-amber-300">
+            Could not load saved Indexer options; defaults are in use.
+          </div>
+        )}
+        {saveSettingsMutation.isError && (
+          <div role="alert" className="text-xs text-red-500 dark:text-red-400">
+            Could not save Indexer options. The current run can still use your selection.
+          </div>
+        )}
         {modelConfigError && (
           <div role="alert" className="text-xs text-red-500 dark:text-red-400">
             Could not load the effective Object Detection setting.
           </div>
         )}
 
-        {processingOrder === 'fastest' && (
+        {options.processingOrder === 'fastest' && (
           <div className="text-xs text-zinc-500 dark:text-zinc-400">
             Fastest first is a heuristic: photos before videos, then smaller files first.
           </div>
         )}
-        {(processingOrder === 'newest' || processingOrder === 'oldest') && (
+        {(options.processingOrder === 'newest' || options.processingOrder === 'oldest') && (
           <div className="text-xs text-zinc-500 dark:text-zinc-400">
             Chronological order uses filesystem modification time.
           </div>

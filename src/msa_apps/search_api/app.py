@@ -2730,6 +2730,13 @@ class _IndexerStart(_BaseModel):
     video_scene_captions_enabled: bool = False
 
 
+class _IndexerSettings(_BaseModel):
+    processing_order: Literal["default", "fastest", "newest", "oldest"] = "default"
+    object_detection_enabled: Optional[bool] = None
+    image_captions_enabled: bool = False
+    video_scene_captions_enabled: bool = False
+
+
 def _search_browse_read_only() -> bool:
     return os.environ.get("MSA_SEARCH_BROWSE_READ_ONLY", "").strip().lower() in {"1", "true", "yes"}
 
@@ -2745,6 +2752,74 @@ def _config_path(request: Request) -> str:
 
 def _venv_bin() -> str:
     return str(Path(sys.executable).parent)
+
+
+def _indexer_settings_path(config) -> Path:
+    """Keep app-wide indexer preferences beside the app-owned SQLite index, not config.yaml."""
+    sqlite_path = getattr(config, "sqlite_path", None)
+    if not sqlite_path:
+        raise HTTPException(status_code=500, detail="Indexer settings storage is unavailable.")
+    return Path(sqlite_path).expanduser().parent / "indexer-settings.json"
+
+
+def _read_indexer_settings(config) -> dict:
+    settings = _IndexerSettings()
+    path = _indexer_settings_path(config)
+    try:
+        saved = json.loads(path.read_text(encoding="utf-8"))
+        settings = _IndexerSettings(**saved)
+    except FileNotFoundError:
+        pass
+    except (OSError, ValueError, TypeError) as exc:
+        logger.warning(
+            "Could not read saved indexer settings; using defaults ({})",
+            type(exc).__name__,
+        )
+    return settings.model_dump()
+
+
+def _write_indexer_settings(config, settings: _IndexerSettings) -> dict:
+    path = _indexer_settings_path(config)
+    temp_path = None
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, temp_name = tempfile.mkstemp(prefix=".indexer-settings-", dir=path.parent)
+        temp_path = Path(temp_name)
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            json.dump(settings.model_dump(), stream, sort_keys=True)
+            stream.write("\n")
+        os.replace(temp_path, path)
+    except OSError as exc:
+        if temp_path is not None:
+            try:
+                temp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        logger.error("Could not save indexer settings ({})", type(exc).__name__)
+        raise HTTPException(status_code=500, detail="Could not save indexer settings.") from None
+    return settings.model_dump()
+
+
+@app.get("/indexer/settings")
+def indexer_settings_get(request: Request):
+    from msa_indexer.adapters.adapter_09_optional_captioning import captioning_capabilities
+
+    config = _get_config(request)
+    return {
+        **_read_indexer_settings(config),
+        "capabilities": captioning_capabilities(config),
+    }
+
+
+@app.put("/indexer/settings")
+def indexer_settings_put(request: Request, body: _IndexerSettings):
+    from msa_indexer.adapters.adapter_09_optional_captioning import captioning_capabilities
+
+    config = _get_config(request)
+    return {
+        **_write_indexer_settings(config, body),
+        "capabilities": captioning_capabilities(config),
+    }
 
 
 @app.post("/indexer/start")

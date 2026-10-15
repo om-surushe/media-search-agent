@@ -15,6 +15,7 @@ Covers:
 - GET /indexer/stats — returns expected shape (zeros for empty DB)
 """
 import sys
+import json
 import pytest
 import yaml
 import sqlite3
@@ -58,6 +59,7 @@ def client(db, tmp_path, monkeypatch):
 
     test_config = SimpleNamespace(
         sqlite_path=str(db),
+        models_dir=tmp_path / "models",
         server=SimpleNamespace(qdrant_url="http://localhost:6333", qdrant_api_key=None),
         collections=SimpleNamespace(face="face_emb"),
         thumb_dir=tmp_path / "thumbnails",
@@ -483,6 +485,174 @@ class TestConfigSourcesBomConfig:
         """PATCH /config/model must not 500 when config.yaml has a UTF-8 BOM."""
         r = bom_client.patch("/config/model", json={"batch_size": 16})
         assert r.status_code == 200
+
+
+# ── Adapter workbench previews ──────────────────────────────────────────────
+
+class TestAdapterWorkbench:
+    def test_identity_preview_runs_the_whole_source_without_file_selection(
+        self, client, tmp_path, monkeypatch
+    ):
+        from msa_apps.search_api import app as app_module
+
+        source_root = tmp_path / "source"
+        (source_root / "nested").mkdir(parents=True)
+        (source_root / "sample.jpg").write_bytes(b"image bytes")
+        (source_root / "nested" / "second.mp4").write_bytes(b"video bytes")
+        source = SimpleNamespace(name="sample", path=str(source_root), enabled=True)
+        monkeypatch.setattr(app_module, "_get_config", lambda _request: SimpleNamespace(media_sources=[source]))
+
+        response = client.post("/adapters/identity/run", params={"source_name": "sample"})
+        assert response.status_code == 200
+        result = response.json()
+        assert result["files_checked"] == 2
+        assert {item["relative_path"] for item in result["results"]} == {"sample.jpg", "nested/second.mp4"}
+        assert str(source_root) not in response.text
+        selected_file = client.post("/adapters/identity/run", params={
+            "source_name": "sample", "relative_path": "sample.jpg",
+        })
+        assert selected_file.status_code == 400
+        assert str(source_root) not in selected_file.text
+
+    def test_transcription_workbench_stage_requires_cached_model(self, client, tmp_path, monkeypatch):
+        from msa_apps.search_api import app as app_module
+        from msa_indexer.adapters import adapter_04_transcription
+
+        monkeypatch.setattr(app_module, "_get_config", lambda _request: SimpleNamespace(
+            media_sources=[], models_dir=tmp_path,
+        ))
+        monkeypatch.setattr(adapter_04_transcription, "transcription_capability", lambda _path: {
+            "available": False, "reason": "Whisper base weights are not cached.",
+        })
+        response = client.get("/adapters")
+        assert response.status_code == 200
+        stage = next(item for item in response.json() if item["id"] == "transcription")
+        assert stage["runnable"] is False
+        assert stage["reason"] == "Whisper base weights are not cached."
+
+    def test_transcription_adapter_runs_source_videos_without_file_selection(self, client, tmp_path, monkeypatch):
+        from msa_apps.search_api import app as app_module
+        from msa_indexer.adapters import adapter_04_transcription
+
+        source_root = tmp_path / "source"
+        source_root.mkdir()
+        (source_root / "clip.mp4").write_bytes(b"video")
+        source = SimpleNamespace(name="sample", path=str(source_root), enabled=True)
+        config = SimpleNamespace(media_sources=[source], models_dir=tmp_path, device="cpu")
+        monkeypatch.setattr(app_module, "_get_config", lambda _request: config)
+        monkeypatch.setattr(adapter_04_transcription, "transcription_capability", lambda _path: {
+            "available": True, "reason": None,
+        })
+        monkeypatch.setattr(adapter_04_transcription, "preview_transcription_folder", lambda *_args: {
+            "scope": "whole_configured_source_videos", "videos_found": 1, "persisted": False,
+        })
+
+        response = client.post("/adapters/transcription/run", params={"source_name": "sample"})
+        selected_file = client.post("/adapters/transcription/run", params={
+            "source_name": "sample", "relative_path": "clip.mp4",
+        })
+
+        assert response.status_code == 200
+        assert response.json()["videos_found"] == 1
+        assert response.json()["persisted"] is False
+        assert selected_file.status_code == 400
+        assert str(source_root) not in response.text
+
+    def test_model_stages_are_truthfully_disabled_without_cached_weights(self, client, monkeypatch, tmp_path):
+        from msa_apps.search_api import app as app_module
+
+        monkeypatch.setattr(app_module, "_get_config", lambda _request: SimpleNamespace(
+            media_sources=[], models_dir=tmp_path,
+        ))
+        response = client.get("/adapters")
+        assert response.status_code == 200
+        stages = {stage["id"]: stage for stage in response.json()}
+        for stage_id in ("image-visual", "video-keyframes", "finalization", "qdrant-export", "captions"):
+            assert stages[stage_id]["runnable"] is False
+            assert stages[stage_id]["reason"]
+        assert str(tmp_path) not in response.text
+
+    def test_stage_without_cached_prerequisites_is_explicitly_disabled(self, client):
+        response = client.post("/adapters/finalization/run", params={
+            "source_name": "photos", "relative_path": "sample.mp4",
+        })
+        assert response.status_code == 409
+        assert response.json()["detail"]
+
+    def test_image_visual_runs_only_when_local_capability_is_available(self, client, tmp_path, monkeypatch):
+        from msa_apps.search_api import app as app_module
+        from msa_indexer.adapters import adapter_05_image_visual
+
+        source = SimpleNamespace(name="sample", path=str(tmp_path), enabled=True)
+        config = SimpleNamespace(media_sources=[source], models_dir=tmp_path)
+        monkeypatch.setattr(app_module, "_get_config", lambda _request: config)
+        monkeypatch.setattr(app_module, "_workbench_stage_capabilities", lambda _config: {
+            "image-visual": {"available": True, "reason": None},
+        })
+        monkeypatch.setattr(adapter_05_image_visual, "preview_image_visual_folder", lambda _config, _source: {
+            "scope": "whole_configured_source_images", "images_found": 2,
+            "images_processed": 2, "results": [], "persisted": False,
+        })
+
+        catalog = {stage["id"]: stage for stage in client.get("/adapters").json()}
+        response = client.post("/adapters/image-visual/run", params={"source_name": "sample"})
+
+        assert catalog["image-visual"]["runnable"] is True
+        assert response.status_code == 200
+        assert response.json()["scope"] == "whole_configured_source_images"
+        assert response.json()["images_found"] == 2
+        assert response.json()["persisted"] is False
+
+
+# ── GET/PUT /indexer/settings ────────────────────────────────────────────────
+
+class TestIndexerSettings:
+    def test_defaults_and_capabilities(self, client, monkeypatch):
+        from msa_indexer.adapters import adapter_09_optional_captioning
+
+        monkeypatch.setattr(adapter_09_optional_captioning, "captioning_capabilities", lambda _config=None: {
+            "image_captions": {"available": False, "reason": "CPU Transformers runtime unavailable"},
+            "video_scene_captions": {"available": False, "reason": "CPU Transformers runtime unavailable"},
+        })
+        response = client.get("/indexer/settings")
+        assert response.status_code == 200
+        body = response.json()
+        assert body["processing_order"] == "default"
+        assert body["object_detection_enabled"] is None
+        assert body["image_captions_enabled"] is False
+        assert body["capabilities"]["image_captions"]["available"] is False
+
+    def test_put_persists_app_wide_options_beside_index(self, client, db, monkeypatch):
+        from msa_indexer.adapters import adapter_09_optional_captioning
+
+        monkeypatch.setattr(adapter_09_optional_captioning, "captioning_capabilities", lambda _config=None: {
+            "image_captions": {"available": True, "reason": None},
+            "video_scene_captions": {"available": True, "reason": None},
+        })
+        options = {
+            "processing_order": "newest", "object_detection_enabled": True,
+            "image_captions_enabled": True, "video_scene_captions_enabled": False,
+        }
+        response = client.put("/indexer/settings", json=options)
+        assert response.status_code == 200
+        assert {key: response.json()[key] for key in options} == options
+        assert client.get("/indexer/settings").json()["image_captions_enabled"] is True
+        saved = Path(db).parent / "indexer-settings.json"
+        assert saved.is_file()
+        assert json.loads(saved.read_text(encoding="utf-8"))["processing_order"] == "newest"
+
+    def test_write_failure_does_not_disclose_index_path(self, client, db, monkeypatch):
+        from msa_apps.search_api import app as app_module
+
+        private_path = str(Path(db).parent)
+
+        def fail_mkstemp(**_kwargs):
+            raise PermissionError(private_path)
+
+        monkeypatch.setattr(app_module.tempfile, "mkstemp", fail_mkstemp)
+        response = client.put("/indexer/settings", json={"processing_order": "default"})
+        assert response.status_code == 500
+        assert private_path not in response.text
 
 
 # ── GET /indexer/status ───────────────────────────────────────────────────────

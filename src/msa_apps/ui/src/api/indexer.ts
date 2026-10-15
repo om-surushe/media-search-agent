@@ -89,6 +89,43 @@ export interface BrowseResult {
 
 export type ProcessingOrder = 'default' | 'fastest' | 'newest' | 'oldest'
 
+export interface CaptionCapability {
+  available: boolean
+  reason: string | null
+}
+
+export interface IndexerSettings {
+  processing_order: ProcessingOrder
+  object_detection_enabled: boolean | null
+  image_captions_enabled: boolean
+  video_scene_captions_enabled: boolean
+  capabilities: {
+    image_captions: CaptionCapability
+    video_scene_captions: CaptionCapability
+  }
+}
+
+export type IndexerSettingsUpdate = Omit<IndexerSettings, 'capabilities'>
+
+export async function getIndexerSettings(): Promise<IndexerSettings> {
+  const res = await fetch(apiUrl('/indexer/settings'))
+  if (!res.ok) throw new Error(res.statusText)
+  return res.json()
+}
+
+export async function saveIndexerSettings(settings: IndexerSettingsUpdate): Promise<IndexerSettings> {
+  const res = await fetch(apiUrl('/indexer/settings'), {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(settings),
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }))
+    throw new Error(err.detail ?? 'Failed to save indexer settings')
+  }
+  return res.json()
+}
+
 export async function startIndexer(
   processingOrder: ProcessingOrder = 'default',
   objectDetectionEnabled?: boolean,
