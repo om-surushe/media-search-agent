@@ -103,8 +103,10 @@ see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Development
 
-From a checkout, bootstrap once with `bash scripts/dev-setup.sh`. Run the API
-with `./scripts/dev-api.sh` and the Vite client in a second terminal with
+From a checkout, bootstrap once with `bash scripts/dev-setup.sh`. For a
+single-command, user-like local run, use `./scripts/start.sh`; it serves the
+built UI and opens the browser. For hot-reload development, run the API with
+`./scripts/dev-api.sh` and the Vite client in a second terminal with
 `./scripts/dev-ui.sh`; both watch files and show logs in their own terminal.
 Run an indexing pass in a third terminal with `./scripts/dev-indexer.sh`.
 See [Local development](docs/DEVELOPMENT.md) for model storage, ports, logs,

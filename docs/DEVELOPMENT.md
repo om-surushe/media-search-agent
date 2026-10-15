@@ -33,9 +33,14 @@ Regenerate the checked-in Apple Silicon locks after changing requirement
 inputs with `./scripts/lock-macos-arm64.sh`. The caption lock is generated on
 the current Mac because MLX wheel availability depends on the host macOS ABI.
 
-## Run the app with live reload
+## Run the app
 
-Use separate terminals so logs for each process remain visible.
+For a single-command, user-like local launch, run `./scripts/start.sh`. It serves
+the built UI from FastAPI and opens the browser; `--no-prewarm` skips model
+pre-warming and `--no-browser` is useful on headless hosts.
+
+For hot-reload development, use separate terminals so logs for each process
+remain visible:
 
 **Terminal 1 — API/backend** (FastAPI and embedded Qdrant):
 
@@ -45,8 +50,9 @@ Use separate terminals so logs for each process remain visible.
 
 The API reads the repository `config.yaml` and binds to its configured local
 host/port (8500 in the checked-in development config). Uvicorn watches Python
-and YAML files and restarts the backend when they change. Logs are printed here
-and under `logs/`.
+and YAML files under the backend source packages. Restart the API after editing
+root `config.yaml`; source-only watches avoid scanning local environments and
+model caches. Logs are printed here and under `logs/`.
 
 **Terminal 2 — client/UI** (Vite):
 

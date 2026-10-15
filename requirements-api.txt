@@ -33,9 +33,10 @@ av==14.2.0  # Bundled FFmpeg decoding for local speech transcription; macOS 12+ 
 exifread
 
 # Embeddings & models (required for runtime)
-# Use CPU-only PyTorch to avoid CUDA libraries (saves ~4GB)
-# Note: Use --extra-index-url when installing (not here in file)
-torch==2.*      # Will use CPU version if installed with --extra-index-url
+# Platform installers select the appropriate PyTorch wheels: Linux/WSL2 CPU
+# uses requirements-linux-cpu.txt, Apple Silicon uses the macOS lock, and
+# Windows CUDA uses requirements-windows.txt.
+torch==2.*
 open_clip_torch
 openai-whisper==20250625  # Local Whisper runtime; model weights download lazily on first audio-bearing video
 

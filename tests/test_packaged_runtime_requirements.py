@@ -3,6 +3,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 RUNTIME_REQUIREMENTS = REPO_ROOT / "requirements-api.txt"
+LINUX_CPU_REQUIREMENTS = REPO_ROOT / "requirements-linux-cpu.txt"
 MACOS_SETUP = REPO_ROOT / "scripts" / "setup.sh"
 
 
@@ -19,6 +20,11 @@ def _normalized_package_names(path: Path) -> set[str]:
                 break
         names.add(name.strip().lower().replace("_", "-"))
     return names
+
+
+def test_linux_cpu_overlay_selects_torch_and_torchvision():
+    packages = _normalized_package_names(LINUX_CPU_REQUIREMENTS)
+    assert {"torch", "torchvision"} <= packages
 
 
 def test_packaged_runtime_includes_pymediainfo():

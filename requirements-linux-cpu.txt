@@ -1,0 +1,5 @@
+# Linux/WSL2 CPU-only overlay for the shared API runtime.
+# Install with PyTorch's CPU index before the PyPI default index, as in
+# scripts/dev-setup.sh; plain pip install can select CUDA wheels from PyPI.
+torch==2.*
+torchvision

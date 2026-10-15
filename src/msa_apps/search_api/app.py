@@ -2827,6 +2827,7 @@ def browse_pick(request: Request = None):
     raise HTTPException(status_code=405, detail="Native picker not available on this platform")
 
 
+@app.get("/api/browse", include_in_schema=False)
 @app.get("/browse")
 def browse_directory(path: str = "", request: Request = None):
     """Server-side directory browser (ADR-007).

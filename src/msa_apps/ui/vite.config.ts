@@ -1,4 +1,4 @@
-import { defineConfig, loadEnv } from 'vite'
+import { defineConfig, loadEnv, type ProxyOptions } from 'vite'
 import react from '@vitejs/plugin-react'
 import path from 'path'
 
@@ -13,6 +13,10 @@ export default defineConfig(({ mode }) => {
   const apiOrigin = (env.VITE_API_ORIGIN || 'http://localhost:8000').replace(/\/$/, '')
   const wsOrigin = (env.VITE_WS_ORIGIN || toWsOrigin(apiOrigin)).replace(/\/$/, '')
   const devPort = Number(env.VITE_DEV_PORT || 5173)
+  const apiProxy = (): ProxyOptions => ({
+    target: apiOrigin,
+    bypass: (req) => req.headers.accept?.includes('text/html') ? req.url : undefined,
+  })
 
   return {
     plugins: [react()],
@@ -28,18 +32,28 @@ export default defineConfig(({ mode }) => {
     server: {
       port: devPort,
       proxy: {
-        '/health':          apiOrigin,
-        '/search':          apiOrigin,
-        '/media':           apiOrigin,
-        '/images':          apiOrigin,
-        '/videos':          apiOrigin,
-        '/video-keyframes': apiOrigin,
-        '/faces':           apiOrigin,
-        '/people':          apiOrigin,
-        '/indexer':         apiOrigin,
-        '/config':          apiOrigin,
-        '/thumbnails':      apiOrigin,
-        '/face_thumbnails': apiOrigin,
+        '/health':          apiProxy(),
+        '/api':             apiProxy(),
+        '/search':          apiProxy(),
+        '/transcripts':     apiProxy(),
+        '/track':           apiProxy(),
+        '/media':           apiProxy(),
+        '/images':          apiProxy(),
+        '/videos':          apiProxy(),
+        '/video-keyframes': apiProxy(),
+        '/faces':           apiProxy(),
+        '/people':          apiProxy(),
+        '/tags':            apiProxy(),
+        '/user-tags':       apiProxy(),
+        '/collections':     apiProxy(),
+        '/indexer':         apiProxy(),
+        '/config':          apiProxy(),
+        '/platform':        apiProxy(),
+        '/browse':          apiProxy(),
+        '/diagnostics':     apiProxy(),
+        '/logs':            apiProxy(),
+        '/thumbnails':      apiProxy(),
+        '/face_thumbnails': apiProxy(),
         '/ws': { target: wsOrigin, ws: true },
       },
     },

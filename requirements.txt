@@ -1,4 +1,6 @@
 # Full local-dev requirements (notebooks, GUI opencv, all backends).
+# Use scripts/dev-setup.sh for platform-selected PyTorch wheels (Linux CPU
+# overlay, macOS lock, or Windows CUDA manifest).
 # For the packaged-app runtime see requirements-api.txt.
 # For the Windows native CUDA build see requirements-windows.txt.
 

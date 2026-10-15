@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run the project API in the foreground with automatic source/config reload.
+# Run the project API in the foreground with package-source reload. Restart after config changes.
 set -euo pipefail
 
 MSA_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -35,10 +35,10 @@ PORT="${MSA_DEV_API_PORT:-$CONFIG_PORT}"
 cd "$MSA_ROOT"
 exec "$UVICORN" msa_apps.search_api.app:app \
   --host "$HOST" --port "$PORT" \
-  --reload --reload-dir "$MSA_ROOT" \
-  --reload-include '*.py' --reload-include '*.yaml' \
-  --reload-exclude '.venv/**' \
-  --reload-exclude 'models/**' \
-  --reload-exclude 'index/**' \
-  --reload-exclude 'data/**' \
-  --reload-exclude 'logs/**'
+  --reload \
+  --reload-dir "$MSA_ROOT/src/msa_apps/search_api" \
+  --reload-dir "$MSA_ROOT/src/msa_indexer" \
+  --reload-dir "$MSA_ROOT/src/msa_query" \
+  --reload-dir "$MSA_ROOT/src/msa_settings" \
+  --reload-dir "$MSA_ROOT/src/msa_cli" \
+  --reload-include '*.py' --reload-include '*.yaml'

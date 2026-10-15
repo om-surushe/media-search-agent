@@ -6,7 +6,7 @@ after all API routes, so API routes always take priority.
 
 Covers:
 - GET /          → 200 text/html (SPA root)
-- GET /browse    → 200 application/json (API endpoint — returns directory listing)
+- GET /browse and /api/browse → 200 application/json (directory listing API)
 - GET /settings  → 200 text/html (React Router path, no API collision)
 - GET /health    → 200 application/json (API route wins)
 - GET /thumbnails/missing → 404 not text/html (thumbnail mount wins, not SPA)
@@ -34,11 +34,12 @@ class TestSPAServing:
         assert "text/html" in r.headers["content-type"]
         assert '<div id="root">' in r.text
 
-    def test_browse_route_returns_json(self, client):
-        """/browse is an API endpoint — returns a JSON directory listing for a real path."""
-        import tempfile, os
+    @pytest.mark.parametrize("endpoint", ["/browse", "/api/browse"])
+    def test_browse_routes_return_json(self, client, endpoint):
+        """Both the legacy and SPA-safe browse endpoints return a directory listing."""
+        import tempfile
         with tempfile.TemporaryDirectory() as tmp:
-            r = client.get(f"/browse?path={tmp}", headers={"host": "localhost"})
+            r = client.get(f"{endpoint}?path={tmp}", headers={"host": "localhost"})
             assert r.status_code == 200
             assert "application/json" in r.headers["content-type"]
             data = r.json()

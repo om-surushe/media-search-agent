@@ -258,7 +258,7 @@ export async function nativePick(): Promise<{ path: string | null; cancelled: bo
 }
 
 export async function browse(path: string): Promise<BrowseResult> {
-  const res = await fetch(apiUrl(`/browse?path=${encodeURIComponent(path)}`))
+  const res = await fetch(apiUrl(`/api/browse?path=${encodeURIComponent(path)}`))
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: res.statusText }))
     throw new Error(err.detail ?? 'Failed to browse directory')

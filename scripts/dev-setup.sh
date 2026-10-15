@@ -209,11 +209,23 @@ else
     [[ ! -f "$REQS" ]] && REQS="$MSA_ROOT/requirements.txt"
     log_info "Requirements: $REQS"
 
-    # Install all packages except facenet-pytorch; then install facenet-pytorch
-    # --no-deps so its solver cannot replace the CUDA-capable torch already
-    # placed by requirements-api.txt (torch==2.* pinned there).
+    # Install CPU-only torch and torchvision from their dedicated index first.
+    # Keeping that index separate prevents PyPI's CUDA wheels from winning.
+    TORCH_CUDA_VERSION=$("$VENV/bin/python" -c 'import torch; print(torch.version.cuda or "")' 2>/dev/null || true)
+    if [[ -n "$TORCH_CUDA_VERSION" ]]; then
+        log_info "Replacing CUDA torch ($TORCH_CUDA_VERSION) with CPU wheels..."
+        "$UV_BIN" pip uninstall --python "$VENV/bin/python" torch torchvision
+    fi
+    "$UV_BIN" pip install --python "$VENV/bin/python" \
+        --default-index https://pypi.org/simple \
+        --index https://download.pytorch.org/whl/cpu \
+        --index-strategy first-index \
+        -r "$MSA_ROOT/requirements-linux-cpu.txt"
+
+    # Install remaining packages from PyPI, then add facenet-pytorch without
+    # dependencies so its resolver cannot replace the selected torch build.
     TMP_REQS="$(mktemp)"
-    grep -v '^facenet-pytorch' "$REQS" > "$TMP_REQS"
+    grep -v -E '^(facenet-pytorch|torch==|torchvision([[:space:]]|$))' "$REQS" > "$TMP_REQS"
     "$UV_BIN" pip install --python "$VENV/bin/python" -r "$TMP_REQS"
     rm -f "$TMP_REQS"
     "$UV_BIN" pip install --python "$VENV/bin/python" "facenet-pytorch>=2.6.0" --no-deps
@@ -247,8 +259,13 @@ else
 
     log_bold "Node.js..."
 
-    if node --version 2>/dev/null | grep -q "^v${NODE_MAJOR}\."; then
+    NODE_CURRENT_MAJOR="$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)"
+    NPM_RUNNER=()
+    if [[ "$NODE_CURRENT_MAJOR" == "$NODE_MAJOR" ]]; then
         log_skip "Node.js $(node --version) already installed"
+    elif command -v volta >/dev/null 2>&1; then
+        log_info "Using Volta Node.js v${NODE_MAJOR}.x for UI commands..."
+        NPM_RUNNER=(volta run --node "$NODE_MAJOR")
     else
         log_info "Installing Node.js v${NODE_MAJOR}.x via NodeSource..."
         curl -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" \
@@ -266,7 +283,7 @@ else
     if [[ ! -d "$UI_DIR/node_modules" ]] || \
        [[ "$UI_DIR/package-lock.json" -nt "$UI_DIR/node_modules" ]]; then
         log_info "npm ci..."
-        npm --prefix "$UI_DIR" ci >> "$MSA_LOG_FILE" 2>&1
+        "${NPM_RUNNER[@]}" npm --prefix "$UI_DIR" ci >> "$MSA_LOG_FILE" 2>&1
         log_ok "npm packages installed"
     else
         log_skip "node_modules already present"
@@ -275,7 +292,7 @@ else
     UI_DIST="$UI_DIR/dist"
     if [[ ! -d "$UI_DIST" ]] || [[ "$UI_DIR/package.json" -nt "$UI_DIST/index.html" ]]; then
         log_info "Building React UI..."
-        npm --prefix "$UI_DIR" run build >> "$MSA_LOG_FILE" 2>&1
+        "${NPM_RUNNER[@]}" npm --prefix "$UI_DIR" run build >> "$MSA_LOG_FILE" 2>&1
         log_ok "React UI built → $UI_DIST"
     else
         log_skip "React UI dist is up to date"

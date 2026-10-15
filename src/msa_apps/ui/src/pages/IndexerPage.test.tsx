@@ -51,7 +51,7 @@ function mockFetch(overrides: Record<string, object> = {}) {
       return Promise.resolve({ ok: true, json: () => Promise.resolve(overrides[url] ?? { platform: 'linux' }) })
     if (url === '/browse/pick')
       return Promise.resolve({ ok: true, json: () => Promise.resolve(overrides[url] ?? { path: '/Users/test/Pictures', cancelled: false }) })
-    if (typeof url === 'string' && url.startsWith('/browse?path='))
+    if (typeof url === 'string' && url.startsWith('/api/browse?path='))
       return Promise.resolve({
         ok: true,
         json: () => Promise.resolve({

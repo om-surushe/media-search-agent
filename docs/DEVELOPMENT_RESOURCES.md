@@ -42,7 +42,9 @@ Dependency manifests are the source of truth—do not install every file indiscr
 
 | Resource | Manifest / lock | Use |
 |---|---|---|
-| Python app runtime | `requirements-api.txt`; Windows installer variant `requirements-windows.txt` | Runtime dependencies and platform-specific constraints. |
+| Shared Python app runtime | `requirements-api.txt` | Runtime dependencies shared by platform setup paths. |
+| Linux/WSL2 CPU wheels | `requirements-linux-cpu.txt` | CPU-only torch/torchvision overlay; `scripts/dev-setup.sh` installs it with the PyTorch CPU index first. |
+| Windows native CUDA | `requirements-windows.txt` | Windows runtime manifest; installer selects compatible CUDA torch/torchvision first. |
 | General local development | `requirements.txt` | Runtime plus notebook/developer extras; broader and less pinned than the platform lock. |
 | CI/test environment | `tests/requirements-ci.txt` | Minimal CI imports/test dependencies; CI installs FaceNet separately with `--no-deps`. |
 | Apple Silicon API/dev | `requirements-api-macos-arm64.lock`, `requirements-dev-macos-arm64.lock` | Generated CPython 3.12 / macOS arm64 transitive pins. Regenerate only with `scripts/lock-macos-arm64.sh`. |
@@ -62,14 +64,16 @@ bash scripts/dev-setup.sh
 
 The idempotent bootstrap installs/checks system tools, provisions the repository Python environment and UI dependencies, and enters the development shell. It needs network access. It does not copy or index media. The checked-in development `config.yaml` has `media_sources: []` and keeps generated state in ignored repository-local directories.
 
-Run the web application in separate terminals:
+For hot-reload development, run the API and Vite client in separate terminals:
 
 ```bash
 ./scripts/dev-api.sh
 ./scripts/dev-ui.sh
 ```
 
-Open <http://127.0.0.1:5173>. **Starting the API in normal development mode starts the core-model setup manager**, which downloads missing CLIP, RT-DETR, and FaceNet weights into the configured `models/` cache. If you only want tests and do not want model downloads, do not start the API; run tests directly. The `MSA_SEARCH_BROWSE_READ_ONLY=1` mode also suppresses automatic model setup.
+Open <http://127.0.0.1:5173>. Vite proxies API calls to the backend; navigation requests remain on the SPA so direct routes work. For a single-command, user-like local run, use `./scripts/start.sh`; it serves the built UI from the API and opens the browser. Stop the dev servers first because both modes use the configured API port.
+
+**Starting the API starts the core-model setup manager**, which downloads missing CLIP, RT-DETR, and FaceNet weights into the configured `models/` cache. If you only want tests and do not want model downloads, do not start the API; run tests directly. The `MSA_SEARCH_BROWSE_READ_ONLY=1` mode also suppresses automatic model setup.
 
 ### CI/cloud test environment
 
