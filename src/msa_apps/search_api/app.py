@@ -470,9 +470,11 @@ def health(request: Request):
     return {"status": "ready" if ready else "starting"}
 
 
-def _workbench_stage_capabilities(_config):
-    # Later stages are enabled after their individual review and approval.
-    return {}
+def _workbench_stage_capabilities(config):
+    from msa_indexer.adapters.adapter_04_transcription import transcription_capability
+
+    models_dir = Path(getattr(config, "models_dir", "models"))
+    return {"transcription": transcription_capability(models_dir)}
 
 
 @app.get("/adapters")
@@ -526,7 +528,7 @@ def run_adapter_preview(
     if stage is None:
         raise HTTPException(status_code=404, detail="Unknown adapter stage")
     config = _get_config(request)
-    capability = _workbench_stage_capabilities(config).get(stage_id)
+    capability = _workbench_stage_capabilities(config).get(stage_id) if stage_id == "transcription" else None
     if capability is not None:
         stage = {**stage, "runnable": capability["available"], "reason": capability["reason"]}
     if not stage["runnable"]:
@@ -534,8 +536,8 @@ def run_adapter_preview(
     source = _workbench_source(config, source_name)
     if source is None:
         raise HTTPException(status_code=404, detail="Enabled configured source not found")
-    if stage_id in {"identity", "metadata"} and relative_path is not None:
-        raise HTTPException(status_code=400, detail="This adapter runs on the whole configured source; file selection is not accepted")
+    if stage_id in {"identity", "metadata", "transcription"} and relative_path is not None:
+        raise HTTPException(status_code=400, detail="This adapter runs on the configured source; file selection is not accepted")
     try:
         if stage_id == "identity":
             from msa_indexer.adapters.adapter_02_identity import preview_source_identity
@@ -544,11 +546,9 @@ def run_adapter_preview(
             from msa_indexer.adapters.adapter_03_metadata import preview_source_metadata
             action = lambda: preview_source_metadata(source)
         elif stage_id == "transcription":
-            if not relative_path:
-                raise HTTPException(status_code=400, detail="Discovery is required before running this per-file adapter")
-            from msa_indexer.adapters.adapter_04_transcription import preview_transcription
-            action = lambda: preview_transcription(
-                source, relative_path, Path(getattr(config, "models_dir", "models")), getattr(config, "device", "cpu"),
+            from msa_indexer.adapters.adapter_04_transcription import preview_transcription_folder
+            action = lambda: preview_transcription_folder(
+                source, Path(getattr(config, "models_dir", "models")), getattr(config, "device", "cpu"),
             )
         elif stage_id == "image-visual":
             if not relative_path:
@@ -583,6 +583,10 @@ def run_adapter_preview(
         return result
     except HTTPException:
         raise
+    except RuntimeError as exc:
+        if stage_id == "transcription":
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        raise HTTPException(status_code=422, detail=f"Adapter failed: {type(exc).__name__}") from exc
     except Exception as exc:
         raise HTTPException(status_code=422, detail=f"Adapter failed: {type(exc).__name__}") from exc
 @app.post("/video-keyframes/preview", response_model=KeyframePreviewResponse)

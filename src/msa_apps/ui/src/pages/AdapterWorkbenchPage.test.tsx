@@ -12,7 +12,7 @@ describe('AdapterWorkbenchPage', () => {
     vi.stubGlobal('fetch', vi.fn().mockImplementation((url: string) => Promise.resolve({
       ok: true,
       json: async () => url.endsWith('/adapters')
-        ? [{ id: 'discovery', number: 1, name: 'Discovery', runnable: true }, { id: 'identity', number: 2, name: 'Identity', runnable: true }, { id: 'metadata', number: 3, name: 'Metadata', runnable: true }]
+        ? [{ id: 'discovery', number: 1, name: 'Discovery', runnable: true }, { id: 'identity', number: 2, name: 'Identity', runnable: true }, { id: 'metadata', number: 3, name: 'Metadata', runnable: true }, { id: 'transcription', number: 4, name: 'Video transcription', runnable: true }]
         : url.includes('/adapters/discovery/run')
           ? { source: 'sample', returned: 1, has_more: false, entries: [{ name: 'photo.jpg', relative_path: 'photo.jpg', extension: '.jpg', size_bytes: 1 }], elapsed_seconds: 0.01 }
           : { relative_path: 'photo.jpg', sha256: 'abc', elapsed_seconds: 0.002 },
@@ -31,6 +31,11 @@ describe('AdapterWorkbenchPage', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Run Metadata on whole folder' }))
     await waitFor(() => expect(vi.mocked(fetch)).toHaveBeenCalledWith(
       expect.stringContaining('/adapters/metadata/run?source_name=sample'), { method: 'POST' },
+    ))
+    expect(String(vi.mocked(fetch).mock.calls.at(-1)?.[0])).not.toContain('relative_path=')
+    fireEvent.click(screen.getByRole('button', { name: 'Run Video transcription on whole folder' }))
+    await waitFor(() => expect(vi.mocked(fetch)).toHaveBeenCalledWith(
+      expect.stringContaining('/adapters/transcription/run?source_name=sample'), { method: 'POST' },
     ))
     expect(String(vi.mocked(fetch).mock.calls.at(-1)?.[0])).not.toContain('relative_path=')
   })
