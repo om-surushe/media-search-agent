@@ -11,7 +11,7 @@ runtimes and verified model weights are available; it uses disposable storage,
 returns bounded details, and persists nothing. The page lists model presence and offers a button to start the app-managed
 verified downloads; live model states and errors appear in the setup log. The
 preview itself remains offline. Settings links to the configured model and
-detector options. Stages 06–09 remain disabled pending review. The API confines file operations
+detector options. Stages 08–09 remain disabled pending review. The API confines file operations
 to the configured root, rejects traversal/escaping symlinks, and never returns
 absolute paths. Whole-source identity hashing can take time, so the UI confirms
 before starting it.
@@ -26,11 +26,11 @@ before starting it.
 | 04 Transcription | Conditional | Requires cached Whisper base weights; verifies and copies them to a temporary cache, transcribes all videos from disposable copies, and returns bounded details without persistence. |
 | 05 Image visual | Conditional; every image in configured source | Requires cached, verifiable CLIP and RT-DETR weights/runtimes; object detection is forced on for this stage without changing the app-wide setting. Optional face recognition follows Settings. Copies supported images into disposable storage, processes them in one pipeline run, and returns at most 25 bounded embedding, object-tag, face, and detector-status details without persistence. |
 | 06 Complete video keyframe processing | Conditional; every video in configured source | Runs shot selection, decode/cache, frame embeddings, and forced RT-DETR object plus FaceNet face detection on extracted keyframes, returning normalized face bounding boxes, in one isolated pipeline run. Copies videos and verified model weights to disposable storage, returns at most 25 video details with bounded shot/keyframe lists, and persists nothing. Requires cached CLIP, RT-DETR, and FaceNet weights/runtimes; shot detection is checked when enabled. |
-| 07 Finalization | Disabled pending review | Not available in this checkpoint. |
+| 07 Finalization | Conditional; one selected sample | Runs local SQLite scan completion and index-version commit in disposable state; the live index is unchanged. Requires the same cached local models as indexing. |
 | 08 Qdrant export | Disabled pending review | Not available in this checkpoint. |
 | 09 Optional captions | Disabled pending review | Not available in this checkpoint. |
 
-Stages 07–09 remain disabled pending review. Whole-source stages return at most
+Stages 08–09 remain disabled pending review. Whole-source stages return at most
 25 detail rows; Stage 04 returns at most 10 video summaries and 20 bounded
 segments per video, with relative names only. Stage 06 returns at most 25 video
 summaries and 100 shots/keyframes per video; videos over 2 GiB are rejected.

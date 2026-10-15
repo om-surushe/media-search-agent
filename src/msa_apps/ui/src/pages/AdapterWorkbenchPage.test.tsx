@@ -59,6 +59,30 @@ describe('AdapterWorkbenchPage', () => {
     expect(String(vi.mocked(fetch).mock.calls.at(-1)?.[0])).not.toContain('relative_path=')
   })
 
+  it('shows a selected-sample button for runnable Stage 07', async () => {
+    vi.mocked(fetch).mockImplementation((url: string) => Promise.resolve({
+      ok: true,
+      json: async () => url.endsWith('/adapters')
+        ? [{ id: 'discovery', number: 1, name: 'Discovery', runnable: true }, { id: 'finalization', number: 7, name: 'Local finalization', runnable: true }]
+        : url.includes('/api/setup/status')
+          ? { ready: false, models: [] }
+          : url.includes('/adapters/discovery/run')
+            ? { source: 'sample', returned: 1, has_more: false, entries: [{ name: 'clip.mp4', relative_path: 'clip.mp4', extension: '.mp4', size_bytes: 1 }], elapsed_seconds: 0.01 }
+            : { relative_path: 'clip.mp4', persisted: false },
+    } as Response))
+
+    render(<AdapterWorkbenchPage />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Run Discovery (25 max)' }))
+    fireEvent.click(await screen.findByText('Optional sample selection for single-file stages 07–09'))
+    fireEvent.change(screen.getByLabelText('Sample file'), { target: { value: 'clip.mp4' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Run on selected sample' }))
+
+    await waitFor(() => expect(vi.mocked(fetch)).toHaveBeenCalledWith(
+      expect.stringContaining('/adapters/finalization/run?source_name=sample&relative_path=clip.mp4'),
+      { method: 'POST' },
+    ))
+  })
+
   it('shows the model loader when Stage 05 is unavailable', async () => {
     vi.mocked(fetch).mockImplementation((url: string) => Promise.resolve({
       ok: true,

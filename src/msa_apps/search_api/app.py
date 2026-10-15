@@ -474,12 +474,14 @@ def _workbench_stage_capabilities(config):
     from msa_indexer.adapters.adapter_04_transcription import transcription_capability
     from msa_indexer.adapters.adapter_05_image_visual import image_visual_capability
     from msa_indexer.adapters.adapter_06_video_keyframes import video_keyframe_capability
+    from msa_indexer.adapters.adapter_07_finalization import finalization_capability
 
     models_dir = Path(getattr(config, "models_dir", "models"))
     return {
         "transcription": transcription_capability(models_dir),
         "image-visual": image_visual_capability(config),
         "video-keyframes": video_keyframe_capability(config),
+        "finalization": finalization_capability(config),
     }
 
 
@@ -536,7 +538,7 @@ def run_adapter_preview(
     config = _get_config(request)
     capability = (
         _workbench_stage_capabilities(config).get(stage_id)
-        if stage_id in {"transcription", "image-visual", "video-keyframes"} else None
+        if stage_id in {"transcription", "image-visual", "video-keyframes", "finalization"} else None
     )
     if capability is not None:
         stage = {**stage, "runnable": capability["available"], "reason": capability["reason"]}
