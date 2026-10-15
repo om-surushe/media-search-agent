@@ -52,6 +52,12 @@ def _is_collection_not_found(exc: Exception) -> bool:
     return any(p in msg for p in _COLLECTION_NOT_FOUND_PHRASES)
 
 
+def _new_qdrant_client(qdrant_path: Path | str | None = None) -> QdrantClient:
+    """Open configured Qdrant by default or an explicit disposable preview store."""
+    path = S.qdrant_path if qdrant_path is None else qdrant_path
+    return QdrantClient(path=str(path))
+
+
 @dataclass
 class ExportOutcome:
     """Result of one _do_qdrant_export pass (M-8/S-3 §4.2 widened gate).
@@ -545,9 +551,11 @@ def _face_point_id(face_id: str) -> int:
     return h & ((1 << 63) - 1)
 
 
-def get_qdrant_export_version() -> dict[str, Any] | None:
+def get_qdrant_export_version(
+    qdrant_path: Path | str | None = None,
+) -> dict[str, Any] | None:
     """Return the last successfully exported local index version recorded in Qdrant."""
-    client = QdrantClient(path=str(S.qdrant_path))
+    client = _new_qdrant_client(qdrant_path)
     try:
         client.get_collection(QDRANT_EXPORT_STATE_COLLECTION)
     except Exception:
@@ -578,9 +586,12 @@ def get_qdrant_export_version() -> dict[str, Any] | None:
     }
 
 
-def record_qdrant_export_version(index_version_seq: int, index_version_ts: str | None) -> None:
+def record_qdrant_export_version(
+    index_version_seq: int, index_version_ts: str | None,
+    qdrant_path: Path | str | None = None,
+) -> None:
     """Persist the currently exported local index version inside Qdrant."""
-    client = QdrantClient(path=str(S.qdrant_path))
+    client = _new_qdrant_client(qdrant_path)
     ensure_collection(
         client,
         QDRANT_EXPORT_STATE_COLLECTION,
@@ -609,6 +620,7 @@ def delete_tombstoned_points_from_qdrant(
     image_collection: Optional[str] = None,
     video_collection: str = "video_emb",
     face_collection: str = "face_emb",
+    qdrant_path: Path | str | None = None,
 ) -> Dict[str, Any]:
     """§4.2 deletion pass (M-8/S-3): remove the Qdrant points of stamped
     tombstones (``media.deleted = 1 AND deleted_seq > since_seq``;
@@ -665,7 +677,7 @@ def delete_tombstoned_points_from_qdrant(
         for fid in t["face_ids"]:
             face_ids.append(_face_point_id(fid))
 
-    client = QdrantClient(path=str(S.qdrant_path))
+    client = _new_qdrant_client(qdrant_path)
     try:
         for stat_key, collection, ids in (
             ("image_points", image_collection, image_ids),
@@ -737,6 +749,7 @@ def export_images_to_qdrant(
     batch_size: int = 256,
     recreate: bool | None = None,
     since_seq: Optional[int] = None,
+    qdrant_path: Path | str | None = None,
 ) -> Dict[str, Any]:
     """
     Read image metadata + embeddings from SQLite and upsert into Qdrant.
@@ -763,7 +776,7 @@ def export_images_to_qdrant(
     import numpy as np
 
     with SQLiteStore(sqlite_path) as meta:
-        client = QdrantClient(path=str(S.qdrant_path))
+        client = _new_qdrant_client(qdrant_path)
 
         if recreate is None:
             recreate = bool(getattr(S, 'qdrant_recreate_collections_on_export', False))
@@ -888,6 +901,7 @@ def export_video_frames_to_qdrant(
     batch_size: int = 256,
     recreate: bool | None = None,
     since_seq: Optional[int] = None,
+    qdrant_path: Path | str | None = None,
 ) -> Dict[str, Any]:
     """
     Export video keyframe embeddings from SQLite into Qdrant.
@@ -907,7 +921,7 @@ def export_video_frames_to_qdrant(
     import numpy as np
 
     with SQLiteStore(sqlite_path) as meta:
-        client = QdrantClient(path=str(S.qdrant_path))
+        client = _new_qdrant_client(qdrant_path)
         if recreate is None:
             recreate = bool(getattr(S, 'qdrant_recreate_collections_on_export', False))
 
@@ -1034,6 +1048,7 @@ def export_faces_to_qdrant(
     face_vec_path: Optional[Path] = None,  # kept for backward-compat; ignored
     embedding_backend: str = "facenet_pytorch",
     since_seq: Optional[int] = None,
+    qdrant_path: Path | str | None = None,
 ) -> Dict[str, Any]:
     """
     Export face embeddings from the ``face_embedding`` SQLite table to Qdrant.
@@ -1053,7 +1068,7 @@ def export_faces_to_qdrant(
     import numpy as np
 
     with SQLiteStore(sqlite_path) as meta:
-        client = QdrantClient(path=str(S.qdrant_path))
+        client = _new_qdrant_client(qdrant_path)
 
         if recreate is None:
             recreate = bool(getattr(S, 'qdrant_recreate_collections_on_export', False))
