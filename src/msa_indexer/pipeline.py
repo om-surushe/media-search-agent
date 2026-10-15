@@ -47,6 +47,7 @@ from .models.asr import (
     WHISPER_MODEL_REVISION,
     WHISPER_RUNTIME_VERSION,
 )
+from .models.providers import ModelAdapterBundle, default_model_adapters
 from .db.qdrant_export import (
     export_images_to_qdrant,
     export_video_frames_to_qdrant,
@@ -534,7 +535,9 @@ def get_place_name(lat: float, lon: float) -> str | None:
     
     return None
 
-def run_index(config, stop_event=None):
+def run_index(
+    config, stop_event=None, *, model_adapters: ModelAdapterBundle | None = None
+):
     import time
     import os
     # Track total run time
@@ -920,8 +923,11 @@ def run_index(config, stop_event=None):
     except Exception as exc:
         logger.debug(f"Could not check orphan face_embedding count: {exc}")
     models_dir = getattr(config, 'models_dir', None)
-    embedder = ClipEmbedder(config.model_name, config.pretrained, config.device,
-                            cache_dir=models_dir)
+    if model_adapters is None:
+        model_adapters = default_model_adapters(ClipEmbedder, LocalWhisperTranscriber)
+    embedder = model_adapters.clip.create(
+        config.model_name, config.pretrained, config.device, models_dir
+    )
     transcriber = None
     logger.info(f"CLIP model ({config.model_name}) running on {get_device_label(config.device)}")
     # Embeddings are stored as BLOBs in the image_embedding /
@@ -1604,8 +1610,9 @@ def run_index(config, stop_event=None):
                 transcription_start = time.perf_counter()
                 try:
                     if transcriber is None:
-                        transcriber = LocalWhisperTranscriber(
-                            Path(models_dir or "models"), getattr(config, "device", "cpu")
+                        transcriber = model_adapters.whisper.create(
+                            Path(models_dir or "models"),
+                            getattr(config, "device", "cpu"),
                         )
                     transcript = transcriber.transcribe(p)
                     db.store_transcript(

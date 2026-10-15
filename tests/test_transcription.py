@@ -213,8 +213,24 @@ def test_indexer_transcribes_visual_noop_and_skips_current_transcript(tmp_path, 
                 "transcribed", "en", ({"start": 1.0, "end": 2.0, "text": "Hello there."},)
             )
 
-    monkeypatch.setattr(pipeline, "ClipEmbedder", lambda *_a, **_k: object())
-    monkeypatch.setattr(pipeline, "LocalWhisperTranscriber", FakeTranscriber)
+    class FakeClipAdapter:
+        def __init__(self):
+            self.calls = []
+
+        def create(self, *args):
+            self.calls.append(args)
+            return object()
+
+    class FakeWhisperAdapter:
+        def __init__(self):
+            self.calls = []
+
+        def create(self, *args):
+            self.calls.append(args)
+            return FakeTranscriber()
+
+    clip_adapter = FakeClipAdapter()
+    whisper_adapter = FakeWhisperAdapter()
     monkeypatch.setattr(pipeline, "_load_historical_perf", lambda _p: (0.0, 0.0, 0.0))
     monkeypatch.setattr(pipeline, "_emit_indexer_summary", lambda **_p: None)
     monkeypatch.setattr(pipeline.qdrant_handoff, "handoff_window", lambda **_k: nullcontext())
@@ -245,12 +261,17 @@ def test_indexer_transcribes_visual_noop_and_skips_current_transcript(tmp_path, 
     }), encoding="utf-8")
     config = reload_config(str(config_path))
 
-    pipeline.run_index(config)
+    from msa_indexer.models.providers import ModelAdapterBundle
+
+    adapters = ModelAdapterBundle(clip=clip_adapter, whisper=whisper_adapter)
+    pipeline.run_index(config, model_adapters=adapters)
     db = SQLiteStore(db_path)
     assert db.get_processing_status(media_id)["transcription_status"] == "transcribed"
     db.close()
-    pipeline.run_index(config)
+    pipeline.run_index(config, model_adapters=adapters)
     assert calls == [video]
+    assert len(clip_adapter.calls) == 2
+    assert len(whisper_adapter.calls) == 1
 
 
 def test_transcriber_defers_model_loading_until_audio_is_processed(tmp_path):
