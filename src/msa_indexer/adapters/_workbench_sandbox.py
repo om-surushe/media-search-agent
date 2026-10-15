@@ -108,6 +108,7 @@ def index_capability(
 
 def _copy_model_cache(
     config, target: Path, checkpoint: Path, *, force_object_detection: bool = False,
+    include_object_detection: bool | None = None,
 ) -> Path:
     from msa_indexer.pipeline import _object_detection_enabled
 
@@ -117,7 +118,10 @@ def _copy_model_cache(
     local_checkpoint = clip_target / checkpoint.name
     shutil.copyfile(checkpoint, local_checkpoint)
     source_models = Path(getattr(config, "models_dir", "models"))
-    if force_object_detection or _object_detection_enabled(config):
+    copy_detector = force_object_detection or (
+        _object_detection_enabled(config) if include_object_detection is None else include_object_detection
+    )
+    if copy_detector:
         shutil.copytree(source_models / "rtdetr", target / "rtdetr")
     if getattr(config, "enable_face_recognition", False):
         shutil.copytree(source_models / "facenet_pytorch", target / "facenet_pytorch")
@@ -162,10 +166,12 @@ def _offline_model_runtime(model_cache: Path):
 def _run_staged_source(
     config, source, workspace: Path, staged_root: Path, checkpoint: Path,
     *, result_limit: int, after_index=None, force_object_detection: bool = False,
-) -> tuple[int, int, list[dict]]:
+    include_object_detection: bool | None = None, after_source=None,
+) -> tuple[int, int, dict, list[dict]]:
     model_cache = workspace / "models"
     local_checkpoint = _copy_model_cache(
         config, model_cache, checkpoint, force_object_detection=force_object_detection,
+        include_object_detection=include_object_detection,
     )
     isolated = copy.copy(config)
     isolated.media_sources = [type(source)(name=source.name, path=str(staged_root), enabled=True)]
@@ -200,6 +206,41 @@ def _run_staged_source(
             "SELECT COUNT(*) FROM image_embedding e JOIN media m ON m.media_id=e.media_id "
             "WHERE m.source_name=? AND m.deleted=0", (source.name,),
         ).fetchone()[0]
+        summary = {
+            "shots": int(db.conn.execute(
+                "SELECT COUNT(*) FROM shots s JOIN media m ON m.media_id=s.video_id "
+                "WHERE m.source_name=? AND m.deleted=0", (source.name,),
+            ).fetchone()[0]),
+            "video_keyframes": int(db.conn.execute(
+                "SELECT COUNT(*) FROM video_keyframes vk JOIN media m ON m.media_id=vk.video_id "
+                "WHERE m.source_name=? AND m.deleted=0", (source.name,),
+            ).fetchone()[0]),
+            "embedded_keyframes": int(db.conn.execute(
+                "SELECT COUNT(*) FROM keyframe_embedding ke JOIN video_keyframes vk "
+                "ON vk.id=ke.keyframe_id JOIN media m ON m.media_id=vk.video_id "
+                "WHERE m.source_name=? AND m.deleted=0 AND ke.embedding IS NOT NULL", (source.name,),
+            ).fetchone()[0]),
+            "videos_with_keyframes": int(db.conn.execute(
+                "SELECT COUNT(DISTINCT vk.video_id) FROM video_keyframes vk "
+                "JOIN media m ON m.media_id=vk.video_id WHERE m.source_name=? AND m.deleted=0",
+                (source.name,),
+            ).fetchone()[0]),
+        }
+        cache_row = db.conn.execute(
+            "SELECT COUNT(DISTINCT vf.frame_id), COUNT(DISTINCT vfr.rendition_id) "
+            "FROM video_frame vf JOIN media m ON m.media_id=vf.video_id "
+            "LEFT JOIN video_frame_rendition vfr ON vfr.frame_id=vf.frame_id "
+            "WHERE m.source_name=? AND m.deleted=0", (source.name,),
+        ).fetchone()
+        summary["decoded_frames"] = int(cache_row[0])
+        summary["cached_renditions"] = int(cache_row[1])
+        summary["selection_statuses"] = dict(db.conn.execute(
+            "SELECT state.status, COUNT(DISTINCT state.video_id) "
+            "FROM video_keyframe_selection_state state JOIN media m ON m.media_id=state.video_id "
+            "WHERE m.source_name=? AND m.deleted=0 GROUP BY state.status", (source.name,),
+        ).fetchall())
+        if after_source is not None:
+            summary.update(after_source(db, isolated, workspace))
         rows = db.conn.execute(
             "SELECT media_id, rel_path FROM media WHERE source_name=? AND deleted=0 "
             "ORDER BY rel_path LIMIT ?", (source.name, result_limit),
@@ -210,7 +251,7 @@ def _run_staged_source(
             if after_index is not None:
                 result.update(after_index(db, isolated, workspace, media_id))
             results.append(result)
-        return int(total), int(embedding_count), results
+        return int(total), int(embedding_count), summary, results
     finally:
         db.close()
 
@@ -239,7 +280,7 @@ def run_one_file(
         staged_file = staged_root / original.relative_to(root)
         staged_file.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(original, staged_file)
-        total, _embeddings, results = _run_staged_source(
+        total, _embeddings, _summary, results = _run_staged_source(
             config, source, workspace, staged_root, checkpoint,
             result_limit=1, after_index=after_index,
             force_object_detection=force_object_detection,
@@ -289,7 +330,7 @@ def run_image_folder(config, source, *, result_limit: int = 25, after_index=None
                 "images_without_embedding": 0, "complete": True,
                 "results": [], "results_truncated": False, "persisted": False,
             }
-        processed, embeddings, results = _run_staged_source(
+        processed, embeddings, _summary, results = _run_staged_source(
             config, source, workspace, staged_root, checkpoint,
             result_limit=result_limit, after_index=after_index,
             force_object_detection=True,
@@ -303,6 +344,67 @@ def run_image_folder(config, source, *, result_limit: int = 25, after_index=None
             "complete": processed == images_found and embeddings == images_found,
             "results": results,
             "results_truncated": images_found > len(results),
+            "persisted": False,
+        }
+
+
+def run_video_folder(config, source, *, result_limit: int = 25, after_index=None) -> dict:
+    """Process every configured-source video once in disposable index/cache state."""
+    if not 1 <= result_limit <= 25:
+        raise ValueError("Result limit must be between 1 and 25")
+    stage_config = copy.copy(config)
+    stage_config.enable_object_detection = True
+    stage_config.enable_video_object_detection = True
+    stage_config.enable_face_recognition = True
+    stage_config.object_detection_override = True
+    capability = index_capability(stage_config, force_object_detection=True)
+    if not capability["available"]:
+        raise RuntimeError(str(capability["reason"]))
+    checkpoint, reason = _clip_checkpoint(config)
+    if checkpoint is None:
+        raise RuntimeError(reason or "Configured CLIP checkpoint is unavailable")
+
+    root = Path(resolve_for_access(str(source.path))).resolve()
+    if not root.is_dir():
+        raise ValueError("Configured source is not an accessible directory")
+    with tempfile.TemporaryDirectory(prefix="msa-adapter-workbench-") as temp_dir:
+        workspace = Path(temp_dir)
+        staged_root = workspace / "source"
+        stats = ScanStats()
+        videos_found = 0
+        for original, stat in iter_media_entries(root, media_type="video", stats=stats):
+            relative = original.relative_to(root)
+            if stat.st_size > 2 * 1024 * 1024 * 1024:
+                raise ValueError("A video exceeds the 2 GiB workbench limit")
+            _, safe_original = validated_sample_path(source, relative.as_posix())
+            staged_file = staged_root / relative
+            staged_file.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                shutil.copyfile(safe_original, staged_file)
+            except OSError as exc:
+                raise RuntimeError("Could not stage every video from the configured source") from exc
+            videos_found += 1
+        if stats.walk_errors:
+            raise RuntimeError("Could not scan the configured source completely; preview was not run")
+        if videos_found == 0:
+            return {
+                "scope": "whole_configured_source_videos", "videos_found": 0,
+                "videos_processed": 0, "complete": True, "video_keyframes": {},
+                "results": [], "results_truncated": False, "persisted": False,
+            }
+        processed, _image_embeddings, summary, results = _run_staged_source(
+            stage_config, source, workspace, staged_root, checkpoint,
+            result_limit=result_limit, after_index=after_index,
+            force_object_detection=True, include_object_detection=True,
+        )
+        return {
+            "scope": "whole_configured_source_videos",
+            "videos_found": videos_found,
+            "videos_processed": processed,
+            "complete": processed == videos_found,
+            "video_keyframes": summary,
+            "results": results,
+            "results_truncated": videos_found > len(results),
             "persisted": False,
         }
 

@@ -473,11 +473,13 @@ def health(request: Request):
 def _workbench_stage_capabilities(config):
     from msa_indexer.adapters.adapter_04_transcription import transcription_capability
     from msa_indexer.adapters.adapter_05_image_visual import image_visual_capability
+    from msa_indexer.adapters.adapter_06_video_keyframes import video_keyframe_capability
 
     models_dir = Path(getattr(config, "models_dir", "models"))
     return {
         "transcription": transcription_capability(models_dir),
         "image-visual": image_visual_capability(config),
+        "video-keyframes": video_keyframe_capability(config),
     }
 
 
@@ -534,7 +536,7 @@ def run_adapter_preview(
     config = _get_config(request)
     capability = (
         _workbench_stage_capabilities(config).get(stage_id)
-        if stage_id in {"transcription", "image-visual"} else None
+        if stage_id in {"transcription", "image-visual", "video-keyframes"} else None
     )
     if capability is not None:
         stage = {**stage, "runnable": capability["available"], "reason": capability["reason"]}
@@ -543,7 +545,7 @@ def run_adapter_preview(
     source = _workbench_source(config, source_name)
     if source is None:
         raise HTTPException(status_code=404, detail="Enabled configured source not found")
-    if stage_id in {"identity", "metadata", "transcription", "image-visual"} and relative_path is not None:
+    if stage_id in {"identity", "metadata", "transcription", "image-visual", "video-keyframes"} and relative_path is not None:
         raise HTTPException(status_code=400, detail="This adapter runs on the configured source; file selection is not accepted")
     try:
         if stage_id == "identity":
@@ -561,10 +563,8 @@ def run_adapter_preview(
             from msa_indexer.adapters.adapter_05_image_visual import preview_image_visual_folder
             action = lambda: preview_image_visual_folder(config, source)
         elif stage_id == "video-keyframes":
-            if not relative_path:
-                raise HTTPException(status_code=400, detail="Discovery is required before running this per-file adapter")
-            from msa_indexer.adapters.adapter_06_video_keyframes import preview_video_keyframes
-            action = lambda: preview_video_keyframes(config, source, relative_path)
+            from msa_indexer.adapters.adapter_06_video_keyframes import preview_video_keyframes_folder
+            action = lambda: preview_video_keyframes_folder(config, source)
         elif stage_id == "finalization":
             if not relative_path:
                 raise HTTPException(status_code=400, detail="Discovery is required before running this per-file adapter")

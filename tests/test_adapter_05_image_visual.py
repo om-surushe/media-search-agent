@@ -59,7 +59,7 @@ def test_image_visual_folder_stages_every_image_once_and_returns_bounded_results
         paths = sorted(path.relative_to(staged_root).as_posix() for path in staged_root.rglob("*") if path.is_file())
         observed["paths"] = paths
         observed["bytes"] = [(staged_root / path).read_bytes() for path in paths]
-        return len(paths), len(paths), [{"relative_path": path} for path in paths[:result_limit]]
+        return len(paths), len(paths), {}, [{"relative_path": path} for path in paths[:result_limit]]
 
     monkeypatch.setattr(sandbox, "_run_staged_source", fake_index)
     result = sandbox.run_image_folder(SimpleNamespace(), source, result_limit=1)
@@ -91,7 +91,7 @@ def test_staged_image_visual_run_forces_detection_only_on_isolated_config(tmp_pa
     staged_root.mkdir(parents=True)
     checkpoint = tmp_path / "clip-weights"
 
-    def copy_models(_config, target, _checkpoint, *, force_object_detection):
+    def copy_models(_config, target, _checkpoint, *, force_object_detection, include_object_detection=None):
         assert force_object_detection is True
         local = target / "clip" / "weights"
         local.parent.mkdir(parents=True)
@@ -113,7 +113,9 @@ def test_staged_image_visual_run_forces_detection_only_on_isolated_config(tmp_pa
         result_limit=1, force_object_detection=True,
     )
 
-    assert result == (0, 0, [])
+    processed, embeddings, summary, details = result
+    assert (processed, embeddings, details) == (0, 0, [])
+    assert summary["video_keyframes"] == 0
     assert not hasattr(config, "object_detection_override")
 
 

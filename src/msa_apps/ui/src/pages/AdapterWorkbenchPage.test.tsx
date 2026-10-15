@@ -15,7 +15,7 @@ describe('AdapterWorkbenchPage', () => {
     vi.stubGlobal('fetch', vi.fn().mockImplementation((url: string) => Promise.resolve({
       ok: true,
       json: async () => url.endsWith('/adapters')
-        ? [{ id: 'discovery', number: 1, name: 'Discovery', runnable: true }, { id: 'identity', number: 2, name: 'Identity', runnable: true }, { id: 'metadata', number: 3, name: 'Metadata', runnable: true }, { id: 'transcription', number: 4, name: 'Video transcription', runnable: true }, { id: 'image-visual', number: 5, name: 'Image visual processing', runnable: true }]
+        ? [{ id: 'discovery', number: 1, name: 'Discovery', runnable: true }, { id: 'identity', number: 2, name: 'Identity', runnable: true }, { id: 'metadata', number: 3, name: 'Metadata', runnable: true }, { id: 'transcription', number: 4, name: 'Video transcription', runnable: true }, { id: 'image-visual', number: 5, name: 'Image visual processing', runnable: true }, { id: 'video-keyframes', number: 6, name: 'Complete video keyframe processing', runnable: true }]
         : url.includes('/api/setup/status')
           ? { ready: false, models: [] }
           : url.includes('/api/setup/retry')
@@ -50,6 +50,11 @@ describe('AdapterWorkbenchPage', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Run on every image' }))
     await waitFor(() => expect(vi.mocked(fetch)).toHaveBeenCalledWith(
       expect.stringContaining('/adapters/image-visual/run?source_name=sample'), { method: 'POST' },
+    ))
+    expect(String(vi.mocked(fetch).mock.calls.at(-1)?.[0])).not.toContain('relative_path=')
+    fireEvent.click(screen.getByRole('button', { name: 'Run on every video' }))
+    await waitFor(() => expect(vi.mocked(fetch)).toHaveBeenCalledWith(
+      expect.stringContaining('/adapters/video-keyframes/run?source_name=sample'), { method: 'POST' },
     ))
     expect(String(vi.mocked(fetch).mock.calls.at(-1)?.[0])).not.toContain('relative_path=')
   })
