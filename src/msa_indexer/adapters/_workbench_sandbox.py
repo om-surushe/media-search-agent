@@ -1,4 +1,4 @@
-"""Temporary, one-file index execution shared by isolated workbench stages."""
+"""Temporary index execution shared by isolated Workbench previews."""
 from __future__ import annotations
 
 import copy

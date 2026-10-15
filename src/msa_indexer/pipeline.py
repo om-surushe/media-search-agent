@@ -5,7 +5,14 @@ import re
 from PIL import Image
 from loguru import logger
 from .utils.logging import with_ctx
-from .io.scanner import ScanStats, iter_media, iter_media_entries
+from .io.scanner import iter_media, iter_media_entries
+from .adapters.adapter_01_discovery import (
+    IMAGE_EXT,
+    VIDEO_EXT,
+    db_relative_path as _db_rel_path,
+    discover_media_entries,
+    sort_media_entries as _sort_media_entries,
+)
 from msa_settings.paths import resolve_for_access
 from msa_settings.config import object_detection_enabled, video_object_detection_enabled
 from .io.exif import get_exif_basic_result
@@ -47,7 +54,7 @@ from .models.asr import (
     WHISPER_MODEL_REVISION,
     WHISPER_RUNTIME_VERSION,
 )
-from .models.providers import ModelAdapterBundle, default_model_adapters
+from .adapters.model_adapters import ModelAdapterBundle, default_model_adapters
 from .db.qdrant_export import (
     export_images_to_qdrant,
     export_video_frames_to_qdrant,
@@ -56,8 +63,6 @@ from .db.qdrant_export import (
 )
 from .db import qdrant_handoff
 
-IMAGE_EXT = {".jpg",".jpeg",".png",".heic",".tif",".tiff",".webp"}
-VIDEO_EXT = {".mp4",".mov",".m4v",".avi",".mkv",".wmv",".flv",".webm"}
 ENRICHMENT_VERSIONS = {
     "image_exif": "1",
     "video_metadata": "1",
@@ -82,71 +87,6 @@ def _enrichment_needs_processing(
 
 def _emit_indexer_summary(**payload) -> None:
     logger.info(f"INDEXER_SUMMARY {json.dumps(payload, sort_keys=True)}")
-
-
-def _sort_media_entries(entries, order: str):
-    """Apply scheduling while preserving the existing scanner order by default."""
-    valid_orders = {"default", "fastest", "newest", "oldest"}
-    if order not in valid_orders:
-        raise ValueError(f"Invalid processing order: {order!r}")
-
-    def stable_key(entry):
-        source, root, path, _stat, source_index = entry
-        relative = _db_rel_path(path, root)
-        return (source_index, str(source.name).casefold(), relative.casefold(), relative)
-
-    if order == "default":
-        return list(entries)
-
-    ordered = sorted(entries, key=stable_key)
-    if order == "fastest":
-        # File size and media type are cheap proxies, not runtime predictions.
-        def size_bytes(entry):
-            try:
-                value = int(getattr(entry[3], "st_size", 0))
-            except (TypeError, ValueError, OverflowError):
-                return 0
-            return max(0, value)
-
-        return sorted(
-            ordered,
-            key=lambda entry: (
-                0 if entry[2].suffix.lower() in IMAGE_EXT else 1,
-                size_bytes(entry),
-                stable_key(entry),
-            ),
-        )
-
-    def modified_ns(entry):
-        stat = entry[3]
-        try:
-            value = int(getattr(stat, "st_mtime_ns"))
-        except (AttributeError, TypeError, ValueError, OverflowError):
-            try:
-                value = int(float(getattr(stat, "st_mtime", 0)) * 1_000_000_000)
-            except (TypeError, ValueError, OverflowError):
-                value = 0
-        return value if value >= 0 else 0
-
-    return sorted(ordered, key=modified_ns, reverse=(order == "newest"))
-
-
-def _db_rel_path(p: Path, root: Path) -> str:
-    """The relative-path key stored in SQLite — POSIX form per ADR-007.
-
-    This is THE single computation shared by the fingerprint key
-    (file_fingerprint.rel_path) and the media upsert (media.rel_path);
-    the two must never diverge (M-8 plan §3.3). ``as_posix()`` keeps the
-    stored form forward-slashed on every platform (on Windows-native,
-    ``str(relative_to())`` would emit backslashes — an ADR-007 violation).
-    Not to be confused with the display-only relative path used for log
-    context.
-    """
-    try:
-        return p.relative_to(root).as_posix()
-    except Exception:
-        # Fallback: just the basename if the file is outside root somehow
-        return p.name
 
 
 def _object_detection_enabled(config) -> bool:
@@ -639,10 +579,6 @@ def run_index(
     total_found = 0
     total_images_found = 0
     total_videos_found = 0
-    # ponytail: keep only scan metadata in memory for a global sort; use a
-    # disk-backed queue only if real libraries make this O(n) snapshot costly.
-    scheduled_entries = []
-    source_walk_stats: dict[str, ScanStats] = {}
     # Files whose stored (size, mtime) already matches the on-disk stat — the
     # exact fast-path skip condition — so they cost ~0 processing time (#208).
     expected_image_hits = 0
@@ -717,67 +653,68 @@ def run_index(
         finally:
             if _fp_reader is not None:
                 _fp_reader.close()
-    for source_index, source in enumerate(sources_to_index):
-        root = Path(resolve_for_access(str(source.path)))
+    scheduled_entries, source_walk_stats = discover_media_entries(
+        sources_to_index,
+        stop_event=stop_event,
+        order=processing_order,
+        entry_iterator=iter_media_entries,
+        sorter=_sort_media_entries,
+    )
+    logger.info("Processing order: {}", processing_order)
+    for source, root, p, st, _source_index in scheduled_entries:
         src_fps = fp_by_source.get(source.name, {})
         src_snap = snap_by_source.get(source.name, {})
-        walk_stats = ScanStats()
-        source_walk_stats[source.name] = walk_stats
-        for p, st in iter_media_entries(root, stop_event=stop_event, stats=walk_stats):
-            scheduled_entries.append((source, root, p, st, source_index))
-            ext = p.suffix.lower()
-            if media_type_filter == "image" and ext not in IMAGE_EXT:
-                continue
-            if media_type_filter == "video" and ext not in VIDEO_EXT:
-                continue
-            total_found += 1
-            is_image = ext in IMAGE_EXT
-            is_video = ext in VIDEO_EXT
-            if is_image:
-                total_images_found += 1
-            elif is_video:
-                total_videos_found += 1
-            # Expected fast-path skip. Same rel-path key as the main-loop fast
-            # path (_db_rel_path, POSIX per ADR-007) so the two never disagree
-            # on which fingerprint row a file maps to.
-            rel_key = _db_rel_path(p, root)
-            fp = src_fps.get(rel_key)
-            # A stat match (stored size+mtime == on-disk) only means the main
-            # loop won't RE-HASH the file — it still runs needs_* after the hit.
-            # So this is a FREE skip only when the media is already fully
-            # processed under the current config (#208 review, Codex P2):
-            # otherwise a model_version bump or a newly-enabled face/object
-            # stage would subtract ~the whole library and report ~0s while real
-            # work runs. Resolve completeness by the fingerprint's media_id —
-            # the SAME key the main loop skips on (fp["media_id"]) — so every
-            # live duplicate path of one complete media_id is recognized as
-            # free, not just the canonical rel_path (#208 review, Codex P2).
-            # Gate on the shared needs_* logic (bulk snapshot, no per-file SQL);
-            # when in doubt, count as work (over-estimate).
-            if fp is not None and fp[0] == st.st_size and fp[1] == st.st_mtime_ns:
-                media_id = fp[2]
-                if media_id not in thumbnail_exists_by_media_id:
-                    thumbnail_exists_by_media_id[media_id] = (
-                        Path(config.thumb_dir) / f"{media_id}.jpg"
-                    ).is_file()
-                if _count_phase_expects_free_skip(
-                    src_snap.get(media_id),
-                    model_version=count_model_version,
-                    is_image=is_image,
-                    is_video=is_video,
-                    objects_enabled=objects_enabled,
-                    faces_enabled=faces_enabled,
-                    video_objects_enabled=video_objects_enabled,
-                    transcription_enabled=transcription_enabled,
-                    adaptive_video_keyframes_enabled=adaptive_video_keyframes_enabled,
-                    thumbnail_exists=thumbnail_exists_by_media_id[media_id],
-                ):
-                    if is_image:
-                        expected_image_hits += 1
-                    elif is_video:
-                        expected_video_hits += 1
-    scheduled_entries = _sort_media_entries(scheduled_entries, processing_order)
-    logger.info("Processing order: {}", processing_order)
+        ext = p.suffix.lower()
+        if media_type_filter == "image" and ext not in IMAGE_EXT:
+            continue
+        if media_type_filter == "video" and ext not in VIDEO_EXT:
+            continue
+        total_found += 1
+        is_image = ext in IMAGE_EXT
+        is_video = ext in VIDEO_EXT
+        if is_image:
+            total_images_found += 1
+        elif is_video:
+            total_videos_found += 1
+        # Expected fast-path skip. Same rel-path key as the main-loop fast
+        # path (_db_rel_path, POSIX per ADR-007) so the two never disagree
+        # on which fingerprint row a file maps to.
+        rel_key = _db_rel_path(p, root)
+        fp = src_fps.get(rel_key)
+        # A stat match (stored size+mtime == on-disk) only means the main
+        # loop won't RE-HASH the file — it still runs needs_* after the hit.
+        # So this is a FREE skip only when the media is already fully
+        # processed under the current config (#208 review, Codex P2):
+        # otherwise a model_version bump or a newly-enabled face/object
+        # stage would subtract ~the whole library and report ~0s while real
+        # work runs. Resolve completeness by the fingerprint's media_id —
+        # the SAME key the main loop skips on (fp["media_id"]) — so every
+        # live duplicate path of one complete media_id is recognized as
+        # free, not just the canonical rel_path (#208 review, Codex P2).
+        # Gate on the shared needs_* logic (bulk snapshot, no per-file SQL);
+        # when in doubt, count as work (over-estimate).
+        if fp is not None and fp[0] == st.st_size and fp[1] == st.st_mtime_ns:
+            media_id = fp[2]
+            if media_id not in thumbnail_exists_by_media_id:
+                thumbnail_exists_by_media_id[media_id] = (
+                    Path(config.thumb_dir) / f"{media_id}.jpg"
+                ).is_file()
+            if _count_phase_expects_free_skip(
+                src_snap.get(media_id),
+                model_version=count_model_version,
+                is_image=is_image,
+                is_video=is_video,
+                objects_enabled=objects_enabled,
+                faces_enabled=faces_enabled,
+                video_objects_enabled=video_objects_enabled,
+                transcription_enabled=transcription_enabled,
+                adaptive_video_keyframes_enabled=adaptive_video_keyframes_enabled,
+                thumbnail_exists=thumbnail_exists_by_media_id[media_id],
+            ):
+                if is_image:
+                    expected_image_hits += 1
+                elif is_video:
+                    expected_video_hits += 1
 
     # Estimate only the remainder — the files that will actually be hashed
     # and (potentially) processed. Keep total_found / images_to_process /

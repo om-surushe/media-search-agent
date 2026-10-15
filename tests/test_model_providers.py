@@ -1,10 +1,26 @@
 from pathlib import Path
 
-from msa_indexer.models.providers import (
+from msa_indexer.adapters import model_adapters
+from msa_indexer.adapters.model_adapters import (
     OpenClipAdapter,
     WhisperAdapter,
     default_model_adapters,
 )
+from msa_indexer.models import providers as legacy_providers
+
+
+def test_legacy_provider_imports_remain_compatible():
+    for name in (
+        "ClipEmbedderLike",
+        "ClipEmbeddingAdapter",
+        "ModelAdapterBundle",
+        "OpenClipAdapter",
+        "SpeechTranscriptionAdapter",
+        "WhisperAdapter",
+        "WhisperTranscriberLike",
+        "default_model_adapters",
+    ):
+        assert getattr(legacy_providers, name) is getattr(model_adapters, name)
 
 
 def test_openclip_adapter_forwards_configuration():
