@@ -62,6 +62,11 @@ function mockFetch(platform = 'macos', diag: Record<string, unknown> = diagData)
       return Promise.resolve({ ok: true, json: () => Promise.resolve(diag) })
     if (url === '/platform')
       return Promise.resolve({ ok: true, json: () => Promise.resolve({ platform }) })
+    if (url === '/api/models/catalog')
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({
+        hardware: { os: 'linux', architecture: 'x86_64', ram_gb: 16, cpu_count: 8, accelerator: 'cpu', hardware_recommendations_are_advisory: true },
+        models: [],
+      }) })
     if (url === '/config/model') {
       if (opts?.method === 'PATCH')
         return Promise.resolve({ ok: true, json: () => Promise.resolve({ updated: ['batch_size'] }) })

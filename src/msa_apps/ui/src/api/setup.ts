@@ -21,6 +21,43 @@ export interface SetupStatus {
 export interface ModelDownloadState {
   status: ModelState
   error: string | null
+  downloaded_bytes?: number
+  total_bytes?: number
+  filename?: string | null
+}
+
+export interface CommercialModel {
+  id: string
+  task: string
+  label: string
+  publisher: string
+  source: string
+  revision: string | null
+  license_claim: string
+  license_evidence: string
+  clearance: 'review_required' | 'conditional' | 'gated' | 'hosted_only'
+  access_note: string | null
+  downloadable: boolean
+  installed: boolean
+  path: string
+  size_bytes: number
+  min_ram_gb: number
+  hardware_fit: boolean
+  recommended_for_task: boolean
+  adapter_status: string
+  state: ModelDownloadState
+}
+
+export interface CommercialModelCatalog {
+  hardware: {
+    os: string
+    architecture: string
+    ram_gb: number | null
+    cpu_count: number
+    accelerator: string
+    hardware_recommendations_are_advisory: true
+  }
+  models: CommercialModel[]
 }
 
 export interface SetupWSUpdate {
@@ -44,6 +81,24 @@ export async function fetchSetupStatus(): Promise<SetupStatus> {
 export async function retrySetup(): Promise<void> {
   const res = await fetch(apiUrl('/api/setup/retry'), { method: 'POST' })
   if (!res.ok) throw new Error(`setup/retry ${res.status}`)
+}
+
+export async function fetchCommercialModelCatalog(): Promise<CommercialModelCatalog> {
+  const res = await fetch(apiUrl('/api/models/catalog'))
+  if (!res.ok) throw new Error(`models/catalog ${res.status}`)
+  return res.json()
+}
+
+export async function downloadCommercialModel(modelId: string): Promise<void> {
+  const res = await fetch(apiUrl(`/api/models/${encodeURIComponent(modelId)}/download`), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ confirm_experimental: true }),
+  })
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({})) as { detail?: string }
+    throw new Error(body.detail ?? `models/${modelId}/download ${res.status}`)
+  }
 }
 
 export async function retryCaptioningSetup(): Promise<void> {

@@ -332,8 +332,8 @@ def test_caption_model_setup_downloads_pinned_blip_and_verifies_weights(monkeypa
     )
     calls = {}
 
-    def download(model_id, *, revision, cache_dir, allow_patterns, force_download):
-        calls.update(model_id=model_id, revision=revision, allow_patterns=allow_patterns)
+    def download(model_id, *, revision, cache_dir, allow_patterns, force_download, max_workers, tqdm_class):
+        calls.update(model_id=model_id, revision=revision, allow_patterns=allow_patterns, max_workers=max_workers)
         snapshot.mkdir(parents=True)
         for name in MODEL_REQUIRED_FILES:
             path = snapshot / name
@@ -351,8 +351,25 @@ def test_caption_model_setup_downloads_pinned_blip_and_verifies_weights(monkeypa
     assert calls["model_id"] == MODEL_ID
     assert calls["revision"] == MODEL_REVISION
     assert set(calls["allow_patterns"]) == set(MODEL_REQUIRED_FILES)
+    assert calls["max_workers"] == 1
     assert manager._models["captioning"].status == "done"
     assert manager._models["clip"].status == "pending"
+
+
+def test_huggingface_progress_hook_updates_download_state():
+    from io import StringIO
+
+    manager = SetupManager()
+    progress = manager._progress_tqdm_class("whisper-base")
+    bar = progress(total=64, desc="model.safetensors", file=StringIO())
+    bar.update(16)
+    state = manager.get_status()["whisper-base"]
+    bar.close()
+
+    assert state["status"] == "pending"
+    assert state["downloaded_bytes"] == 16
+    assert state["total_bytes"] == 64
+    assert state["filename"] == "model.safetensors"
 
 
 def test_captioning_setup_endpoint_starts_only_caption_model(monkeypatch, tmp_path):

@@ -3395,6 +3395,14 @@ def config_model_patch(body: _ModelConfigPatch, request: Request):
 # ── Setup: first-launch model download ───────────────────────────────────────
 
 from msa_apps.search_api import setup_models as _setup_models  # noqa: E402
+from msa_indexer.models.commercial_registry import (
+    MODEL_BY_ID as _COMMERCIAL_MODEL_BY_ID,
+    model_catalog as _model_catalog,
+)
+
+
+class _CommercialModelDownload(_BaseModel):
+    confirm_experimental: bool = False
 
 
 @app.get("/api/setup/status")
@@ -3447,6 +3455,38 @@ def get_setup_status(request: Request):
         "ready": all(present[model_id] for model_id in _setup_models.DEFAULT_SETUP_MODEL_IDS),
         "models": models_out, "read_only_mode": False,
     }
+
+
+@app.get("/api/models/catalog")
+def get_models_catalog(request: Request):
+    """List pinned local candidates, app-owned paths, clearance notes and hardware fit."""
+    config = _get_config(request)
+    manager = _setup_models.get_manager()
+    return _model_catalog(config.models_dir, manager.get_status())
+
+
+@app.post("/api/models/{model_id}/download", status_code=202)
+def download_commercial_model(
+    model_id: str, body: _CommercialModelDownload, request: Request,
+):
+    """Download one pinned candidate after explicit acknowledgment of unresolved clearance."""
+    if _search_browse_read_only():
+        raise HTTPException(status_code=409, detail="Model downloads are disabled in Search/Browse read-only mode.")
+    spec = _COMMERCIAL_MODEL_BY_ID.get(model_id)
+    if spec is None:
+        raise HTTPException(status_code=404, detail="Unknown model catalog ID.")
+    if spec.download_kind == "unavailable":
+        raise HTTPException(status_code=409, detail=spec.access_note or "No local checkpoint download is available.")
+    if spec.clearance != "cleared" and not body.confirm_experimental:
+        raise HTTPException(
+            status_code=409,
+            detail="This checkpoint is not commercially cleared. Confirm experimental evaluation to download it.",
+        )
+    try:
+        _setup_models.get_manager().start_if_needed(_get_config(request).models_dir, {model_id})
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"status": "preparing", "model_id": model_id}
 
 
 @app.post("/api/setup/retry", status_code=202)

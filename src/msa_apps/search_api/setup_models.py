@@ -45,6 +45,13 @@ from msa_indexer.models.clip_artifacts import (
     CLIP_PRETRAINED,
     clip_checkpoint_candidates,
 )
+from msa_indexer.models.commercial_registry import (
+    MODELS as COMMERCIAL_MODELS,
+    MODEL_BY_ID as COMMERCIAL_MODEL_BY_ID,
+    model_is_installed,
+    mark_model_verified,
+    verify_model,
+)
 
 # ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -100,6 +107,19 @@ MODEL_META = {
     },
 }
 
+MODEL_META.update({
+    model.model_id: {
+        "label": model.label,
+        "size_mb": max(1, (sum(item.size_bytes for item in model.artifacts) + 999_999) // 1_000_000),
+        "revision": model.revision,
+        "sha256": model.artifacts[0].sha256 if len(model.artifacts) == 1 else {
+            item.filename: item.sha256 for item in model.artifacts
+        },
+        "source": model.repo_id or model.publisher,
+    }
+    for model in COMMERCIAL_MODELS
+})
+
 
 # ── Hash verification ─────────────────────────────────────────────────────────
 
@@ -130,9 +150,18 @@ def _verify_file(path: Path, expected: str) -> bool:
 class ModelDownloadState:
     status: ModelState = "pending"
     error: str | None = None
+    downloaded_bytes: int = 0
+    total_bytes: int = 0
+    filename: str | None = None
 
     def to_dict(self) -> dict:
-        return {"status": self.status, "error": self.error}
+        return {
+            "status": self.status,
+            "error": self.error,
+            "downloaded_bytes": self.downloaded_bytes,
+            "total_bytes": self.total_bytes,
+            "filename": self.filename,
+        }
 
 
 # ── Manager ───────────────────────────────────────────────────────────────────
@@ -199,12 +228,17 @@ class SetupManager:
             for f in facenet_hub.iterdir()
         )
 
-        return {
+        present = {
             "clip":            clip_present,
             "rtdetr":          rtdetr_present,
             "facenet_pytorch": facenet_present,
             "captioning": caption_present,
         }
+        present.update({
+            model.model_id: model_is_installed(model, models_dir)
+            for model in COMMERCIAL_MODELS
+        })
+        return present
 
     def has_valid_clip(self, models_dir: Path) -> bool:
         """Return True only for a complete CLIP blob matching the pinned SHA-256."""
@@ -288,6 +322,85 @@ class SetupManager:
         )
         thread.start()
 
+    def _progress_tqdm_class(self, model_id: str):
+        from huggingface_hub.utils import tqdm as hub_tqdm
+
+        manager = self
+
+        class ProgressTqdm(hub_tqdm):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                manager._set_progress(model_id, int(self.n), int(self.total or 0), self.desc)
+
+            def update(self, n=1):
+                updated = super().update(n)
+                manager._set_progress(model_id, int(self.n), int(self.total or 0), self.desc)
+                return updated
+
+        return ProgressTqdm
+
+    def _download_commercial_model(self, model_id: str, models_dir: Path) -> None:
+        spec = COMMERCIAL_MODEL_BY_ID[model_id]
+        if spec.download_kind == "unavailable":
+            self._set(model_id, "error", spec.access_note or "This model cannot be downloaded locally.")
+            return
+        if model_is_installed(spec, models_dir):
+            self._set(model_id, "done")
+            return
+        self._set(model_id, "downloading")
+        target = spec.model_dir(models_dir)
+        try:
+            if spec.download_kind == "huggingface":
+                from huggingface_hub import snapshot_download
+
+                target.mkdir(parents=True, exist_ok=True)
+                patterns = ["*.json", "*.txt", "*.model", "*.vocab", "*.merges"]
+                patterns.extend(artifact.filename for artifact in spec.artifacts)
+                snapshot_download(
+                    repo_id=spec.repo_id,
+                    revision=spec.revision,
+                    local_dir=str(target),
+                    allow_patterns=patterns,
+                    max_workers=1,
+                    tqdm_class=self._progress_tqdm_class(model_id),
+                )
+            else:
+                import requests
+
+                target.mkdir(parents=True, exist_ok=True)
+                for artifact in spec.artifacts:
+                    final_path = target / artifact.filename
+                    final_path.parent.mkdir(parents=True, exist_ok=True)
+                    partial_path = final_path.with_suffix(final_path.suffix + ".part")
+                    digest = hashlib.sha256()
+                    downloaded = 0
+                    with requests.get(artifact.url, stream=True, timeout=(15, 60)) as response:
+                        response.raise_for_status()
+                        total = int(response.headers.get("Content-Length") or artifact.size_bytes)
+                        self._set_progress(model_id, 0, total, artifact.filename)
+                        with partial_path.open("wb") as stream:
+                            for chunk in response.iter_content(chunk_size=1024 * 1024):
+                                if not chunk:
+                                    continue
+                                stream.write(chunk)
+                                digest.update(chunk)
+                                downloaded += len(chunk)
+                                self._set_progress(model_id, downloaded, total, artifact.filename)
+                    if downloaded != artifact.size_bytes or digest.hexdigest() != artifact.sha256:
+                        partial_path.unlink(missing_ok=True)
+                        raise ValueError(f"Size or SHA-256 verification failed for {artifact.filename}")
+                    os.replace(partial_path, final_path)
+
+            self._set(model_id, "verifying")
+            if not verify_model(spec, models_dir):
+                raise ValueError("Downloaded model failed size or SHA-256 verification")
+            mark_model_verified(spec, models_dir)
+            self._set(model_id, "done")
+            logger.info("setup_models: commercial model {} downloaded and verified", model_id)
+        except Exception as exc:
+            logger.error("setup_models: commercial model {} setup failed ({})", model_id, type(exc).__name__)
+            self._set(model_id, "error", f"Download or verification failed ({type(exc).__name__})")
+
     def _download_caption_model(self, models_dir: Path, force_download: bool = False) -> None:
         self._set("captioning", "downloading")
         try:
@@ -299,6 +412,8 @@ class SetupManager:
                 cache_dir=str(caption_model_cache_dir(models_dir)),
                 allow_patterns=list(CAPTION_MODEL_REQUIRED_FILES),
                 force_download=force_download,
+                max_workers=1,
+                tqdm_class=self._progress_tqdm_class("captioning"),
             )
             self._set("captioning", "verifying")
             if not self.has_valid_captioning(models_dir):
@@ -317,8 +432,22 @@ class SetupManager:
 
     def _set(self, model: str, status: ModelState, error: str | None = None) -> None:
         with self._lock:
-            self._models[model].status = status
-            self._models[model].error = error
+            state = self._models[model]
+            state.status = status
+            state.error = error
+            if status in ("pending", "done", "error"):
+                state.downloaded_bytes = 0
+                state.total_bytes = 0
+                state.filename = None
+
+    def _set_progress(
+        self, model: str, downloaded_bytes: int, total_bytes: int, filename: str | None,
+    ) -> None:
+        with self._lock:
+            state = self._models[model]
+            state.downloaded_bytes = max(0, downloaded_bytes)
+            state.total_bytes = max(0, total_bytes)
+            state.filename = Path(filename).name if filename else None
 
     # ── Download worker (runs in background thread) ───────────────────────────
 
@@ -465,6 +594,9 @@ class SetupManager:
                 logger.info("setup_models: BLIP caption model already verified, skipping download")
             else:
                 self._download_caption_model(models_dir, force_download=present["captioning"])
+
+        for model_id in sorted(model_ids & COMMERCIAL_MODEL_BY_ID.keys()):
+            self._download_commercial_model(model_id, models_dir)
 
         with self._lock:
             self._complete = True

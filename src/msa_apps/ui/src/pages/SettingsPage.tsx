@@ -6,6 +6,7 @@ import {
   getModelConfig, patchModelConfig,
   type ModelConfigEditable, type Diagnostics,
 } from '../api/indexer'
+import { CommercialModelCatalog } from '../components/CommercialModelCatalog'
 
 // Log names that have a corresponding GET /logs/{name} endpoint
 const LOG_KEYS = new Set(['app', 'uvicorn', 'qdrant', 'launch', 'install', 'stop'])
@@ -446,6 +447,7 @@ export function SettingsPage() {
 
       {/* Model Configuration */}
       <ModelConfigSection />
+      <CommercialModelCatalog />
 
       {/* Diagnostics */}
       {diag && (

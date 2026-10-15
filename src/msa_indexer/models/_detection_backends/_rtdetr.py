@@ -3,6 +3,8 @@ from pathlib import Path
 from PIL import Image
 from loguru import logger
 
+from msa_indexer.models.commercial_registry import MODEL_BY_ID, model_is_installed
+
 # Commit pinned for known-tested model variants. None → resolves to main branch.
 KNOWN_REVISIONS: dict[str, str | None] = {
     "PekingU/rtdetr_r18vd": "ac77a11ff0170a41b771c03264987f8ce2b0d753",
@@ -33,8 +35,18 @@ class RtDetrBackend:
 
         cache_dir = str(Path(model_dir) / "rtdetr") if model_dir is not None else None
         revision = KNOWN_REVISIONS.get(model_name)  # None for unknown variants → main
+        load_source = model_name
+        commercial_rtdetr = MODEL_BY_ID["rtdetr-r18"]
+        if (
+            model_dir is not None
+            and model_name == commercial_rtdetr.repo_id
+            and model_is_installed(commercial_rtdetr, Path(model_dir))
+        ):
+            load_source = str(commercial_rtdetr.model_dir(Path(model_dir)))
+            cache_dir = None
+            revision = None
 
-        cached = self._is_cached(model_name, cache_dir, revision)
+        cached = load_source != model_name or self._is_cached(model_name, cache_dir, revision)
         if cached:
             logger.info("Loading RT-DETR model {} from local cache...", model_name)
         else:
@@ -49,8 +61,8 @@ class RtDetrBackend:
             "revision": revision,
             "local_files_only": True,
         }
-        self._processor = RTDetrImageProcessor.from_pretrained(model_name, **hf_kwargs)
-        self._model = RTDetrForObjectDetection.from_pretrained(model_name, **hf_kwargs)
+        self._processor = RTDetrImageProcessor.from_pretrained(load_source, **hf_kwargs)
+        self._model = RTDetrForObjectDetection.from_pretrained(load_source, **hf_kwargs)
 
         torch_device = self._resolve_device(device)
         self._model = self._model.to(torch_device)

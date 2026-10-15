@@ -122,6 +122,36 @@ def test_all_detections_meet_threshold(detector):
 # Dispatcher-level tests (backend-agnostic)
 # ---------------------------------------------------------------------------
 
+def test_rtdetr_uses_verified_commercial_snapshot_when_available(monkeypatch, tmp_path):
+    import sys
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+    from msa_indexer.models._detection_backends import _rtdetr
+
+    processor = Mock()
+    model = Mock()
+    model.to.return_value = model
+    image_processor = Mock()
+    image_processor.from_pretrained.return_value = processor
+    detector_model = Mock()
+    detector_model.from_pretrained.return_value = model
+    monkeypatch.setitem(sys.modules, "transformers", SimpleNamespace(
+        RTDetrImageProcessor=image_processor,
+        RTDetrForObjectDetection=detector_model,
+    ))
+    monkeypatch.setattr(_rtdetr, "model_is_installed", lambda _spec, _root: True)
+
+    _rtdetr.RtDetrBackend("PekingU/rtdetr_r18vd", "cpu", 0.35, model_dir=tmp_path)
+
+    expected_path = str(_rtdetr.MODEL_BY_ID["rtdetr-r18"].model_dir(tmp_path))
+    image_processor.from_pretrained.assert_called_once_with(
+        expected_path, cache_dir=None, revision=None, local_files_only=True,
+    )
+    detector_model.from_pretrained.assert_called_once_with(
+        expected_path, cache_dir=None, revision=None, local_files_only=True,
+    )
+
+
 def test_unknown_backend_raises():
     with pytest.raises(ValueError, match="Unknown object detection backend"):
         ObjectDetector(backend="nonexistent")

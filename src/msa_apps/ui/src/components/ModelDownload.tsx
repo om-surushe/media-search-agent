@@ -94,7 +94,14 @@ export function ModelDownload({ onReady, startedAtMs, initialModels }: Props) {
   const rows = models.map((info) => {
     const live = wsModels?.[info.id]
     const status: ModelState = live?.status ?? (info.present ? 'done' : 'pending')
-    return { ...info, status, error: live?.error ?? null }
+    return {
+      ...info,
+      status,
+      error: live?.error ?? null,
+      downloadedBytes: live?.downloaded_bytes ?? 0,
+      totalBytes: live?.total_bytes ?? 0,
+      filename: live?.filename ?? null,
+    }
   })
   // Error state comes from the checklist rows AND the raw WS states. The second term matters in the
   // fallback path where StartupGate's /api/setup/status check failed → `initialModels` is empty →
@@ -179,6 +186,22 @@ export function ModelDownload({ onReady, startedAtMs, initialModels }: Props) {
                     </span>
                   )}
                 </p>
+              )}
+              {model.status === 'downloading' && (
+                <div className="mt-2">
+                  <progress
+                    className="h-2 w-full accent-sky-500"
+                    max={model.totalBytes > 0 ? model.totalBytes : undefined}
+                    value={model.totalBytes > 0 ? Math.min(model.downloadedBytes, model.totalBytes) : undefined}
+                    aria-label={`${model.label} file download progress`}
+                  />
+                  <p className="text-[10px] text-slate-500">
+                    {model.filename ? `${model.filename} · ` : ''}
+                    {model.totalBytes > 0
+                      ? `${(model.downloadedBytes / 1024 ** 2).toFixed(1)} / ${(model.totalBytes / 1024 ** 2).toFixed(1)} MB`
+                      : 'Transfer in progress'}
+                  </p>
+                </div>
               )}
               {model.source && model.status !== 'done' && !model.error && (
                 <p className="mt-0.5 truncate font-mono text-[10px] text-slate-500" title={model.source}>

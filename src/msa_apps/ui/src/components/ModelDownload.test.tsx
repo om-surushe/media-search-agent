@@ -56,7 +56,18 @@ describe('ModelDownload', () => {
     // the active (downloading) CLIP model appears BOTH as the detail line and its checklist row
     expect(screen.getAllByText(/Semantic search model \(CLIP ViT-L-14\)/).length).toBeGreaterThan(1)
     expect(screen.getByText('~1711 MB')).toBeInTheDocument()
+    const progress = screen.getByRole('progressbar', { name: /semantic search model.*file download progress/i })
+    expect(progress).not.toHaveAttribute('value')
     expect(screen.getByText(/from huggingface\.co\/timm\/vit_large_patch14_clip_224\.openai/)).toBeInTheDocument()
+  })
+
+  it('shows per-file byte progress when the downloader reports a total', () => {
+    stubWs({
+      clip: { status: 'downloading', error: null, downloaded_bytes: 524288, total_bytes: 1048576, filename: 'open_clip_model.safetensors' },
+    }, false)
+    renderModelDownload()
+    expect(screen.getByRole('progressbar', { name: /semantic search model.*file download progress/i })).toHaveAttribute('value', '524288')
+    expect(screen.getByText(/open_clip_model\.safetensors · 0\.5 \/ 1\.0 MB/)).toBeInTheDocument()
   })
 
   it('weights the unified bar by download size and stays in the 60–100 band', () => {

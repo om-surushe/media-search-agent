@@ -90,6 +90,7 @@ index1/
 run/
 
 # Runtime / tool artifacts
+/video_frames/
 msa-api.lock
 .codex/
 .artifacts/
