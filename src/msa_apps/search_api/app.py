@@ -476,6 +476,7 @@ def _workbench_stage_capabilities(config):
     from msa_indexer.adapters.adapter_06_video_keyframes import video_keyframe_capability
     from msa_indexer.adapters.adapter_07_finalization import finalization_capability
     from msa_indexer.adapters.adapter_08_qdrant_export import qdrant_export_capability
+    from msa_indexer.adapters.adapter_09_optional_captioning import captioning_stage_capability
 
     models_dir = Path(getattr(config, "models_dir", "models"))
     return {
@@ -484,6 +485,7 @@ def _workbench_stage_capabilities(config):
         "video-keyframes": video_keyframe_capability(config),
         "finalization": finalization_capability(config),
         "qdrant-export": qdrant_export_capability(config),
+        "captions": captioning_stage_capability(config),
     }
 
 
@@ -541,7 +543,7 @@ def run_adapter_preview(
     config = _get_config(request)
     capability = (
         _workbench_stage_capabilities(config).get(stage_id)
-        if stage_id in {"transcription", "image-visual", "video-keyframes", "finalization", "qdrant-export"} else None
+        if stage_id in {"transcription", "image-visual", "video-keyframes", "finalization", "qdrant-export", "captions"} else None
     )
     if capability is not None:
         stage = {**stage, "runnable": capability["available"], "reason": capability["reason"]}
@@ -550,7 +552,7 @@ def run_adapter_preview(
     source = _workbench_source(config, source_name)
     if source is None:
         raise HTTPException(status_code=404, detail="Enabled configured source not found")
-    if stage_id in {"identity", "metadata", "transcription", "image-visual", "video-keyframes", "qdrant-export"} and relative_path is not None:
+    if stage_id in {"identity", "metadata", "transcription", "image-visual", "video-keyframes", "qdrant-export", "captions"} and relative_path is not None:
         raise HTTPException(status_code=400, detail="This adapter runs on the configured source; file selection is not accepted")
     try:
         if stage_id == "identity":
@@ -579,10 +581,8 @@ def run_adapter_preview(
             from msa_indexer.adapters.adapter_08_qdrant_export import preview_qdrant_export_folder
             action = lambda: preview_qdrant_export_folder(config, source)
         elif stage_id == "captions":
-            if not relative_path:
-                raise HTTPException(status_code=400, detail="Discovery is required before running this per-file adapter")
-            from msa_indexer.adapters.adapter_09_optional_captioning import preview_captioning
-            action = lambda: preview_captioning(config, source, relative_path)
+            from msa_indexer.adapters.adapter_09_optional_captioning import preview_captioning_folder
+            action = lambda: preview_captioning_folder(config, source)
         else:
             raise HTTPException(status_code=409, detail="This adapter has no isolated run action")
         started = time.perf_counter()

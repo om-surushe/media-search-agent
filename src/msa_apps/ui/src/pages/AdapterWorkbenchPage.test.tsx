@@ -59,11 +59,11 @@ describe('AdapterWorkbenchPage', () => {
     expect(String(vi.mocked(fetch).mock.calls.at(-1)?.[0])).not.toContain('relative_path=')
   })
 
-  it('shows a sample button for Stage 07 and a folder button for Stage 08', async () => {
+  it('shows sample Stage 07 and folder Stage 08/09 buttons', async () => {
     vi.mocked(fetch).mockImplementation((url: string) => Promise.resolve({
       ok: true,
       json: async () => url.endsWith('/adapters')
-        ? [{ id: 'discovery', number: 1, name: 'Discovery', runnable: true }, { id: 'finalization', number: 7, name: 'Local finalization', runnable: true }, { id: 'qdrant-export', number: 8, name: 'Qdrant export', runnable: true }]
+        ? [{ id: 'discovery', number: 1, name: 'Discovery', runnable: true }, { id: 'finalization', number: 7, name: 'Local finalization', runnable: true }, { id: 'qdrant-export', number: 8, name: 'Qdrant export', runnable: true }, { id: 'captions', number: 9, name: 'Optional captions', runnable: true }]
         : url.includes('/api/setup/status')
           ? { ready: false, models: [] }
           : url.includes('/adapters/discovery/run')
@@ -73,7 +73,7 @@ describe('AdapterWorkbenchPage', () => {
 
     render(<AdapterWorkbenchPage />)
     fireEvent.click(await screen.findByRole('button', { name: 'Run Discovery (25 max)' }))
-    fireEvent.click(await screen.findByText('Optional sample selection for single-file stages 07 and 09'))
+    fireEvent.click(await screen.findByText('Optional sample selection for single-file stages 07 only'))
     fireEvent.change(screen.getByLabelText('Sample file'), { target: { value: 'clip.mp4' } })
     fireEvent.click(screen.getAllByRole('button', { name: 'Run on selected sample' })[0])
 
@@ -84,6 +84,12 @@ describe('AdapterWorkbenchPage', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Export every source item to temporary Qdrant' }))
     await waitFor(() => expect(vi.mocked(fetch)).toHaveBeenCalledWith(
       expect.stringContaining('/adapters/qdrant-export/run?source_name=sample'),
+      { method: 'POST' },
+    ))
+    expect(String(vi.mocked(fetch).mock.calls.at(-1)?.[0])).not.toContain('relative_path=')
+    fireEvent.click(screen.getByRole('button', { name: 'Caption every image and video in source' }))
+    await waitFor(() => expect(vi.mocked(fetch)).toHaveBeenCalledWith(
+      expect.stringContaining('/adapters/captions/run?source_name=sample'),
       { method: 'POST' },
     ))
     expect(String(vi.mocked(fetch).mock.calls.at(-1)?.[0])).not.toContain('relative_path=')

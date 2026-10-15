@@ -40,7 +40,7 @@ def test_qdrant_export_processes_complete_source_folder(tmp_path, monkeypatch):
     monkeypatch.setattr(sandbox, "index_capability", lambda _config, **_kwargs: {"available": True, "reason": None})
     monkeypatch.setattr(sandbox, "_clip_checkpoint", lambda _config: (tmp_path / "clip.pt", None))
 
-    def fake_run(_config, _source, _workspace, staged_root, _checkpoint, *, result_limit, after_source):
+    def fake_run(_config, _source, _workspace, staged_root, _checkpoint, *, result_limit, after_source, after_index):
         captured["files"] = sorted(path.relative_to(staged_root).as_posix() for path in staged_root.rglob("*") if path.is_file())
         captured["source_bytes"] = (image.read_bytes(), video.read_bytes())
         captured["limit"] = result_limit

@@ -409,7 +409,9 @@ def run_video_folder(config, source, *, result_limit: int = 25, after_index=None
         }
 
 
-def run_source_folder(config, source, *, result_limit: int = 25, after_source=None) -> dict:
+def run_source_folder(
+    config, source, *, result_limit: int = 25, after_source=None, after_index=None,
+) -> dict:
     """Run the complete local index pipeline for every supported source media item in disposable state."""
     if not 1 <= result_limit <= 25:
         raise ValueError("Result limit must be between 1 and 25")
@@ -450,7 +452,7 @@ def run_source_folder(config, source, *, result_limit: int = 25, after_source=No
             }
         processed, embeddings, summary, results = _run_staged_source(
             config, source, workspace, staged_root, checkpoint,
-            result_limit=result_limit, after_source=after_source,
+            result_limit=result_limit, after_source=after_source, after_index=after_index,
         )
         return {
             "scope": "whole_configured_source", "media_found": files_found,

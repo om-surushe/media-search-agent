@@ -71,26 +71,37 @@ def _source_roots(config) -> list[Path]:
 
 
 def run_captioning_worker(
-    config, stop_event, on_progress: Callable[[dict], None],
+    config, stop_event, on_progress: Callable[[dict], None], *,
+    python_path: Path | None = None, cache_dir: Path | None = None,
 ) -> dict:
-    return _run_captioning_worker(config, stop_event, on_progress)
+    return _run_captioning_worker(
+        config, stop_event, on_progress, python_path=python_path, cache_dir=cache_dir,
+    )
 
 
 def run_video_scene_captioning_worker(
     config, stop_event, on_progress: Callable[[dict], None],
-    video_ids: list[str] | None = None,
+    video_ids: list[str] | None = None, *,
+    python_path: Path | None = None, cache_dir: Path | None = None,
 ) -> dict:
     return _run_captioning_worker(
         config, stop_event, on_progress, video_scenes=True, video_ids=video_ids,
+        python_path=python_path, cache_dir=cache_dir,
     )
 
 
 def _run_captioning_worker(
     config, stop_event, on_progress: Callable[[dict], None], *,
     video_scenes: bool = False, video_ids: list[str] | None = None,
+    python_path: Path | None = None, cache_dir: Path | None = None,
 ) -> dict:
     """Run the isolated offline worker and forward compact progress events."""
-    python, cache, worker = validate_captioning_runtime()
+    runtime_env = os.environ.copy()
+    if python_path is not None:
+        runtime_env["MSA_CAPTION_PYTHON"] = str(python_path)
+    if cache_dir is not None:
+        runtime_env["MSA_CAPTION_CACHE_DIR"] = str(cache_dir)
+    python, cache, worker = validate_captioning_runtime(runtime_env)
     database = Path(config.sqlite_path).expanduser().resolve(strict=True)
     if not database.is_file():
         raise CaptioningError(f"Captioning requires an existing SQLite index: {database}")
@@ -110,7 +121,7 @@ def _run_captioning_worker(
     if os.environ.get("MSA_INDEXER_STOP_FILE"):
         command.extend(("--stop-file", os.environ["MSA_INDEXER_STOP_FILE"]))
 
-    env = os.environ.copy()
+    env = runtime_env.copy()
     # macOS sets this for its parent venv; it can override MSA_CAPTION_PYTHON.
     env.pop("__PYVENV_LAUNCHER__", None)
     env.update({

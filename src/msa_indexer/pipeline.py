@@ -536,7 +536,8 @@ def get_place_name(lat: float, lon: float) -> str | None:
     return None
 
 def run_index(
-    config, stop_event=None, *, model_adapters: ModelAdapterBundle | None = None
+    config, stop_event=None, *, model_adapters: ModelAdapterBundle | None = None,
+    stop_after_local_finalize: bool = False,
 ):
     import time
     import os
@@ -2754,6 +2755,9 @@ def run_index(
     current_index_state = committed_index_version or db.get_index_state()
     db.close()
 
+    if stop_after_local_finalize:
+        return
+
     stop_requested = stop_event is not None and stop_event.is_set()
 
     force_export_to_qdrant = getattr(config, 'export_to_qdrant', False)
@@ -2948,86 +2952,15 @@ def run_index(
         # stays the terminal summary (§3.4).
         _emit_indexer_summary(**complete_summary)
 
-    if getattr(config, "image_captions_enabled", False):
-        from .captioning import (
-            MODEL_ID, PROMPT_VERSION, CaptioningError, run_captioning_worker,
+    if (
+        getattr(config, "image_captions_enabled", False)
+        or getattr(config, "video_scene_captions_enabled", False)
+    ):
+        from .adapters.adapter_09_optional_captioning import run_captioning_stages
+
+        run_captioning_stages(
+            config, stop_event, complete_summary, export_blocked, _emit_indexer_summary,
         )
-        import threading
-
-        if stop_event is None:
-            stop_event = threading.Event()
-        captioning = {
-            "model_id": MODEL_ID, "prompt_version": PROMPT_VERSION,
-            "status": "cancelled" if stop_event.is_set() else "starting",
-            "total": 0, "generated": 0, "skipped": 0, "failed": 0,
-            "elapsed_seconds": 0.0,
-        }
-        if not stop_event.is_set():
-            def publish_captioning(update):
-                captioning.update(update["captioning"])
-                _emit_indexer_summary(**{
-                    **complete_summary, **update,
-                    **({"phase": "export_blocked"} if export_blocked else {}),
-                })
-
-            try:
-                captioning.update(run_captioning_worker(config, stop_event, publish_captioning))
-            except CaptioningError as exc:
-                captioning.update(status="failed", error=str(exc))
-                complete_summary["captioning"] = captioning
-                _emit_indexer_summary(**{
-                    **complete_summary,
-                    "phase": "export_blocked" if export_blocked else "captioning_error",
-                })
-                raise
-        complete_summary["captioning"] = captioning
-        _emit_indexer_summary(**{
-            **complete_summary,
-            "phase": "export_blocked" if export_blocked else "complete",
-        })
-
-    if getattr(config, "video_scene_captions_enabled", False):
-        from .captioning import (
-            MODEL_ID, VIDEO_SCENE_PROMPT_VERSION, CaptioningError,
-            run_video_scene_captioning_worker,
-        )
-        import threading
-
-        if stop_event is None:
-            stop_event = threading.Event()
-        scene_captioning = {
-            "model_id": MODEL_ID, "prompt_version": VIDEO_SCENE_PROMPT_VERSION,
-            "status": "cancelled" if stop_event.is_set() else "starting",
-            "total": 0, "generated": 0, "skipped": 0, "failed": 0,
-            "elapsed_seconds": 0.0,
-        }
-        if not stop_event.is_set():
-            def publish_video_scenes(update):
-                scene_captioning.update(update["video_scene_captioning"])
-                _emit_indexer_summary(**{
-                    **complete_summary, **update,
-                    **({"phase": "export_blocked"} if export_blocked else {}),
-                })
-
-            try:
-                scene_captioning.update(
-                    run_video_scene_captioning_worker(
-                        config, stop_event, publish_video_scenes,
-                    )
-                )
-            except CaptioningError as exc:
-                scene_captioning.update(status="failed", error=str(exc))
-                complete_summary["video_scene_captioning"] = scene_captioning
-                _emit_indexer_summary(**{
-                    **complete_summary,
-                    "phase": "export_blocked" if export_blocked else "scene_captioning_error",
-                })
-                raise
-        complete_summary["video_scene_captioning"] = scene_captioning
-        _emit_indexer_summary(**{
-            **complete_summary,
-            "phase": "export_blocked" if export_blocked else "complete",
-        })
 
 
 def _sqlite_pre_stage3_shape(sqlite_path: Path) -> bool:
