@@ -13,7 +13,9 @@ This provisions the pinned project Python and Node major versions, creates the
 opens the project development shell. On Apple Silicon macOS, setup syncs the
 version-locked API/dev set; other platforms still use their existing manifests.
 Do not use the installed app's Python environment for normal repository work.
-Use `MSA_DEV_VENV_DIR` only as a deliberate override.
+Use `MSA_DEV_VENV_DIR` only as a deliberate override. For a fresh branch clone,
+exact model download commands, public test fixtures, and cloud setup limits, see
+[Portable development resources](DEVELOPMENT_RESOURCES.md).
 
 ## Caption worker environment
 

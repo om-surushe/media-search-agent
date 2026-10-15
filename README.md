@@ -108,7 +108,9 @@ with `./scripts/dev-api.sh` and the Vite client in a second terminal with
 `./scripts/dev-ui.sh`; both watch files and show logs in their own terminal.
 Run an indexing pass in a third terminal with `./scripts/dev-indexer.sh`.
 See [Local development](docs/DEVELOPMENT.md) for model storage, ports, logs,
-and which components run as jobs rather than separate services. `npm run dev`
+and which components run as jobs rather than separate services. [Portable
+development resources](docs/DEVELOPMENT_RESOURCES.md) covers fresh clones,
+model downloads, fixtures, and cloud test limits. `npm run dev`
 at the repository root starts the Tauri desktop shell; it is not the web UI
 watch command.
 
@@ -119,6 +121,7 @@ watch command.
 - [Architecture](docs/ARCHITECTURE.md) — system design, dataflow, schema
 - [Installation](docs/INSTALL.md) — full install guide and troubleshooting
 - [Local development](docs/DEVELOPMENT.md) — backend, client, indexer, model files, and live reload
+- [Portable development resources](docs/DEVELOPMENT_RESOURCES.md) — branch clone, dependencies, model downloads, fixtures, and cloud setup
 - [Quick Start](docs/QUICKSTART.md) — first-run walkthrough
 - [Configuration](docs/CONFIGURATION.md) — `config.yaml` reference
 - [CLI](docs/CLI.md) — `msa` command-line reference
