@@ -11,6 +11,8 @@
 # Add one entry per folder you want indexed. Use Linux/WSL2 paths here.
 # read_only: true prevents the indexer from modifying your originals
 # (recommended).
+# Optional private media sources live in the git-ignored local file.
+media_sources_file: "media_sources.local.yaml"
 media_sources: []
 # Examples:
 #   - name: "Photos"

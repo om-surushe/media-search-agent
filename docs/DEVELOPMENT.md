@@ -41,7 +41,10 @@ remain visible:
 ```
 
 The API reads the repository `config.yaml` and binds to its configured local
-host/port (8500 in the checked-in development config). Uvicorn watches Python
+host/port (8500 in the checked-in development config). For private media sources,
+copy `media_sources.local.yaml.example` to the git-ignored
+`media_sources.local.yaml` and edit its paths; the repository config loads that
+file without storing personal paths in Git. Uvicorn watches Python
 and YAML files under the backend source packages. Restart the API after editing
 root `config.yaml`; source-only watches avoid scanning local environments and
 model caches. Logs are printed here and under `logs/`.

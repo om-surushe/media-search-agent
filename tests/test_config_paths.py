@@ -560,3 +560,36 @@ class TestIncrementalConfig:
 
         assert cfg.incremental.fingerprint_enabled is True
         assert cfg.incremental.deletion_sweep is False
+
+
+class TestExternalMediaSources:
+    def test_relative_private_sources_file_loads_and_merges_inline_entries(self, monkeypatch, tmp_path):
+        from msa_settings import config as cfg_mod
+
+        cfg_mod.load_config.cache_clear()
+        data_root = tmp_path / "data"
+        monkeypatch.setenv("MSA_DATA_DIR", str(data_root))
+        monkeypatch.setenv("MSA_CACHE_DIR", str(tmp_path / "cache"))
+        monkeypatch.setenv("MSA_LOG_DIR", str(tmp_path / "logs"))
+        monkeypatch.delenv("MSA_DEV", raising=False)
+
+        external_sources = tmp_path / "media_sources.local.yaml"
+        external_sources.write_text(
+            "media_sources:\n"
+            "  - name: private\n"
+            "    path: /private/media\n"
+            "    read_only: true\n",
+            encoding="utf-8",
+        )
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(
+            "media_sources_file: media_sources.local.yaml\n"
+            "media_sources:\n"
+            "  - name: inline\n"
+            "    path: /inline/media\n"
+            "    read_only: true\n",
+            encoding="utf-8",
+        )
+
+        cfg = cfg_mod._load_config_impl(str(config_file))
+        assert [source.name for source in cfg.media_sources] == ["private", "inline"]

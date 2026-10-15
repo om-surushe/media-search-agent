@@ -1,0 +1,5 @@
+# Copy to media_sources.local.yaml (git-ignored) and add your local sources.
+media_sources:
+  - name: sample
+    path: /path/to/your/media
+    read_only: true

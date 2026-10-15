@@ -3,6 +3,7 @@ index_backups/
 
 # Privacy-sensitive local config (never check in)
 private/
+/media_sources.local.yaml
 # config.yaml.template is generated at build time (copied from the platform-
 # specific checked-in template) and must not be committed at the repo root
 config.yaml.template
