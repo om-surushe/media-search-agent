@@ -57,7 +57,7 @@ def test_workbench_folder_api_requires_no_file_selection(tmp_path, monkeypatch):
     from msa_apps.search_api import app as app_module
 
     source_root, source = _source(tmp_path)
-    config = SimpleNamespace(media_sources=[source])
+    config = SimpleNamespace(media_sources=[source], models_dir=tmp_path)
     monkeypatch.setattr(app_module, "_get_config", lambda _request: config)
     monkeypatch.setattr(
         adapter_03_metadata, "get_exif_basic_result", lambda _path: ({"kind": "image"}, True),
