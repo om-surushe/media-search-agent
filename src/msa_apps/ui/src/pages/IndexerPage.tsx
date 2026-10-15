@@ -286,7 +286,7 @@ export function IndexerPage() {
             AI Image Captions
           </label>
           <div className="pl-6 text-xs text-zinc-500 dark:text-zinc-400">
-            Offline SmolVLM2 captioning for photos only. Completed captions are skipped; model runs sequentially.
+            Offline BLIP base captioning on CPU for photos and video keyframes. Completed captions are skipped; inference runs sequentially.
           </div>
           <label className="flex items-center gap-2 text-sm text-zinc-700 dark:text-zinc-200">
             <input

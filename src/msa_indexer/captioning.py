@@ -11,38 +11,50 @@ import time
 from pathlib import Path
 from typing import Callable
 
-MODEL_ID = "mlx-community/SmolVLM2-500M-Video-Instruct-mlx"
-PROMPT_VERSION = "stage4a2-caption-v1"
-VIDEO_SCENE_PROMPT_VERSION = "stage4b-video-scene-v1"
+MODEL_ID = "Salesforce/blip-image-captioning-base"
+MODEL_REVISION = "82a37760796d32b1411fe092ab5d4e227313294b"
+MODEL_SHA256 = "d6638651a5526cc2ede56f2b5104d6851b0755816d220e5e046870430180c767"
+MODEL_WEIGHT_FILE = "pytorch_model.bin"
+MODEL_WEIGHT_BYTES = 989820849
+MODEL_REQUIRED_FILES = (
+    "config.json", "preprocessor_config.json", MODEL_WEIGHT_FILE,
+    "special_tokens_map.json", "tokenizer.json", "tokenizer_config.json", "vocab.txt",
+)
+PROMPT_VERSION = "stage4a3-caption-v1"
+VIDEO_SCENE_PROMPT_VERSION = "stage4b-video-scene-v2"
 
 
 class CaptioningError(ValueError):
     pass
 
 
-def validate_captioning_runtime(environ: dict[str, str] | None = None) -> tuple[Path, Path, Path]:
-    """Check the isolated interpreter, worker, and cached checkpoint without loading MLX."""
+def caption_model_cache_dir(models_dir: Path, environ: dict[str, str] | None = None) -> Path:
     env = os.environ if environ is None else environ
-    python_value = env.get("MSA_CAPTION_PYTHON")
-    cache_value = env.get("MSA_CAPTION_CACHE_DIR")
-    if not python_value:
-        raise CaptioningError("AI Image Captions needs MSA_CAPTION_PYTHON set to the isolated MLX Python interpreter.")
-    if not cache_value:
-        raise CaptioningError("AI Image Captions needs MSA_CAPTION_CACHE_DIR set to the existing local model cache.")
+    return Path(env.get("MSA_CAPTION_CACHE_DIR") or models_dir / "captioning").expanduser().resolve()
+
+
+def validate_captioning_runtime(
+    environ: dict[str, str] | None = None, *, models_dir: Path | None = None,
+    require_model: bool = True,
+) -> tuple[Path, Path, Path]:
+    """Check the CPU Transformers interpreter, worker, and cached checkpoint."""
+    env = os.environ if environ is None else environ
+    python_value = env.get("MSA_CAPTION_PYTHON") or sys.executable
+    if not env.get("MSA_CAPTION_CACHE_DIR") and models_dir is None:
+        raise CaptioningError("AI Image Captions needs a configured local model directory.")
 
     # Keep the venv executable path (resolve() follows its symlink and can discard site-packages).
     python = Path(os.path.abspath(Path(python_value).expanduser()))
-    cache = Path(cache_value).expanduser().resolve()
+    cache = caption_model_cache_dir(models_dir or Path("models"), env)
     if not python.is_file() or not os.access(python, os.X_OK):
-        raise CaptioningError(f"Captioning interpreter is not executable: {python}")
-    if not cache.is_dir():
-        raise CaptioningError(f"Local caption model cache is not a directory: {cache}")
-
-    snapshots = cache / f"models--{MODEL_ID.replace('/', '--')}" / "snapshots"
-    if not snapshots.is_dir() or not any(path.is_dir() for path in snapshots.iterdir()):
-        raise CaptioningError(
-            f"{MODEL_ID} is not present in the local cache at {cache}; captioning is offline and will not download it."
-        )
+        raise CaptioningError("Configured CPU caption interpreter is not executable.")
+    if require_model:
+        snapshot = cache / f"models--{MODEL_ID.replace('/', '--')}" / "snapshots" / MODEL_REVISION
+        if not snapshot.is_dir() or any(not (snapshot / name).is_file() for name in MODEL_REQUIRED_FILES):
+            raise CaptioningError(
+                "Caption checkpoint is incomplete or not present in the local cache; "
+                "captioning is offline and will not download it."
+            )
 
     project_root = Path(__file__).resolve().parents[2]
     worker = project_root / "scripts" / "caption_image.py"
@@ -101,7 +113,9 @@ def _run_captioning_worker(
         runtime_env["MSA_CAPTION_PYTHON"] = str(python_path)
     if cache_dir is not None:
         runtime_env["MSA_CAPTION_CACHE_DIR"] = str(cache_dir)
-    python, cache, worker = validate_captioning_runtime(runtime_env)
+    python, cache, worker = validate_captioning_runtime(
+        runtime_env, models_dir=Path(getattr(config, "models_dir", "models")),
+    )
     database = Path(config.sqlite_path).expanduser().resolve(strict=True)
     if not database.is_file():
         raise CaptioningError(f"Captioning requires an existing SQLite index: {database}")
@@ -122,7 +136,7 @@ def _run_captioning_worker(
         command.extend(("--stop-file", os.environ["MSA_INDEXER_STOP_FILE"]))
 
     env = runtime_env.copy()
-    # macOS sets this for its parent venv; it can override MSA_CAPTION_PYTHON.
+    # Avoid leaking the parent application's venv launcher into the CPU caption worker.
     env.pop("__PYVENV_LAUNCHER__", None)
     env.update({
         "HF_HUB_OFFLINE": "1",
@@ -221,7 +235,7 @@ def _run_captioning_worker(
     if stop_event.is_set():
         state["status"] = "cancelled"
     elif return_code != 0 and state["status"] != "failed":
-        state.update(status="failed", error="Caption worker exited unexpectedly; verify the isolated MLX runtime and local model cache.")
+        state.update(status="failed", error="Caption worker exited unexpectedly; verify the CPU Transformers runtime and local model cache.")
     elif return_code == 0 and not summary_received:
         detail = "Unexpected worker output." if unexpected_output else "No completion summary was returned."
         state.update(status="failed", error=f"Caption worker did not complete cleanly. {detail}")

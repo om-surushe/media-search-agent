@@ -1,9 +1,0 @@
-# SmolVLM2 worker dependencies; this environment remains separate from the API.
-mlx==0.32.3
-mlx-metal==0.32.3
-mlx-vlm==0.7.6
-mlx-audio==0.5.8
-huggingface-hub==2.2.0
-transformers==5.19.0
-tokenizers==0.23.3
-Pillow==12.3.0

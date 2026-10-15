@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { apiUrl } from '@/lib/apiBase'
-import { fetchSetupStatus, retrySetup, type ModelInfo } from '@/api/setup'
+import { fetchSetupStatus, retrySetup, retryCaptioningSetup, type ModelInfo } from '@/api/setup'
 import { getSources, type MediaSource } from '@/api/indexer'
 import { useSetupWS } from '@/hooks/useSetupWS'
 
@@ -132,6 +132,24 @@ export function AdapterWorkbenchPage() {
     await loadModels(stageId)
   }
 
+  async function prepareCaptioningAndRunStage(stageId: string) {
+    if (!window.confirm(`Download and verify the pinned CPU BLIP caption model (~990 MB), then caption every supported image and video in “${source}”?`)) return
+    preparedStage.current = stageId
+    setModelError('')
+    setLoadingModels(true)
+    retryRevision.current = setupRevision
+    setModelLog(current => [...current, `${new Date().toLocaleTimeString()} · Downloading and verifying BLIP caption model (~990 MB).`].slice(-50))
+    try {
+      await retryCaptioningSetup()
+      setSetupConnection(connection => connection + 1)
+    } catch (e) {
+      preparedStage.current = null
+      retryRevision.current = null
+      setLoadingModels(false)
+      setModelError(String(e))
+    }
+  }
+
   async function runDiscovery() {
     setBusy('discovery'); setError('')
     try {
@@ -172,7 +190,7 @@ export function AdapterWorkbenchPage() {
     {discovery && <p className="text-sm text-zinc-500">Discovery: {discovery.returned} files sampled{discovery.has_more ? ' (more files exist)' : ''} in {discovery.elapsed_seconds}s.</p>}
     <section className="rounded-lg border border-zinc-200 dark:border-zinc-700 p-4">
       <h2 className="font-medium">Model setup</h2>
-      <p className="mt-1 text-sm text-zinc-500">Stage 05 always runs the configured RT-DETR object detector; optional face recognition follows Settings. Object detection may be slow on CPU. Model selection and optional detector settings are in <a className="text-blue-600 underline" href="/settings">Settings</a>. Downloads use the app’s verified sources; ordinary previews never download models. Stage 08’s explicit prepare-and-run action is the exception.</p>
+      <p className="mt-1 text-sm text-zinc-500">Stage 05 always runs the configured RT-DETR object detector; optional face recognition follows Settings. Object detection may be slow on CPU. Model selection and optional detector settings are in <a className="text-blue-600 underline" href="/settings">Settings</a>. Downloads use the app’s verified sources; ordinary previews never download models. Stages 08 and 09 have explicit prepare-and-run actions.</p>
       {models.length > 0 && <ul className="mt-2 space-y-1 text-xs text-zinc-500">{models.map(model => {
         const live = liveModels?.[model.id]
         return <li key={model.id}>{model.label} · ~{model.size_mb} MB · {live?.status ?? (model.present ? 'cached' : 'missing')}{model.source ? ` · ${model.source}` : ''}{live?.error && <span className="block text-red-600">{live.error}</span>}</li>
@@ -196,6 +214,7 @@ export function AdapterWorkbenchPage() {
         {canRun && !folderStage && stage.id !== 'image-visual' && selectedPath && <button disabled={Boolean(busy)} onClick={() => void runStage(stage.id)} className="mt-3 rounded bg-blue-600 px-3 py-1.5 text-sm text-white disabled:opacity-50">{busy === stage.id ? 'Running…' : 'Run on selected sample'}</button>}
         {canRun && !folderStage && !selectedPath && stage.id !== 'image-visual' && <p className="mt-3 text-xs text-zinc-500">Single-file stage; choose a sample only when you test this stage.</p>}
         {stage.id === 'qdrant-export' && stage.can_prepare && source && models.length > 0 && !modelSetupReadOnly && <button disabled={Boolean(busy) || loadingModels} onClick={() => void prepareAndRunStage(stage.id)} className="mt-3 rounded bg-blue-600 px-3 py-1.5 text-sm text-white disabled:opacity-50">{loadingModels ? 'Preparing models…' : `Download prerequisites & run Stage 08 (up to ${models.reduce((total, model) => total + model.size_mb, 0)} MB)`}</button>}
+        {stage.id === 'captions' && stage.can_prepare && source && !modelSetupReadOnly && <button disabled={Boolean(busy) || loadingModels} onClick={() => void prepareCaptioningAndRunStage(stage.id)} className="mt-3 rounded bg-blue-600 px-3 py-1.5 text-sm text-white disabled:opacity-50">{loadingModels ? 'Preparing BLIP model…' : 'Download & verify CPU caption model (~990 MB), then run Stage 09'}</button>}
         {result?.error && <p role="alert" className="mt-2 text-sm text-red-600">Failed in {result.elapsed_seconds?.toFixed(3)}s: {result.error}</p>}
         {result?.output && <div className="mt-2 space-y-2"><p className="text-xs text-zinc-500">Completed in {result.elapsed_seconds?.toFixed(3)}s</p><pre className="max-h-96 overflow-auto rounded bg-zinc-100 dark:bg-zinc-800 p-3 text-xs">{JSON.stringify(result.output, null, 2)}</pre></div>}
       </article>

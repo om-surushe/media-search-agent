@@ -200,7 +200,9 @@ class IndexerManager:
                 raise RuntimeError("Indexer is already running")
             if image_captions_enabled or video_scene_captions_enabled:
                 from msa_indexer.captioning import validate_captioning_runtime
-                validate_captioning_runtime()
+                from msa_settings import load_config
+                configured = load_config(config_path)
+                validate_captioning_runtime(models_dir=getattr(configured, "models_dir", None))
 
             run_id = uuid.uuid4().hex[:8]
             try:

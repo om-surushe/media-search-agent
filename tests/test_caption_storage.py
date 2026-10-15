@@ -297,7 +297,7 @@ def test_video_scene_worker_reuses_one_provider_and_skips_completed_keyframes(st
         def close(self):
             pass
 
-    monkeypatch.setattr(script, "SmolVLM2Provider", FakeProvider)
+    monkeypatch.setattr(script, "BlipCaptionProvider", FakeProvider)
     import msa_indexer.io.video as video
     fallback_times = []
     monkeypatch.setattr(
@@ -314,7 +314,7 @@ def test_video_scene_worker_reuses_one_provider_and_skips_completed_keyframes(st
         "SELECT timestamp, caption, status FROM video_scene_caption ORDER BY timestamp"
     ).fetchall()
     assert rows == [(2.5, "Visible scene 1.", "completed"), (7.5, "Visible scene 2.", "completed")]
-    assert len(set(seen)) == 1 and "single video frame" in seen[0]
+    assert len(set(seen)) == 1 and seen[0] == "a video frame showing"
     assert FakeProvider.loads == 1
     assert fallback_times == [7.5]
 
@@ -355,6 +355,65 @@ def test_persistence_helper_rejects_missing_or_wrong_database_and_mismatched_ima
     assert store.conn.execute("SELECT COUNT(*) FROM image_caption").fetchone()[0] == 0
 
 
+def test_blip_caption_provider_uses_cpu_and_only_local_weights(tmp_path, monkeypatch):
+    from contextlib import nullcontext
+    from PIL import Image
+    script = import_caption_script()
+    BlipCaptionProvider = script.BlipCaptionProvider
+
+    calls = {}
+
+    class Processor:
+        @classmethod
+        def from_pretrained(cls, path, **kwargs):
+            calls["processor_load"] = (path, kwargs)
+            return cls()
+
+        def __call__(self, image, *, text, return_tensors):
+            calls["seed"] = text
+            return {"pixel_values": image.size}
+
+        def decode(self, _output, *, skip_special_tokens):
+            return "a photograph of a red car"
+
+    class Model:
+        @classmethod
+        def from_pretrained(cls, path, **kwargs):
+            calls["model_load"] = (path, kwargs)
+            return cls()
+
+        def to(self, device):
+            calls["device"] = device
+            return self
+
+        def eval(self):
+            return self
+
+        def generate(self, **kwargs):
+            calls["generation"] = kwargs
+            return [1]
+
+    import sys
+    monkeypatch.setitem(sys.modules, "torch", SimpleNamespace(inference_mode=nullcontext))
+    monkeypatch.setitem(sys.modules, "transformers", SimpleNamespace(
+        BlipProcessor=Processor, BlipForConditionalGeneration=Model,
+    ))
+    image_path = tmp_path / "frame.jpg"
+    Image.new("RGB", (4, 3), "white").save(image_path)
+
+    provider = BlipCaptionProvider(tmp_path / "snapshot")
+    caption = provider.caption(image_path, 32)
+    provider.close()
+
+    assert caption == "a photograph of a red car"
+    assert calls["seed"] == script.PROMPT
+    assert calls["device"] == "cpu"
+    assert calls["processor_load"][1] == {"local_files_only": True, "trust_remote_code": False}
+    assert calls["model_load"][1]["local_files_only"] is True
+    assert calls["model_load"][1]["use_safetensors"] is False
+    assert calls["generation"]["max_new_tokens"] == 32
+
+
 def test_script_remains_print_only_without_persistence_options(tmp_path, monkeypatch, capsys):
     from PIL import Image
     import huggingface_hub
@@ -388,12 +447,9 @@ def test_script_remains_print_only_without_persistence_options(tmp_path, monkeyp
         def close(self):
             type(self).closed.append(True)
 
-        def active_metal_memory_bytes(self):
-            return 0
-
     provider = FakeProvider
     monkeypatch.setattr(huggingface_hub, "snapshot_download", resolve_model)
-    monkeypatch.setattr(script, "SmolVLM2Provider", provider)
+    monkeypatch.setattr(script, "BlipCaptionProvider", provider)
     monkeypatch.setattr(script.importlib.metadata, "version", lambda _name: "test-version")
     monkeypatch.setattr(script, "_rss_bytes", lambda: None)
     monkeypatch.setattr(script, "_system_free_bytes", lambda: None)
@@ -459,7 +515,7 @@ def test_batch_captions_previous_images_once_then_skips_completed(store, tmp_pat
         def close(self):
             type(self).closed += 1
 
-    monkeypatch.setattr(script, "SmolVLM2Provider", FakeProvider)
+    monkeypatch.setattr(script, "BlipCaptionProvider", FakeProvider)
     assert _run_batch_script(script, store, source_root, cache, monkeypatch) == 0
     first_events = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
     assert first_events[-1]["status"] == "complete"
@@ -504,7 +560,7 @@ def test_batch_caption_cancellation_finishes_current_image_and_releases_model(st
         def close(self):
             type(self).closed = True
 
-    monkeypatch.setattr(script, "SmolVLM2Provider", FakeProvider)
+    monkeypatch.setattr(script, "BlipCaptionProvider", FakeProvider)
     assert _run_batch_script(script, store, source_root, cache, monkeypatch, stop_file=stop_file) == 0
     events = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
     assert events[-1]["status"] == "cancelled"
@@ -536,7 +592,7 @@ def test_batch_caption_failure_is_reported_and_releases_model(store, tmp_path, m
         def close(self):
             type(self).closed = True
 
-    monkeypatch.setattr(script, "SmolVLM2Provider", FakeProvider)
+    monkeypatch.setattr(script, "BlipCaptionProvider", FakeProvider)
     assert _run_batch_script(script, store, source_root, cache, monkeypatch) == 1
     events = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
     assert events[-1]["status"] == "failed"
@@ -553,7 +609,10 @@ def test_caption_worker_does_not_inherit_parent_python_launcher(store, tmp_path,
     media_root = tmp_path / "media"
     media_root.mkdir()
     cache = tmp_path / "hub"
-    (cache / f"models--{captioning.MODEL_ID.replace('/', '--')}" / "snapshots" / "rev").mkdir(parents=True)
+    snapshot = cache / f"models--{captioning.MODEL_ID.replace('/', '--')}" / "snapshots" / captioning.MODEL_REVISION
+    snapshot.mkdir(parents=True)
+    for name in captioning.MODEL_REQUIRED_FILES:
+        (snapshot / name).write_text("cached")
     monkeypatch.setenv("MSA_CAPTION_PYTHON", sys.executable)
     monkeypatch.setenv("MSA_CAPTION_CACHE_DIR", str(cache))
     monkeypatch.setenv("__PYVENV_LAUNCHER__", "/protected-app/python")
@@ -585,7 +644,7 @@ def test_caption_worker_does_not_inherit_parent_python_launcher(store, tmp_path,
 
 def test_caption_runtime_validation_requires_a_cached_model_and_isolated_python(tmp_path):
     from msa_indexer.captioning import (
-        CaptioningError, MODEL_ID, validate_captioning_runtime,
+        CaptioningError, MODEL_ID, MODEL_REVISION, validate_captioning_runtime,
     )
 
     target = tmp_path / "caption-python-target"
@@ -596,21 +655,21 @@ def test_caption_runtime_validation_requires_a_cached_model_and_isolated_python(
     python = bin_dir / "python"
     python.symlink_to(target)
     cache = tmp_path / "hub"
-    snapshots = cache / f"models--{MODEL_ID.replace('/', '--')}" / "snapshots"
-    snapshot = snapshots / "local-revision"
+    snapshot = cache / f"models--{MODEL_ID.replace('/', '--')}" / "snapshots" / MODEL_REVISION
     snapshot.mkdir(parents=True)
+    from msa_indexer.captioning import MODEL_REQUIRED_FILES
+    for name in MODEL_REQUIRED_FILES:
+        (snapshot / name).write_text("cached")
     env = {"MSA_CAPTION_PYTHON": str(python), "MSA_CAPTION_CACHE_DIR": str(cache)}
 
     assert validate_captioning_runtime(env) == (
         python, cache.resolve(), SCRIPT_PATH,
     )
     assert validate_captioning_runtime(env)[0].is_symlink()
-    (snapshot / "placeholder").write_text("cached")
-    (snapshot / "placeholder").unlink()
-    snapshot.rmdir()
+    (snapshot / "pytorch_model.bin").unlink()
     with pytest.raises(CaptioningError, match="will not download"):
         validate_captioning_runtime(env)
-    with pytest.raises(CaptioningError, match="MSA_CAPTION_PYTHON"):
+    with pytest.raises(CaptioningError, match="configured local model directory"):
         validate_captioning_runtime({})
 
 

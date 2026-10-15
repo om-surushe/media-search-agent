@@ -23,6 +23,6 @@ ADAPTER_STAGES = [
      "reason": "Required local model runtimes, weights, and qdrant-client must be available.",
      "description": "Process every supported item in the configured source and export all resulting vectors to embedded temporary Qdrant storage; missing model weights can be prepared first, without changing the live index or Qdrant service."},
     {"id": "captions", "number": 9, "name": "Optional captions", "runnable": False,
-     "reason": "The local MLX caption runtime and cached checkpoint must be available.",
-     "description": "Caption every supported image and video in the configured source using the cached local model; results come from disposable state."},
+     "reason": "The CPU PyTorch/Transformers runtime and pinned BLIP checkpoint must be available.",
+     "description": "Caption every supported image and video in the configured source using the pinned local BLIP model on CPU; results come from disposable state."},
 ]

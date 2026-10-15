@@ -5,7 +5,7 @@ Tracks per-model download state in a thread-safe singleton. FastAPI endpoints
 read this state; a background thread does the actual downloading so the async
 event loop is never blocked.
 
-Models downloaded:
+Core models downloaded automatically (optional BLIP caption weights are opt-in):
   - CLIP ViT-L-14/openai             (~1.71 GB) via open_clip / huggingface_hub
   - RT-DETR PekingU/rtdetr_r18vd       (~81 MB)  via HuggingFace transformers
   - facenet-pytorch VGGFace2           (~108 MB)  via torch hub (TORCH_HOME redirect)
@@ -29,6 +29,15 @@ from typing import Literal
 
 from loguru import logger
 
+from msa_indexer.captioning import (
+    MODEL_ID as CAPTION_MODEL_ID,
+    MODEL_REVISION as CAPTION_MODEL_REVISION,
+    MODEL_SHA256 as CAPTION_MODEL_SHA256,
+    MODEL_WEIGHT_FILE as CAPTION_MODEL_WEIGHT_FILE,
+    MODEL_WEIGHT_BYTES as CAPTION_MODEL_WEIGHT_BYTES,
+    MODEL_REQUIRED_FILES as CAPTION_MODEL_REQUIRED_FILES,
+    caption_model_cache_dir,
+)
 from msa_indexer.models.clip_artifacts import (
     CLIP_CHECKPOINT_SHA256,
     CLIP_HF_REPO,
@@ -46,6 +55,7 @@ ModelState = Literal["pending", "downloading", "verifying", "done", "error"]
 # Update this constant deliberately when upgrading the default model weights.
 RTDETR_DEFAULT_MODEL    = "PekingU/rtdetr_r18vd"
 RTDETR_DEFAULT_REVISION = "ac77a11ff0170a41b771c03264987f8ce2b0d753"
+DEFAULT_SETUP_MODEL_IDS = frozenset({"clip", "rtdetr", "facenet_pytorch"})
 
 MODEL_META = {
     "clip": {
@@ -70,6 +80,14 @@ MODEL_META = {
         # Revision pinned via RTDETR_DEFAULT_REVISION for reproducible installs.
         "revision": RTDETR_DEFAULT_REVISION,
         "source":   "huggingface.co/PekingU/rtdetr_r18vd",
+    },
+    "captioning": {
+        "label": "Image and video captioning model (BLIP base, CPU)",
+        "size_mb": 990,
+        "sha256": CAPTION_MODEL_SHA256,
+        "filename": CAPTION_MODEL_WEIGHT_FILE,
+        "revision": CAPTION_MODEL_REVISION,
+        "source": f"huggingface.co/{CAPTION_MODEL_ID}",
     },
     "facenet_pytorch": {
         "label":   "Face detection model (facenet-pytorch)",
@@ -128,6 +146,8 @@ class SetupManager:
             k: ModelDownloadState() for k in MODEL_META
         }
         self._download_started = False
+        self._running = False
+        self._active_models: frozenset[str] = frozenset()
         self._complete = False
 
     # ── Presence checks ───────────────────────────────────────────────────────
@@ -156,6 +176,16 @@ class SetupManager:
             and (rtdetr_snap / "preprocessor_config.json").exists()
         )
 
+        caption_slug = "models--" + CAPTION_MODEL_ID.replace("/", "--")
+        caption_snapshot = (
+            caption_model_cache_dir(models_dir) / caption_slug / "snapshots" / CAPTION_MODEL_REVISION
+        )
+        caption_present = (
+            caption_snapshot.is_dir()
+            and all((caption_snapshot / name).is_file() for name in CAPTION_MODEL_REQUIRED_FILES)
+            and (caption_snapshot / CAPTION_MODEL_WEIGHT_FILE).stat().st_size == CAPTION_MODEL_WEIGHT_BYTES
+        )
+
         # facenet-pytorch reads TORCH_HOME directly (not torch.hub.get_dir()) and
         # writes to ${TORCH_HOME}/checkpoints — see facenet_pytorch.models.inception_resnet_v1
         # `model_dir = os.path.join(get_torch_home(), 'checkpoints')`. The download worker
@@ -173,6 +203,7 @@ class SetupManager:
             "clip":            clip_present,
             "rtdetr":          rtdetr_present,
             "facenet_pytorch": facenet_present,
+            "captioning": caption_present,
         }
 
     def has_valid_clip(self, models_dir: Path) -> bool:
@@ -189,8 +220,22 @@ class SetupManager:
         except OSError:
             return False
 
+    def has_valid_captioning(self, models_dir: Path) -> bool:
+        slug = "models--" + CAPTION_MODEL_ID.replace("/", "--")
+        snapshot = caption_model_cache_dir(models_dir) / slug / "snapshots" / CAPTION_MODEL_REVISION
+        weights = snapshot / CAPTION_MODEL_WEIGHT_FILE
+        try:
+            return (
+                all((snapshot / name).is_file() for name in CAPTION_MODEL_REQUIRED_FILES)
+                and weights.stat().st_size == CAPTION_MODEL_WEIGHT_BYTES
+                and _verify_file(weights, CAPTION_MODEL_SHA256)
+            )
+        except OSError:
+            return False
+
     def is_ready(self, models_dir: Path) -> bool:
-        return all(self.check_all_present(models_dir).values())
+        present = self.check_all_present(models_dir)
+        return all(present[model_id] for model_id in DEFAULT_SETUP_MODEL_IDS)
 
     # ── State access ──────────────────────────────────────────────────────────
 
@@ -204,40 +249,71 @@ class SetupManager:
 
     # ── Download control ──────────────────────────────────────────────────────
 
-    def start_if_needed(self, models_dir: Path) -> None:
-        """Start a background download thread if not already running.
-
-        If a previous attempt left some models in error state, those are reset
-        so they will be retried — but only once every in-progress download has
-        settled.  Resetting state while another thread is actively writing to
-        the same files creates races and inconsistent UI updates.
-        """
+    def start_if_needed(
+        self, models_dir: Path, model_ids: set[str] | None = None,
+    ) -> None:
+        """Start downloads for the requested models; optional caption weights are opt-in."""
+        requested = frozenset(model_ids or DEFAULT_SETUP_MODEL_IDS)
+        unknown = requested - MODEL_META.keys()
+        if unknown:
+            raise ValueError(f"Unknown model setup target: {', '.join(sorted(unknown))}")
         with self._lock:
-            any_error = any(
-                v.status == "error" for v in self._models.values()
-            )
-            in_progress = any(
-                v.status in ("downloading", "verifying")
-                for v in self._models.values()
-            )
-            # Already running cleanly, or a download is still in flight — do nothing.
-            if self._download_started and (not any_error or in_progress):
+            if self._running:
+                if requested <= self._active_models:
+                    return
+                raise RuntimeError("Another model setup is already running")
+            states = [self._models[model_id] for model_id in requested]
+            any_error = any(state.status == "error" for state in states)
+            in_progress = any(state.status in ("downloading", "verifying") for state in states)
+            all_done = all(state.status == "done" for state in states)
+            if self._download_started and all_done and not any_error:
                 return
-            # All downloads have settled and at least one errored: reset for retry.
-            for v in self._models.values():
-                if v.status == "error":
-                    v.status = "pending"
-                    v.error = None
+            if in_progress:
+                return
+            for model_id in requested:
+                state = self._models[model_id]
+                if state.status == "error":
+                    state.status = "pending"
+                    state.error = None
             self._download_started = True
+            self._running = True
+            self._active_models = requested
             self._complete = False
 
         thread = threading.Thread(
             target=self._download_worker,
-            args=(models_dir,),
+            args=(models_dir, requested),
             daemon=True,
             name="msa-model-download",
         )
         thread.start()
+
+    def _download_caption_model(self, models_dir: Path, force_download: bool = False) -> None:
+        self._set("captioning", "downloading")
+        try:
+            from huggingface_hub import snapshot_download
+
+            snapshot_download(
+                CAPTION_MODEL_ID,
+                revision=CAPTION_MODEL_REVISION,
+                cache_dir=str(caption_model_cache_dir(models_dir)),
+                allow_patterns=list(CAPTION_MODEL_REQUIRED_FILES),
+                force_download=force_download,
+            )
+            self._set("captioning", "verifying")
+            if not self.has_valid_captioning(models_dir):
+                raise ValueError("BLIP checkpoint failed SHA-256 verification")
+            self._set("captioning", "done")
+            logger.info(
+                "setup_models: BLIP caption model downloaded and verified (revision {})",
+                CAPTION_MODEL_REVISION[:12],
+            )
+        except Exception as exc:
+            logger.error("setup_models: BLIP caption model setup failed ({})", type(exc).__name__)
+            self._set(
+                "captioning", "error",
+                f"BLIP download or verification failed ({type(exc).__name__})",
+            )
 
     def _set(self, model: str, status: ModelState, error: str | None = None) -> None:
         with self._lock:
@@ -246,7 +322,10 @@ class SetupManager:
 
     # ── Download worker (runs in background thread) ───────────────────────────
 
-    def _download_worker(self, models_dir: Path) -> None:
+    def _download_worker(
+        self, models_dir: Path, model_ids: frozenset[str] | None = None,
+    ) -> None:
+        model_ids = model_ids or DEFAULT_SETUP_MODEL_IDS
         try:
             models_dir.mkdir(parents=True, exist_ok=True)
             present = self.check_all_present(models_dir)
@@ -258,17 +337,22 @@ class SetupManager:
             # Bootstrap failure (e.g. unwritable models_dir) — mark every still-pending
             # model as error and set complete so the WS loop terminates and the UI can
             # show the error rather than polling forever.
-            logger.error("setup_models: worker bootstrap failed — {}", exc)
+            logger.error("setup_models: worker bootstrap failed ({})", type(exc).__name__)
             with self._lock:
-                for v in self._models.values():
-                    if v.status == "pending":
-                        v.status = "error"
-                        v.error = f"Setup failed to start: {exc}"
+                for model_id in model_ids:
+                    state = self._models[model_id]
+                    if state.status == "pending":
+                        state.status = "error"
+                        state.error = f"Setup failed to start ({type(exc).__name__})"
                 self._complete = True
+                self._running = False
+                self._active_models = frozenset()
             return
 
         # ── CLIP ViT-L-14/openai ──────────────────────────────────────────
-        if present["clip"]:
+        if "clip" not in model_ids:
+            pass
+        elif present["clip"]:
             self._set("clip", "done")
             logger.info("setup_models: CLIP already present, skipping download")
         else:
@@ -292,7 +376,9 @@ class SetupManager:
                 self._set("clip", "error", str(exc))
 
         # ── RT-DETR PekingU/rtdetr_r18vd ─────────────────────────────────
-        if present["rtdetr"]:
+        if "rtdetr" not in model_ids:
+            pass
+        elif present["rtdetr"]:
             self._set("rtdetr", "done")
             logger.info("setup_models: RT-DETR already present, skipping download")
         else:
@@ -326,7 +412,9 @@ class SetupManager:
                 self._set("rtdetr", "error", str(exc))
 
         # ── facenet-pytorch VGGFace2 ──────────────────────────────────────
-        if present["facenet_pytorch"]:
+        if "facenet_pytorch" not in model_ids:
+            pass
+        elif present["facenet_pytorch"]:
             self._set("facenet_pytorch", "done")
             logger.info("setup_models: facenet-pytorch VGGFace2 already present, skipping download")
         else:
@@ -371,9 +459,18 @@ class SetupManager:
                 logger.error("setup_models: facenet-pytorch download failed — {}", exc)
                 self._set("facenet_pytorch", "error", str(exc))
 
+        if "captioning" in model_ids:
+            if present["captioning"] and self.has_valid_captioning(models_dir):
+                self._set("captioning", "done")
+                logger.info("setup_models: BLIP caption model already verified, skipping download")
+            else:
+                self._download_caption_model(models_dir, force_download=present["captioning"])
+
         with self._lock:
             self._complete = True
-        logger.info("setup_models: all model downloads complete")
+            self._running = False
+            self._active_models = frozenset()
+        logger.info("setup_models: requested model downloads complete")
 
 
 # ── Module-level singleton ────────────────────────────────────────────────────

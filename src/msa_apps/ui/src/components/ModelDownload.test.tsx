@@ -139,6 +139,20 @@ describe('ModelDownload', () => {
     expect(onReady).not.toHaveBeenCalled() // app stays gated behind the failure UI
   })
 
+  it('does not gate startup on an optional caption-model download error', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('status unreachable') }))
+    stubWs({ captioning: { status: 'error', error: 'optional model failed' } }, true)
+    const onReady = vi.fn()
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    render(
+      <QueryClientProvider client={qc}>
+        <ModelDownload onReady={onReady} startedAtMs={Date.now()} initialModels={[]} />
+      </QueryClientProvider>,
+    )
+    await waitFor(() => expect(onReady).toHaveBeenCalled())
+    expect(screen.queryByRole('button', { name: /retry failed downloads/i })).not.toBeInTheDocument()
+  })
+
   it('surfaces a Try-again path when setup status keeps failing and the WS never completes (no infinite spinner)', async () => {
     // Codex P2 (69): fallback path where /api/setup/status persistently errors (empty metadata) AND
     // /ws/setup never sends `complete`. Once the query's retries exhaust, the splash must offer a

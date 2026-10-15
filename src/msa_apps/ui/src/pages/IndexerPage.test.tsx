@@ -250,8 +250,8 @@ describe('IndexerPage', () => {
           elapsed_seconds: 42, return_code: null,
           summary: {
             phase: 'scene_captioning', video_scene_captioning: {
-              model_id: 'mlx-community/SmolVLM2-500M-Video-Instruct-mlx',
-              prompt_version: 'stage4b-video-scene-v1', status: 'running',
+              model_id: 'Salesforce/blip-image-captioning-base',
+              prompt_version: 'stage4b-video-scene-v2', status: 'running',
               total: 3, generated: 1, skipped: 1, failed: 0,
               elapsed_seconds: 12, current: 2,
             },
@@ -273,8 +273,8 @@ describe('IndexerPage', () => {
           elapsed_seconds: 42, return_code: null,
           summary: {
             phase: 'captioning', captioning: {
-              model_id: 'mlx-community/SmolVLM2-500M-Video-Instruct-mlx',
-              prompt_version: 'stage4a2-caption-v1', status: 'running',
+              model_id: 'Salesforce/blip-image-captioning-base',
+              prompt_version: 'stage4a3-caption-v1', status: 'running',
               total: 2, generated: 1, skipped: 0, failed: 1,
               elapsed_seconds: 12, current: 2, error: 'Invalid image',
             },

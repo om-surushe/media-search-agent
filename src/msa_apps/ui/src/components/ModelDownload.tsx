@@ -100,7 +100,9 @@ export function ModelDownload({ onReady, startedAtMs, initialModels }: Props) {
   // fallback path where StartupGate's /api/setup/status check failed → `initialModels` is empty →
   // `rows` is empty and can't reflect a failure; without it, a `complete` carrying model errors
   // would slip past the retry/continue UI and auto-reveal the app (Codex P2).
-  const wsHasErrors = wsModels ? Object.values(wsModels).some((m) => m.status === 'error') : false
+  const wsHasErrors = wsModels
+    ? Object.entries(wsModels).some(([id, model]) => id !== 'captioning' && model.status === 'error')
+    : false
   const hasErrors = rows.some((r) => r.status === 'error') || wsHasErrors
   // Reveal when EITHER /ws/setup reports `complete` OR the authoritative /api/setup/status says the
   // model files are already on disk (`ready: true`). The HTTP signal matters in the fallback path

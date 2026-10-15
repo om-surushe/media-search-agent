@@ -18,7 +18,7 @@ def test_caption_stage_processes_both_media_types_and_returns_bounded_results(tm
     python.touch()
     captured = {}
 
-    monkeypatch.setattr(captioning, "validate_captioning_runtime", lambda: (python, cache, tmp_path / "worker.py"))
+    monkeypatch.setattr(captioning, "validate_captioning_runtime", lambda **_kwargs: (python, cache, tmp_path / "worker.py"))
 
     class FakeDB:
         def __init__(self):
@@ -87,7 +87,7 @@ def test_caption_capability_redacts_configured_local_paths(tmp_path, monkeypatch
 
     secret_path = str(tmp_path / "private-model-cache")
     monkeypatch.setenv("MSA_CAPTION_CACHE_DIR", secret_path)
-    def fail_runtime():
+    def fail_runtime(**_kwargs):
         raise RuntimeError(f"Cache unavailable: {secret_path}")
 
     monkeypatch.setattr(captioning, "validate_captioning_runtime", fail_runtime)

@@ -276,7 +276,7 @@ def handle(args: argparse.Namespace) -> None:
             if cfg.image_captions_enabled or cfg.video_scene_captions_enabled:
                 from msa_indexer.captioning import validate_captioning_runtime
                 try:
-                    validate_captioning_runtime()
+                    validate_captioning_runtime(models_dir=cfg.models_dir)
                 except Exception as exc:
                     feature = "AI Video Scene Captions" if cfg.video_scene_captions_enabled else "AI Image Captions"
                     logger.error("{} cannot start: {}", feature, exc)

@@ -21,7 +21,7 @@ The branch advances as work is committed. For an exact snapshot, use the commit 
 
 | Environment | Support and limits |
 |---|---|
-| Apple Silicon macOS | Supported; `scripts/dev-setup.sh` provisions the development environment. The isolated MLX caption worker requires Apple Silicon and macOS 14+. |
+| Apple Silicon macOS | Supported; `scripts/dev-setup.sh` provisions the development environment. Captioning uses the same CPU-capable PyTorch/Transformers backend as other platforms. |
 | Linux x86_64 / Ubuntu / WSL2 | Supported; bootstrap expects `apt` and `sudo`. CPU tests and web development work on a Linux cloud VM. |
 | Windows native | Not the source-development path; use WSL2 Ubuntu. Windows-native installer checks have separate workflows. |
 | Codex Cloud / other restricted Linux | Use a Linux x86_64 image with Python 3.12, Node 20, network access to package/model hosts, and the system tools needed by tests. If the image has no `sudo`, preinstall tools or follow the CI recipe below. It cannot validate Apple Metal/MLX or macOS desktop packaging. |
@@ -48,7 +48,7 @@ Dependency manifests are the source of truth—do not install every file indiscr
 | General local development | `requirements.txt` | Runtime plus notebook/developer extras; broader and less pinned than the platform lock. |
 | CI/test environment | `tests/requirements-ci.txt` | Minimal CI imports/test dependencies; CI installs FaceNet separately with `--no-deps`. |
 | Apple Silicon API/dev | `requirements-api-macos-arm64.lock`, `requirements-dev-macos-arm64.lock` | Generated CPython 3.12 / macOS arm64 transitive pins. Regenerate only with `scripts/lock-macos-arm64.sh`. |
-| MLX caption worker | `requirements-caption-macos-arm64.in`, `requirements-caption-macos-arm64.lock` | Separate Apple Silicon/macOS 14+ environment. |
+| Caption worker | `requirements-api.txt` (`torch`, `transformers`) | Uses the configured app Python; no separate caption environment. |
 | React web UI | `src/msa_apps/ui/package.json`, `src/msa_apps/ui/package-lock.json` | `npm ci --prefix src/msa_apps/ui`. |
 | Optional Tauri shell | root `package.json`/`package-lock.json`, `src-tauri/Cargo.toml`/`Cargo.lock` | Desktop shell; not required for API, web UI, or standard tests. |
 
@@ -112,7 +112,7 @@ Model files are downloaded to ignored local caches, normally under the developme
 | RT-DETR `PekingU/rtdetr_r18vd` | Default object detector (~81 MB). [Model card](https://huggingface.co/PekingU/rtdetr_r18vd). Revision `ac77a11ff0170a41b771c03264987f8ce2b0d753` is pinned in `src/msa_apps/search_api/setup_models.py`; cache: `models/rtdetr/`. | Same API-startup setup manager; it fetches processor config and weights through Transformers/Hugging Face Hub. | Model card and `NOTICE` identify Apache-2.0. Alternatives in `config.yaml` comments are not preselected. |
 | facenet-pytorch / VGGFace2 | Default face detector/recognizer (~108 MB). [Project](https://github.com/timesler/facenet-pytorch); cache: `models/facenet_pytorch/`. | Same API-startup setup manager; `TORCH_HOME` is redirected to the app-owned model directory. | `NOTICE` records the library/weights terms and VGGFace2 provenance. Review it and upstream terms before commercial redistribution. Optional InsightFace weights are marked non-commercial in `NOTICE`; do not select or download them for commercial use. |
 | Whisper `base` | Optional local speech transcription; disabled by default. [OpenAI Whisper](https://github.com/openai/whisper); exact checkpoint URL/hash is in `NOTICE` and `src/msa_indexer/models/asr.py`; cache: `models/whisper/` (~145 MB). | See the explicit prefetch command below, or allow a copied test video with audio to trigger the app's lazy download. | Download is lazy; inference is local/offline afterward. Source and checkpoint terms are recorded in `NOTICE`. Do not enable it for a real media root just to test setup. |
-| SmolVLM2 MLX `mlx-community/SmolVLM2-500M-Video-Instruct-mlx` | Optional offline caption worker; separate from the API environment. [Model card](https://huggingface.co/mlx-community/SmolVLM2-500M-Video-Instruct-mlx). Cache: `models/caption-hub/`. | See the Apple Silicon-only environment and prefetch commands below. | The setup script installs packages only; it does **not** fetch weights. The model card labels the checkpoint Apache-2.0. The repo currently identifies the model by ID rather than pinning a Hub revision; record the resolved revision for release-grade reproducibility. Not available on generic Linux/Codex Cloud. |
+| BLIP base `Salesforce/blip-image-captioning-base` | Optional CPU image/video-keyframe captioning via Transformers. [Model card](https://huggingface.co/Salesforce/blip-image-captioning-base). Cache: `<models_dir>/captioning/`; pinned revision `82a37760796d32b1411fe092ab5d4e227313294b`, weight SHA-256 `d6638651a5526cc2ede56f2b5104d6851b0755816d220e5e046870430180c767` (~990 MB). | Explicit Stage 09 prepare-and-run button downloads the pinned snapshot and verifies its weight checksum. | Model card labels the checkpoint BSD-3-Clause. Runs on CPU with the existing PyTorch/Transformers runtime; no MLX or GPU required. |
 
 Core models are roughly 1 GB combined by the sizes above; full application packages and caches need more disk. The installation guide estimates about 5 GB free for an end-user installation. Allow extra space for Python/Node environments, wheel caches, and optional caption weights. Do not commit or sync the `models/` folder; provision each device locally from the sources above.
 
@@ -127,23 +127,7 @@ whisper.load_model("base", device="cpu", download_root="models/whisper")
 PY
 ```
 
-The caption worker needs a separate environment and checkpoint fetch. On Apple Silicon/macOS 14+:
-
-```bash
-./scripts/setup-caption-env.sh
-.venv-caption/bin/python - <<'PY'
-from pathlib import Path
-from huggingface_hub import snapshot_download
-snapshot_download(
-    repo_id="mlx-community/SmolVLM2-500M-Video-Instruct-mlx",
-    cache_dir=str(Path("models/caption-hub").resolve()),
-)
-PY
-export MSA_CAPTION_PYTHON="$PWD/.venv-caption/bin/python"
-export MSA_CAPTION_CACHE_DIR="$PWD/models/caption-hub"
-```
-
-`setup-caption-env.sh` installs packages only. The explicit `snapshot_download` is required because caption inference is offline and refuses to fetch missing weights.
+Download and verify the optional caption checkpoint from the Stage 09 Workbench. The setup action pins the Hub revision, fetches only required files, and verifies the weight SHA-256 before marking the model ready. No caption model is downloaded during normal startup.
 
 ### Research references (not installed or integrated)
 
@@ -152,7 +136,7 @@ These were discussed as possible future directions, not current LMI requirements
 - **DigUp** — reference application for local semantic search: [repository](https://github.com/ARahim3/DigUp). To inspect separately: `git clone https://github.com/ARahim3/DigUp.git /tmp/DigUp-reference`. Do not clone it into this project or copy its user data.
 - **EmbeddingGemma 2** — optional multimodal embedding candidate: [official model card](https://huggingface.co/google/embeddinggemma-2). The card currently labels it Apache-2.0. The checkpoint has about 744M parameters; the repository cache may be several GB. Only fetch it for an intentional isolated evaluation, not into the production model cache.
 - **AirLLM** — inference framework, not an embedding model or indexer: [upstream repository](https://github.com/lyogavin/airllm). It is not a project dependency. To inspect without changing this environment, clone it separately: `git clone https://github.com/lyogavin/airllm.git /tmp/airllm-reference`. Any evaluation should use a separate environment and a separately licensed model checkpoint; its layer-streaming approach trades memory for disk I/O and latency.
-- **MLX / MLX-VLM** are used only by the optional caption worker and are pinned in `requirements-caption-macos-arm64.in`; **llama.cpp** ([upstream](https://github.com/ggml-org/llama.cpp)) is not configured in this repo. The existing MCP SDK/server setup is documented in [`docs/MCP.md`](MCP.md) and is not an extra asset required for this branch's tests.
+- **MLX / MLX-VLM** are not used by the caption worker; the optional BLIP model runs through the existing CPU PyTorch/Transformers stack. **llama.cpp** ([upstream](https://github.com/ggml-org/llama.cpp)) is not configured in this repo. The existing MCP SDK/server setup is documented in [`docs/MCP.md`](MCP.md) and is not an extra asset required for this branch's tests.
 
 For an intentional EmbeddingGemma 2 evaluation, use the installed Hugging Face client to keep files in a separate ignored research cache:
 

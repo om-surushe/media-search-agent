@@ -45,3 +45,8 @@ export async function retrySetup(): Promise<void> {
   const res = await fetch(apiUrl('/api/setup/retry'), { method: 'POST' })
   if (!res.ok) throw new Error(`setup/retry ${res.status}`)
 }
+
+export async function retryCaptioningSetup(): Promise<void> {
+  const res = await fetch(apiUrl('/api/setup/captioning/retry'), { method: 'POST' })
+  if (!res.ok) throw new Error(`setup/captioning/retry ${res.status}`)
+}

@@ -143,6 +143,45 @@ describe('AdapterWorkbenchPage', () => {
     expect(calls.find(url => url.includes('/adapters/qdrant-export/run'))).not.toContain('relative_path=')
   })
 
+  it('downloads and verifies the CPU caption model before running whole-source Stage 09', async () => {
+    let catalogRequests = 0
+    let statusRequests = 0
+    vi.mocked(fetch).mockImplementation((url: string) => Promise.resolve({
+      ok: true,
+      json: async () => url.endsWith('/adapters')
+        ? (++catalogRequests === 1
+          ? [{ id: 'captions', number: 9, name: 'Optional captions', runnable: false, can_prepare: true, reason: 'Pinned BLIP checkpoint is missing.' }]
+          : [{ id: 'captions', number: 9, name: 'Optional captions', runnable: true }])
+        : url.includes('/api/setup/status')
+          ? { ready: ++statusRequests > 1, models: [] }
+          : url.includes('/api/setup/captioning/retry')
+            ? { status: 'preparing' }
+            : { scope: 'whole_configured_source', persisted: false },
+    } as Response))
+    vi.mocked(useSetupWS).mockImplementation((connection = 0) => ({
+      models: connection > 0 ? {
+        clip: { status: 'done', error: null },
+        rtdetr: { status: 'done', error: null },
+        facenet_pytorch: { status: 'done', error: null },
+        captioning: { status: 'done', error: null },
+      } : null,
+      complete: connection > 0,
+      revision: connection > 0 ? 1 : 0,
+    }))
+
+    render(<AdapterWorkbenchPage />)
+    fireEvent.click(await screen.findByRole('button', {
+      name: 'Download & verify CPU caption model (~990 MB), then run Stage 09',
+    }))
+    await waitFor(() => expect(vi.mocked(fetch)).toHaveBeenCalledWith(
+      expect.stringContaining('/api/setup/captioning/retry'), { method: 'POST' },
+    ))
+    await waitFor(() => expect(vi.mocked(fetch)).toHaveBeenCalledWith(
+      expect.stringContaining('/adapters/captions/run?source_name=sample'), { method: 'POST' },
+    ))
+    expect(String(vi.mocked(fetch).mock.calls.at(-1)?.[0])).not.toContain('relative_path=')
+  })
+
   it('shows the model loader when Stage 05 is unavailable', async () => {
     vi.mocked(fetch).mockImplementation((url: string) => Promise.resolve({
       ok: true,

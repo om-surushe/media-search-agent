@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline SmolVLM2 image-captioning proof of concept and indexer worker."""
+"""Offline BLIP image-captioning worker for CPU-capable Transformers runtimes."""
 from __future__ import annotations
 
 import argparse
@@ -9,7 +9,10 @@ import importlib.metadata
 import json
 import os
 import re
-import resource
+try:
+    import resource
+except ImportError:  # Windows does not expose the POSIX resource module.
+    resource = None
 import shutil
 import sqlite3
 import subprocess
@@ -26,23 +29,12 @@ _SOURCE_DIR = Path(__file__).resolve().parents[1] / "src"
 if str(_SOURCE_DIR) not in sys.path:
     sys.path.insert(0, str(_SOURCE_DIR))
 from msa_indexer.captioning import (
-    MODEL_ID, PROMPT_VERSION, VIDEO_SCENE_PROMPT_VERSION,
+    MODEL_ID, MODEL_REVISION, PROMPT_VERSION, VIDEO_SCENE_PROMPT_VERSION,
 )
 
 SQLITE_HEADER = b"SQLite format 3\x00"
-PROMPT = (
-    "Write a detailed factual caption in 2–3 sentences and at least 30 words. "
-    "Describe the main subject's visible appearance and posture, visible action, "
-    "framing, foreground objects, and background. Use only visual evidence; do "
-    "not guess identity, emotion, exact location, relationships, or causes."
-)
-VIDEO_SCENE_PROMPT = (
-    "Describe only what is visibly present in this single video frame. Include "
-    "the visible subjects and objects, observable action, setting and background, "
-    "and spatial relationships or interactions. Do not infer identities, exact "
-    "locations, dialogue, intentions, causes, motion, events outside this frame, "
-    "or what happens between frames."
-)
+PROMPT = "a photograph of"
+VIDEO_SCENE_PROMPT = "a video frame showing"
 
 
 class CaptionProvider(Protocol):
@@ -53,57 +45,35 @@ class CaptionProvider(Protocol):
 
     def close(self) -> None: ...
 
-    def active_metal_memory_bytes(self) -> int: ...
 
-
-class SmolVLM2Provider:
-    """One local MLX-VLM checkpoint; model resolution never contacts the Hub."""
+class BlipCaptionProvider:
+    """CPU Transformers adapter for the pinned, local BLIP caption checkpoint."""
 
     def __init__(self, model_path: Path) -> None:
-        config_path = model_path / "config.json"
-        config = json.loads(config_path.read_text(encoding="utf-8"))
-        if config.get("model_type") != "smolvlm":
-            raise ValueError(f"Unexpected checkpoint architecture: {config.get('model_type')!r}")
-        if "SmolVLMForConditionalGeneration" not in config.get("architectures", []):
-            raise ValueError("Checkpoint does not declare the expected SmolVLM architecture")
-        if not (model_path / "model.safetensors").is_file():
-            raise FileNotFoundError(f"Missing local model weights under {model_path}")
+        import torch
+        from transformers import BlipForConditionalGeneration, BlipProcessor
 
-        import mlx.core as mx
-        from mlx_vlm import generate, load
-        from mlx_vlm.prompt_utils import apply_chat_template
-
-        self._mx = mx
-        self._generate = generate
-        self._apply_chat_template = apply_chat_template
-        self._model = None
-        self._processor = None
-        mx.reset_peak_memory()
+        self._torch = torch
+        self._processor = BlipProcessor.from_pretrained(
+            model_path, local_files_only=True, trust_remote_code=False,
+        )
         started = time.perf_counter()
-        self._model, self._processor = load(str(model_path))
+        self._model = BlipForConditionalGeneration.from_pretrained(
+            model_path, local_files_only=True, trust_remote_code=False,
+            use_safetensors=False,
+        ).to("cpu").eval()
         self.model_load_seconds = time.perf_counter() - started
-        self.metal_peak_load_bytes = mx.get_peak_memory()
-        self.metal_active_after_load_bytes = mx.get_active_memory()
 
     def caption(self, image_path: Path, max_tokens: int, prompt: str = PROMPT) -> str:
-        self._mx.reset_peak_memory()
+        from PIL import Image
+
+        with Image.open(image_path) as image:
+            inputs = self._processor(image.convert("RGB"), text=prompt, return_tensors="pt")
         started = time.perf_counter()
-        images = [str(image_path)]
-        prompt = self._apply_chat_template(
-            self._processor, self._model.config, prompt, num_images=len(images)
-        )
-        result = self._generate(
-            self._model,
-            self._processor,
-            prompt,
-            image=images,
-            max_tokens=max_tokens,
-            verbose=False,
-        )
+        with self._torch.inference_mode():
+            output = self._model.generate(**inputs, max_new_tokens=max_tokens, num_beams=3)
         self.generation_seconds = time.perf_counter() - started
-        self.metal_peak_generation_bytes = self._mx.get_peak_memory()
-        self.metal_active_after_generation_bytes = self._mx.get_active_memory()
-        caption = result.text.strip()
+        caption = self._processor.decode(output[0], skip_special_tokens=True).strip()
         if not caption:
             raise RuntimeError("The local model returned an empty caption")
         return caption
@@ -112,10 +82,6 @@ class SmolVLM2Provider:
         self._model = None
         self._processor = None
         gc.collect()
-        self._mx.clear_cache()
-
-    def active_metal_memory_bytes(self) -> int:
-        return self._mx.get_active_memory()
 
 
 def _open_caption_store(database_path: Path, media_id: str, image_path: Path):
@@ -206,9 +172,10 @@ def _caption_all_missing(args) -> int:
                 from huggingface_hub import snapshot_download
 
                 model_path = Path(snapshot_download(
-                    MODEL_ID, cache_dir=str(args.cache_dir), local_files_only=True
+                    MODEL_ID, revision=MODEL_REVISION,
+                    cache_dir=str(args.cache_dir), local_files_only=True,
                 ))
-                provider = SmolVLM2Provider(model_path)
+                provider = BlipCaptionProvider(model_path)
             except Exception as exc:
                 failed = len(candidates)
                 current_error = (
@@ -333,9 +300,10 @@ def _caption_video_scenes(args) -> int:
                     if frame_cache_dir is not None else None
                 )
                 model_path = Path(snapshot_download(
-                    MODEL_ID, cache_dir=str(args.cache_dir), local_files_only=True
+                    MODEL_ID, revision=MODEL_REVISION,
+                    cache_dir=str(args.cache_dir), local_files_only=True,
                 ))
-                provider = SmolVLM2Provider(model_path)
+                provider = BlipCaptionProvider(model_path)
             except Exception as exc:
                 failed = len(candidates)
                 detail = str(exc).replace(str(args.cache_dir), "<caption cache>")
@@ -468,7 +436,9 @@ def _rss_bytes() -> int | None:
         return None
 
 
-def _peak_rss_bytes() -> int:
+def _peak_rss_bytes() -> int | None:
+    if resource is None:
+        return None
     value = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     return int(value if sys.platform == "darwin" else value * 1024)
 
@@ -552,7 +522,8 @@ def main() -> int:
         os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
         from huggingface_hub import snapshot_download
         model_path = Path(snapshot_download(
-            MODEL_ID, cache_dir=str(cache_dir), local_files_only=True
+            MODEL_ID, revision=MODEL_REVISION,
+            cache_dir=str(cache_dir), local_files_only=True,
         ))
 
         from PIL import Image
@@ -569,7 +540,7 @@ def main() -> int:
 
     provider: CaptionProvider | None = None
     try:
-        provider = SmolVLM2Provider(model_path)
+        provider = BlipCaptionProvider(model_path)
         process_after_load = _rss_bytes()
         system_free_after_load = _system_free_bytes()
         caption = provider.caption(image_path, args.max_tokens)
@@ -578,7 +549,7 @@ def main() -> int:
         system_free_after_generation = _system_free_bytes()
 
         print(f"Model: {MODEL_ID}")
-        print(f"mlx-vlm: {importlib.metadata.version('mlx-vlm')}")
+        print(f"transformers: {importlib.metadata.version('transformers')}")
         print(f"Model load: {provider.model_load_seconds:.2f} s")
         print(f"Generation: {provider.generation_seconds:.2f} s")
         print(f"Caption: {caption}")
@@ -589,12 +560,6 @@ def main() -> int:
         print("System free pages (before / loaded / generated): "
               f"{_mib(system_free_before)} / {_mib(system_free_after_load)} / "
               f"{_mib(system_free_after_generation)}")
-        print("Metal active (loaded / generated): "
-              f"{_mib(provider.metal_active_after_load_bytes)} / "
-              f"{_mib(provider.metal_active_after_generation_bytes)}")
-        print("Metal peak (load / generation): "
-              f"{_mib(provider.metal_peak_load_bytes)} / "
-              f"{_mib(provider.metal_peak_generation_bytes)}")
         if caption_store is not None:
             schema_path = Path(__file__).resolve().parents[1] / "src/msa_indexer/db/schema.sql"
             caption_store.init_schema_no_migrations(schema_path)
@@ -615,7 +580,6 @@ def main() -> int:
     finally:
         if provider is not None:
             provider.close()
-            print(f"Metal active after release: {_mib(provider.active_metal_memory_bytes())}")
         if caption_store is not None:
             caption_store.close()
 

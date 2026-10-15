@@ -25,35 +25,40 @@ def _safe_error_message(exc: Exception) -> str:
     return message
 
 
-def captioning_capabilities() -> dict[str, dict[str, bool | str | None]]:
-    """Report MLX interpreter/checkpoint availability without loading weights."""
+def captioning_capabilities(
+    config=None, *, include_prepare: bool = False,
+) -> dict[str, dict[str, bool | str | None]]:
+    """Report CPU Transformers support and the pinned BLIP checkpoint state."""
+    models_dir = Path(getattr(config, "models_dir", "models")) if config is not None else None
     try:
         import subprocess
-        from msa_indexer.captioning import validate_captioning_runtime
+        from msa_indexer.captioning import CaptioningError, validate_captioning_runtime
 
-        python, cache, _worker = validate_captioning_runtime()
-        from msa_indexer.captioning import MODEL_ID
-
-        snapshots = cache / f"models--{MODEL_ID.replace('/', '--')}" / "snapshots"
-        if not any(
-            (snapshot / "config.json").is_file()
-            and (snapshot / "model.safetensors").is_file()
-            for snapshot in snapshots.iterdir() if snapshot.is_dir()
-        ):
-            raise RuntimeError("Caption checkpoint is incomplete; cached config and model weights are required.")
+        python, _cache, _worker = validate_captioning_runtime(
+            models_dir=models_dir, require_model=False,
+        )
         env = os.environ.copy()
         env.update({"HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1"})
         check = subprocess.run(
-            [str(python), "-c", "import mlx.core; import mlx_vlm"],
+            [str(python), "-c", "import torch; from transformers import BlipForConditionalGeneration, BlipProcessor"],
             env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL, timeout=10, check=False,
         )
         if check.returncode:
-            raise RuntimeError("MLX and mlx-vlm are unavailable in the configured caption interpreter.")
+            raise RuntimeError("PyTorch and Transformers BLIP support are unavailable in the caption interpreter.")
+        try:
+            validate_captioning_runtime(models_dir=models_dir)
+        except CaptioningError as exc:
+            capability = {"available": False, "reason": _safe_error_message(exc)}
+            can_prepare = True
+        else:
+            capability = {"available": True, "reason": None}
+            can_prepare = False
     except Exception as exc:
         capability = {"available": False, "reason": _safe_error_message(exc)}
-    else:
-        capability = {"available": True, "reason": None}
+        can_prepare = False
+    if include_prepare:
+        capability["can_prepare"] = can_prepare
     return {
         "image_captions": dict(capability),
         "video_scene_captions": dict(capability),
@@ -66,7 +71,7 @@ def captioning_stage_capability(config) -> dict[str, bool | str | None]:
     index = index_capability(config)
     if not index["available"]:
         return index
-    return captioning_capabilities()["image_captions"]
+    return captioning_capabilities(config, include_prepare=True)["image_captions"]
 
 
 def preview_captioning(config, source, relative_path: str) -> dict:
@@ -77,7 +82,9 @@ def preview_captioning(config, source, relative_path: str) -> dict:
     from ._workbench_sandbox import run_one_file
 
     def caption(db, isolated, workspace, media_id):
-        _python, source_cache, _worker = validate_captioning_runtime()
+        _python, source_cache, _worker = validate_captioning_runtime(
+            models_dir=Path(getattr(config, "models_dir", "models")),
+        )
         from msa_indexer.captioning import MODEL_ID
 
         cache_root = workspace / "caption-model-cache"
@@ -115,7 +122,9 @@ def preview_captioning_folder(config, source, result_limit: int = 25) -> dict:
     capability = captioning_stage_capability(config)
     if not capability["available"]:
         raise RuntimeError(str(capability["reason"]))
-    python, source_cache, _worker = validate_captioning_runtime()
+    python, source_cache, _worker = validate_captioning_runtime(
+        models_dir=Path(getattr(config, "models_dir", "models")),
+    )
     model_cache_name = f"models--{MODEL_ID.replace('/', '--')}"
 
     def caption_source(db, isolated, workspace):

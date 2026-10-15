@@ -82,7 +82,7 @@ def test_start_enables_image_captions_only_when_requested(tmp_path, monkeypatch)
         )
 
     assert "--enable-image-captions" in mock_popen.call_args.args[0]
-    validate_runtime.assert_called_once_with()
+    validate_runtime.assert_called_once_with(models_dir=None)
 
 
 def test_start_enables_video_scene_captions_only_when_requested(tmp_path, monkeypatch):
@@ -110,7 +110,7 @@ def test_start_enables_video_scene_captions_only_when_requested(tmp_path, monkey
         manager.start(str(config_path), str(venv_bin), video_scene_captions_enabled=True)
 
     assert "--enable-video-scene-captions" in mock_popen.call_args.args[0]
-    validate_runtime.assert_called_once_with()
+    validate_runtime.assert_called_once_with(models_dir=None)
 
 
 def test_start_uses_python_module_when_msa_entrypoint_is_missing(tmp_path, monkeypatch):

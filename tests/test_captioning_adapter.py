@@ -6,15 +6,15 @@ def test_captioning_capabilities_report_preflight_errors(monkeypatch):
     from msa_indexer import captioning
     from msa_indexer.adapters.adapter_09_optional_captioning import captioning_capabilities
 
-    def unavailable():
-        raise captioning.CaptioningError("MLX runtime unavailable")
+    def unavailable(**_kwargs):
+        raise captioning.CaptioningError("CPU Transformers runtime unavailable")
 
     monkeypatch.setattr(captioning, "validate_captioning_runtime", unavailable)
 
     capabilities = captioning_capabilities()
 
     assert capabilities["image_captions"] == {
-        "available": False, "reason": "MLX runtime unavailable",
+        "available": False, "reason": "CPU Transformers runtime unavailable",
     }
     assert capabilities["video_scene_captions"] == capabilities["image_captions"]
 

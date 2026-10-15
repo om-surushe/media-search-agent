@@ -3366,8 +3366,12 @@ def get_setup_status(request: Request):
             "source":         meta.get("source", ""),
         }
         for mid, meta in _setup_models.MODEL_META.items()
+        if mid in _setup_models.DEFAULT_SETUP_MODEL_IDS
     ]
-    return {"ready": all(present.values()), "models": models_out, "read_only_mode": False}
+    return {
+        "ready": all(present[model_id] for model_id in _setup_models.DEFAULT_SETUP_MODEL_IDS),
+        "models": models_out, "read_only_mode": False,
+    }
 
 
 @app.post("/api/setup/retry", status_code=202)
@@ -3383,6 +3387,19 @@ def retry_setup(request: Request):
     S = _get_config(request)
     _setup_models.get_manager().start_if_needed(S.models_dir)
     return {"status": "retrying"}
+
+
+@app.post("/api/setup/captioning/retry", status_code=202)
+def retry_captioning_setup(request: Request):
+    """Download and verify the optional CPU caption model on explicit request."""
+    if _search_browse_read_only():
+        raise HTTPException(status_code=409, detail="Model downloads are disabled in Search/Browse read-only mode.")
+    config = _get_config(request)
+    try:
+        _setup_models.get_manager().start_if_needed(config.models_dir, {"captioning"})
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"status": "preparing"}
 
 
 @app.websocket("/ws/setup")

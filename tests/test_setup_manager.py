@@ -173,7 +173,8 @@ class TestDownloadWorkerBootstrapFailure:
             mgr._download_worker(bad_dir)
 
         assert mgr.is_complete(), "_complete must be True so the WS loop exits"
-        for model_id, state in mgr._models.items():
+        for model_id in mgr._active_models or {"clip", "rtdetr", "facenet_pytorch"}:
+            state = mgr._models[model_id]
             assert state.status == "error", f"{model_id} should be error, got {state.status}"
             assert state.error is not None, f"{model_id} error message must be set"
 
@@ -216,7 +217,7 @@ class TestClipDownloadWorkerVerification:
             # Skip real hash computation — focus on the missing-file guard
             patch("msa_apps.search_api.setup_models._verify_file", return_value=True),
         ):
-            mgr._download_worker(models_dir)
+            mgr._download_worker(models_dir, frozenset({"clip"}))
 
         return mgr
 
@@ -304,3 +305,71 @@ class TestStartIfNeededThreadGuard:
         # Non-errored models must not be touched
         assert mgr._models["rtdetr"].status == "done"
         assert mgr._models["facenet_pytorch"].status == "done"
+
+
+def test_startup_model_setup_does_not_auto_download_optional_caption_model(tmp_path):
+    mgr = SetupManager()
+    with patch("threading.Thread") as mock_thread:
+        mock_thread.return_value = MagicMock()
+        mgr.start_if_needed(tmp_path)
+    requested = mock_thread.call_args.kwargs["args"][1]
+    assert requested == frozenset({"clip", "rtdetr", "facenet_pytorch"})
+    assert "captioning" not in requested
+
+
+def test_caption_model_setup_downloads_pinned_blip_and_verifies_weights(monkeypatch, tmp_path):
+    import huggingface_hub
+    import msa_apps.search_api.setup_models as setup_models
+    from msa_indexer.captioning import (
+        MODEL_ID, MODEL_REQUIRED_FILES, MODEL_REVISION, MODEL_SHA256,
+        MODEL_WEIGHT_BYTES, MODEL_WEIGHT_FILE,
+    )
+
+    models_dir = tmp_path / "models"
+    snapshot = (
+        models_dir / "captioning" / f"models--{MODEL_ID.replace('/', '--')}"
+        / "snapshots" / MODEL_REVISION
+    )
+    calls = {}
+
+    def download(model_id, *, revision, cache_dir, allow_patterns, force_download):
+        calls.update(model_id=model_id, revision=revision, allow_patterns=allow_patterns)
+        snapshot.mkdir(parents=True)
+        for name in MODEL_REQUIRED_FILES:
+            path = snapshot / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.touch()
+        with (snapshot / MODEL_WEIGHT_FILE).open("wb") as weights:
+            weights.truncate(MODEL_WEIGHT_BYTES)
+        return str(snapshot)
+
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", download)
+    monkeypatch.setattr(setup_models, "_verify_file", lambda _path, digest: digest == MODEL_SHA256)
+    manager = SetupManager()
+    manager._download_worker(models_dir, frozenset({"captioning"}))
+
+    assert calls["model_id"] == MODEL_ID
+    assert calls["revision"] == MODEL_REVISION
+    assert set(calls["allow_patterns"]) == set(MODEL_REQUIRED_FILES)
+    assert manager._models["captioning"].status == "done"
+    assert manager._models["clip"].status == "pending"
+
+
+def test_captioning_setup_endpoint_starts_only_caption_model(monkeypatch, tmp_path):
+    from fastapi.testclient import TestClient
+    from msa_apps.search_api import app as app_module
+    from msa_apps.search_api import setup_models
+    from types import SimpleNamespace
+
+    manager = SetupManager()
+    started = []
+    monkeypatch.setattr(setup_models, "get_manager", lambda: manager)
+    monkeypatch.setattr(manager, "start_if_needed", lambda path, ids: started.append((path, ids)))
+    monkeypatch.setattr(app_module, "_get_config", lambda _request: SimpleNamespace(models_dir=tmp_path))
+    monkeypatch.setattr(app_module, "_search_browse_read_only", lambda: False)
+
+    response = TestClient(app_module.app).post("/api/setup/captioning/retry")
+
+    assert response.status_code == 202
+    assert response.json() == {"status": "preparing"}
+    assert started == [(tmp_path, {"captioning"})]

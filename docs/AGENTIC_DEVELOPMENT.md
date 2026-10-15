@@ -394,9 +394,9 @@ let s = ""; process.stdin.on("data", d => s += d).on("end", () => {
 '
 ```
 
-`models_dir` is the app-configured model directory. SmolVLM2's offline Hugging
-Face cache is separately selected by `MSA_CAPTION_CACHE_DIR`; inspect only the
-active development API process for the caption runtime settings:
+`models_dir` is the app-configured model directory. The BLIP caption cache defaults to
+`<models_dir>/captioning`; `MSA_CAPTION_CACHE_DIR` and `MSA_CAPTION_PYTHON` are
+optional overrides. Inspect only the active development API process for these settings:
 
 ```bash
 API_PID="$(lsof -nP -t -iTCP:8502 -sTCP:LISTEN | head -n 1)"
@@ -417,8 +417,8 @@ Lexical caption/scene search remains available; semantic CLIP search is reported
 unavailable unless a cached CLIP model loads successfully. The API forces offline
 model resolution in this mode. Never use the installed app's model directory.
 Normal indexing still requires all configured weights in development-owned storage.
-The API/Indexer and caption worker use separate development-owned Python 3.12
-virtual environments; never use the installed app's interpreter or site-packages.
+The API, Indexer, and caption worker use the same development-owned Python 3.12
+environment; never use the installed app's interpreter or site-packages.
 
 Create the persistent API/Indexer environment once from uv-managed Python, using
 the declared API requirements and the macOS NumPy/Torch constraints from
@@ -458,8 +458,8 @@ it skips all automatic setup, serves lexical results, and marks semantic search
 unavailable unless CLIP is already cached and loads successfully.
 
 After the preflight succeeds, stop only the verified development API PID and
-start it from the repository root, keeping the caption runtime and offline cache
-settings from the existing process:
+start it from the repository root, keeping the configured model directory and
+any intentional caption runtime/cache overrides from the existing process:
 
 ```bash
 API_PID="$(lsof -nP -t -iTCP:8502 -sTCP:LISTEN | head -n 1)"
@@ -467,8 +467,9 @@ API_PID="$(lsof -nP -t -iTCP:8502 -sTCP:LISTEN | head -n 1)"
 # kill an Indexer or any process belonging to the installed app.
 kill -TERM "$API_PID"
 
-export MSA_CAPTION_PYTHON="$HOME/.local/share/local-media-intelligence/caption-worker-3.12/bin/python"
-export MSA_CAPTION_CACHE_DIR="$HOME/Library/Caches/LocalMediaIntelligence-Stage4A1/hf-home/hub"
+# Optional: set these only when overriding the app Python/model cache.
+# export MSA_CAPTION_PYTHON="/path/to/another/python"
+# export MSA_CAPTION_CACHE_DIR="/path/to/local/caption-cache"
 export MSA_SEARCH_BROWSE_READ_ONLY=1  # omit only for intentional indexing/model setup
 export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 HF_DATASETS_OFFLINE=1
 API_VENV="$HOME/.local/share/local-media-intelligence/api-indexer-3.12"
@@ -481,7 +482,7 @@ env -u __PYVENV_LAUNCHER__ -u PYTHONHOME \
 Clearing `__PYVENV_LAUNCHER__` before API startup is important on macOS: the
 Indexer subprocess inherits the API environment. Confirm `sys.executable`,
 `sys.base_prefix`, and `pyvenv.cfg` belong to this API venv before accepting the
-service. `MSA_CAPTION_PYTHON` remains the separate caption-worker interpreter.
+service. The caption worker defaults to this API interpreter; a separate Python is optional.
 
 Fast focused checks during captioning changes (run from the repository root):
 

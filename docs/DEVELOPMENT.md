@@ -19,19 +19,11 @@ exact model download commands, public test fixtures, and cloud setup limits, see
 
 ## Caption worker environment
 
-On macOS Apple Silicon 14+, provision the separate MLX environment once:
-
-```bash
-./scripts/setup-caption-env.sh
-```
-
-The API runner automatically uses `.venv-caption/bin/python` when present and
-defaults its model cache to the ignored `models/caption-hub/`. Model weights
-are separate from Python packages; this setup does not download SmolVLM2.
-
-Regenerate the checked-in Apple Silicon locks after changing requirement
-inputs with `./scripts/lock-macos-arm64.sh`. The caption lock is generated on
-the current Mac because MLX wheel availability depends on the host macOS ABI.
+Captioning uses the app's existing CPU PyTorch/Transformers runtime on supported
+platforms; no MLX-specific environment is required. The pinned BLIP base weights
+are downloaded and SHA-256 verified only when Stage 09's explicit prepare action
+is selected. The cache defaults to `<models_dir>/captioning`; set
+`MSA_CAPTION_CACHE_DIR` or `MSA_CAPTION_PYTHON` only to override those defaults.
 
 ## Run the app
 
@@ -83,8 +75,8 @@ processes are the API/backend and (during development) the Vite client. Qdrant
 is embedded in the API process. The indexer is invoked as a job by the API or
 CLI. EXIF, video metadata, timestamps, GPS, thumbnails, shot/keyframe extraction,
 object labels, faces, transcripts, and captions are processing stages inside
-that job; they are not independent servers. Captioning starts its isolated MLX
-worker only when requested. Run the API and indexer commands above to see their
+that job; they are not independent servers. Captioning starts its isolated CPU
+Transformers worker only when requested. Run the API and indexer commands above to see their
 logs rather than starting fictitious per-stage daemons.
 
 ## Model files
@@ -94,16 +86,16 @@ root `.gitignore` rule `/models/` and must not be committed. With `MSA_DEV=1`,
 the checked-in development config resolves `models_dir: models` to the ignored
 repository `models/` folder. Core model setup downloads CLIP, RT-DETR, and
 facenet-pytorch weights there when the backend starts. Whisper base is fetched
-there on first transcription. SmolVLM2 is separate: its offline worker needs
-`MSA_CAPTION_PYTHON` and `MSA_CAPTION_CACHE_DIR`; point the latter at
-`$PWD/models/caption-hub` when using the repository-local cache.
+there on first transcription. The optional BLIP caption checkpoint is stored
+under `<models_dir>/captioning`, pinned to a Hub revision, and verified against
+its SHA-256 before Stage 09 uses it. Its download is an explicit action and is
+not part of the app's automatic core-model setup.
 
 Each developer must provision weights locally; Git only carries the model IDs,
-versions/revisions, and setup code. For this checkout the ignored `models/`
-folder contains CLIP, RT-DETR, FaceNet, Whisper base, and the cached SmolVLM2
-snapshot. New checkouts should first run the backend online to provision core
-weights; run transcription once to fetch Whisper. Caption weights need to be
-provided to the local Hugging Face cache before using the offline caption task.
+versions/revisions, checksums, and setup code. The ignored `models/` folder may
+contain CLIP, RT-DETR, FaceNet, Whisper base, and the optional BLIP snapshot.
+New checkouts should run the backend to provision core weights; caption weights
+are fetched and verified from the Stage 09 Workbench setup action.
 
 ## Logs and stop
 
