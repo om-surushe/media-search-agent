@@ -276,6 +276,13 @@ Ok "bundled media tools on PATH: $toolsDir"
 
 & $MsaExe index run --config $configPath --media-source-override $fixtureRoot --export-to-qdrant
 if ($LASTEXITCODE -ne 0) { Fail "msa index run exited $LASTEXITCODE" }
+
+# Rebuild only this isolated app's Qdrant store from persistent SQLite. The
+# runtime suite after relaunch verifies that rebuilt vectors are searchable.
+$dataRoot = Join-Path $env:USERPROFILE "MediaSearchAgent"
+& $VenvPython (Join-Path $testRoot "scripts\storage_recovery.py") `
+    --msa $MsaExe --config $configPath --data-root $dataRoot
+if ($LASTEXITCODE -ne 0) { Fail "SQLite/Qdrant storage recovery validation failed" }
 Ok "indexed the fixture set"
 
 # -- Step 5: Launch #2 - relaunch to serve (warm); discover the ephemeral port -----------

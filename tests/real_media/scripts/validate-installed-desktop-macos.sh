@@ -167,6 +167,11 @@ PYTHONPATH="$PYTEST_DIR" "$VENV_PY" -m pytest "$TEST_ROOT/test_real_media_fixtur
 echo "== Indexing fixtures via installed venv msa (app down) =="
 "$MSA_BIN" index run --config "$CONFIG_PATH" --media-source-override "$FIXTURE_ROOT" --export-to-qdrant
 
+# Validate SQLite durability and reconstruct the isolated Qdrant store before
+# launching the app; runtime tests below verify search after the app restarts.
+"$VENV_PY" "$TEST_ROOT/scripts/storage_recovery.py" \
+  --msa "$MSA_BIN" --config "$CONFIG_PATH" --data-root "$DATA_DIR"
+
 # ── Step 8: relaunch the app to SERVE, run runtime suite against its backend ──
 echo "== Launch #2 (serve) =="
 launch_app

@@ -229,6 +229,11 @@ bash "$TEST_ROOT/scripts/incremental-phases.sh" run \
   -- "$MSA_BIN" index run --config "$CONFIG_PATH" --media-source-override "$FIXTURE_ROOT"
 export MSA_REALDATA_INCREMENTAL=1
 
+# Destroy and rebuild only the isolated Qdrant index; assert canonical SQLite
+# integrity/content are unchanged and the rebuilt vectors survive reopening.
+"$VENV_PY" "$TEST_ROOT/scripts/storage_recovery.py" \
+  --msa "$MSA_BIN" --config "$CONFIG_PATH" --data-root "$DATA_DIR"
+
 export MSA_REALDATA_WORKSPACE="$DATA_DIR"
 export MSA_REALDATA_SQLITE_PATH="$DATA_DIR/index/media.sqlite"
 export MSA_REALDATA_FAISS_PATH="$DATA_DIR/index/image_vec.faiss"
