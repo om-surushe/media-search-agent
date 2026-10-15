@@ -1,0 +1,28 @@
+"""Truthful, numbered runtime stage catalog for the adapter workbench."""
+
+ADAPTER_STAGES = [
+    {"id": "discovery", "number": 1, "name": "Discovery", "runnable": True,
+     "reason": None, "description": "Read-only bounded sample from one configured source."},
+    {"id": "identity", "number": 2, "name": "Identity and incremental gates", "runnable": True,
+     "reason": None, "description": "Hash every media file in the configured source; return bounded details without reading or updating live fingerprints."},
+    {"id": "metadata", "number": 3, "name": "Metadata enrichment", "runnable": True,
+     "reason": None, "description": "Extract metadata from every media file in the configured source without persisting it."},
+    {"id": "transcription", "number": 4, "name": "Video transcription", "runnable": False,
+     "reason": "Stage 04 is not enabled in this checkpoint.",
+     "description": "Transcribe a disposable copy of one video; no transcript is persisted."},
+    {"id": "image-visual", "number": 5, "name": "Image visual processing", "runnable": False,
+     "reason": "Stage 05 is not enabled in this checkpoint.",
+     "description": "Run embeddings, enabled object/face enrichment, and status writes in disposable SQLite."},
+    {"id": "video-keyframes", "number": 6, "name": "Complete video keyframe processing", "runnable": False,
+     "reason": "Stage 06 is not enabled in this checkpoint.",
+     "description": "Run shot handling, selection, decode/cache, frame embeddings, enabled object/face/GPS enrichment, and status writes together."},
+    {"id": "finalization", "number": 7, "name": "Local finalization", "runnable": False,
+     "reason": "Stage 07 is not enabled in this checkpoint.",
+     "description": "Run a one-file disposable pipeline through SQLite scan completion and index-version commit."},
+    {"id": "qdrant-export", "number": 8, "name": "Qdrant export", "runnable": False,
+     "reason": "Stage 08 is not enabled in this checkpoint.",
+     "description": "Run a one-file disposable pipeline and export its vectors to a temporary Qdrant store."},
+    {"id": "captions", "number": 9, "name": "Optional captions", "runnable": False,
+     "reason": "Stage 09 is not enabled in this checkpoint.",
+     "description": "Run the configured offline caption worker against the isolated one-file index."},
+]

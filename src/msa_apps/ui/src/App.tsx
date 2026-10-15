@@ -11,6 +11,7 @@ import { IndexerPage } from '@/pages/IndexerPage'
 import { SettingsPage } from '@/pages/SettingsPage'
 import { KeyframesPage } from '@/pages/KeyframesPage'
 import { CollectionsPage } from '@/pages/CollectionsPage'
+import { AdapterWorkbenchPage } from '@/pages/AdapterWorkbenchPage'
 import { StartupGate } from '@/components/StartupGate'
 import { useIndexerRunning } from '@/hooks/useIndexerStatus'
 import { useCloseWhileIndexingGuard } from '@/hooks/useCloseWhileIndexing'
@@ -32,6 +33,7 @@ function MainApp() {
           <Route path="collections" element={<CollectionsPage />} />
           <Route path="indexer"  element={<IndexerPage />} />
           <Route path="keyframes" element={<KeyframesPage />} />
+          <Route path="adapters" element={<AdapterWorkbenchPage />} />
           <Route path="settings" element={<SettingsPage />} />
         </Route>
       </Routes>

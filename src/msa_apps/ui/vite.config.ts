@@ -49,6 +49,7 @@ export default defineConfig(({ mode }) => {
         '/indexer':         apiProxy(),
         '/config':          apiProxy(),
         '/platform':        apiProxy(),
+        '/adapters':        apiProxy(),
         '/browse':          apiProxy(),
         '/diagnostics':     apiProxy(),
         '/logs':            apiProxy(),

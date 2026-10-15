@@ -468,6 +468,123 @@ def _analyze_keyframe_preview(
 def health(request: Request):
     ready = getattr(request.app.state, "_ready", False)
     return {"status": "ready" if ready else "starting"}
+
+
+def _workbench_stage_capabilities(_config):
+    # Later stages are enabled after their individual review and approval.
+    return {}
+
+
+@app.get("/adapters")
+def list_indexer_adapters(request: Request):
+    from msa_indexer.adapters.registry import ADAPTER_STAGES
+
+    config = _get_config(request)
+    capabilities = _workbench_stage_capabilities(config)
+    stages = [dict(stage) for stage in ADAPTER_STAGES]
+    for stage in stages:
+        capability = capabilities.get(stage["id"])
+        if capability is not None:
+            stage["runnable"] = bool(capability["available"])
+            stage["reason"] = capability["reason"]
+    return stages
+
+
+def _workbench_source(config, source_name: str):
+    return next((item for item in getattr(config, "media_sources", [])
+                 if item.name == source_name and getattr(item, "enabled", True)), None)
+
+
+@app.post("/adapters/discovery/run")
+def preview_discovery_adapter(request: Request, source_name: str = Query(...), limit: int = Query(25, ge=1, le=100)):
+    """Safely sample media discovery under an enabled, configured source."""
+    import time
+    from msa_indexer.adapters.adapter_01_discovery import preview_media_entries
+
+    source = _workbench_source(_get_config(request), source_name)
+    if source is None:
+        raise HTTPException(status_code=404, detail="Enabled configured source not found")
+    started = time.perf_counter()
+    try:
+        result = preview_media_entries(source, limit=limit)
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail="Discovery preview failed: " + type(exc).__name__) from exc
+    result["elapsed_seconds"] = round(time.perf_counter() - started, 4)
+    return result
+
+
+@app.post("/adapters/{stage_id}/run")
+def run_adapter_preview(
+    stage_id: str, request: Request, source_name: str = Query(...),
+    relative_path: Optional[str] = Query(None),
+):
+    """Run a read-only adapter on a source tree or one source-relative file."""
+    import time
+    from msa_indexer.adapters.registry import ADAPTER_STAGES
+
+    stage = next((item for item in ADAPTER_STAGES if item["id"] == stage_id), None)
+    if stage is None:
+        raise HTTPException(status_code=404, detail="Unknown adapter stage")
+    config = _get_config(request)
+    capability = _workbench_stage_capabilities(config).get(stage_id)
+    if capability is not None:
+        stage = {**stage, "runnable": capability["available"], "reason": capability["reason"]}
+    if not stage["runnable"]:
+        raise HTTPException(status_code=409, detail=stage["reason"])
+    source = _workbench_source(config, source_name)
+    if source is None:
+        raise HTTPException(status_code=404, detail="Enabled configured source not found")
+    if stage_id in {"identity", "metadata"} and relative_path is not None:
+        raise HTTPException(status_code=400, detail="This adapter runs on the whole configured source; file selection is not accepted")
+    try:
+        if stage_id == "identity":
+            from msa_indexer.adapters.adapter_02_identity import preview_source_identity
+            action = lambda: preview_source_identity(source)
+        elif stage_id == "metadata":
+            from msa_indexer.adapters.adapter_03_metadata import preview_source_metadata
+            action = lambda: preview_source_metadata(source)
+        elif stage_id == "transcription":
+            if not relative_path:
+                raise HTTPException(status_code=400, detail="Discovery is required before running this per-file adapter")
+            from msa_indexer.adapters.adapter_04_transcription import preview_transcription
+            action = lambda: preview_transcription(
+                source, relative_path, Path(getattr(config, "models_dir", "models")), getattr(config, "device", "cpu"),
+            )
+        elif stage_id == "image-visual":
+            if not relative_path:
+                raise HTTPException(status_code=400, detail="Discovery is required before running this per-file adapter")
+            from msa_indexer.adapters.adapter_05_image_visual import preview_image_visual
+            action = lambda: preview_image_visual(config, source, relative_path)
+        elif stage_id == "video-keyframes":
+            if not relative_path:
+                raise HTTPException(status_code=400, detail="Discovery is required before running this per-file adapter")
+            from msa_indexer.adapters.adapter_06_video_keyframes import preview_video_keyframes
+            action = lambda: preview_video_keyframes(config, source, relative_path)
+        elif stage_id == "finalization":
+            if not relative_path:
+                raise HTTPException(status_code=400, detail="Discovery is required before running this per-file adapter")
+            from msa_indexer.adapters.adapter_07_finalization import preview_finalization
+            action = lambda: preview_finalization(config, source, relative_path)
+        elif stage_id == "qdrant-export":
+            if not relative_path:
+                raise HTTPException(status_code=400, detail="Discovery is required before running this per-file adapter")
+            from msa_indexer.adapters.adapter_08_qdrant_export import preview_qdrant_export
+            action = lambda: preview_qdrant_export(config, source, relative_path)
+        elif stage_id == "captions":
+            if not relative_path:
+                raise HTTPException(status_code=400, detail="Discovery is required before running this per-file adapter")
+            from msa_indexer.adapters.adapter_09_optional_captioning import preview_captioning
+            action = lambda: preview_captioning(config, source, relative_path)
+        else:
+            raise HTTPException(status_code=409, detail="This adapter has no isolated run action")
+        started = time.perf_counter()
+        result = action()
+        result["elapsed_seconds"] = round(time.perf_counter() - started, 4)
+        return result
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=f"Adapter failed: {type(exc).__name__}") from exc
 @app.post("/video-keyframes/preview", response_model=KeyframePreviewResponse)
 async def preview_video_keyframes(
     request: Request,
