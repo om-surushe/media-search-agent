@@ -3,16 +3,15 @@ Tests for SetupManager in setup_models.py.
 
 Covers correctness bugs fixed in code review:
 
-  1. check_all_present() CLIP check is specific — no false positives from
-     wrong-named .safetensors, random .pt files, or small blobs/ metadata files.
+  1. check_all_present() CLIP check matches open_clip's configured ViT-L-14
+     checkpoint and rejects unrelated .pt files or small blob metadata files.
 
   2. check_all_present() facenet-pytorch check requires a vggface2 checkpoint
      file in the expected hub/checkpoints/ directory. The filename pattern uses
      "vggface2" as a substring (e.g. 20180402-114759-vggface2.pt), not a prefix.
 
-  3. _download_worker() sets CLIP to error when open_clip_model.safetensors
-     is absent after the download call — a partial HuggingFace cache is not
-     silently accepted as done.
+  3. _download_worker() sets CLIP to error when no approved checkpoint is present after
+     the download call — a partial cache is not silently accepted as done.
 
   4. start_if_needed() does not spawn a second worker thread while another
      download is still in the downloading or verifying state.
@@ -25,7 +24,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from msa_apps.search_api.setup_models import SetupManager
+from msa_apps.search_api.setup_models import MODEL_META, SetupManager
+from msa_indexer.models.clip_artifacts import CLIP_CHECKPOINT_SHA256, CLIP_HF_REPO
 
 
 # ---------------------------------------------------------------------------
@@ -45,9 +45,17 @@ def _manager_with_states(states: dict[str, str]) -> SetupManager:
 # 1. check_all_present — CLIP presence check
 # ---------------------------------------------------------------------------
 
+def test_clip_setup_metadata_matches_open_clip_runtime():
+    import open_clip
+
+    cfg = open_clip.get_pretrained_cfg("ViT-L-14", "openai")
+    assert cfg["hf_hub"].rstrip("/") == CLIP_HF_REPO
+    assert MODEL_META["clip"]["sha256"] == CLIP_CHECKPOINT_SHA256["open_clip_model.safetensors"]
+
+
 class TestCheckAllPresentClip:
     """check_all_present() must only report CLIP as present for the specific
-    weight file (open_clip_model.safetensors) or a large blob — not for any
+    open_clip hub checkpoint or a large blob — not for any
     random .pt / .safetensors file that happens to be in the cache dir."""
 
     def test_absent_when_no_files(self, tmp_path):
@@ -60,8 +68,7 @@ class TestCheckAllPresentClip:
         assert SetupManager().check_all_present(tmp_path)["clip"] is True
 
     def test_absent_with_wrong_safetensors_name(self, tmp_path):
-        """model.safetensors or anything that isn't open_clip_model.safetensors
-        must not satisfy the check — this was the old *.safetensors wildcard bug."""
+        """A different checkpoint name must not satisfy the CLIP cache check."""
         clip_dir = tmp_path / "clip"
         clip_dir.mkdir()
         (clip_dir / "model.safetensors").write_bytes(b"x" * 1024)
@@ -176,7 +183,7 @@ class TestDownloadWorkerBootstrapFailure:
 # ---------------------------------------------------------------------------
 
 class TestClipDownloadWorkerVerification:
-    """If open_clip finishes without writing open_clip_model.safetensors (e.g.
+    """If open_clip finishes without writing its expected safetensors file (e.g.
     only tokeniser metadata was downloaded), the worker must error rather than
     silently advancing CLIP to done."""
 
@@ -217,7 +224,7 @@ class TestClipDownloadWorkerVerification:
         mgr = self._run_worker(tmp_path, write_weight_file=False)
         assert mgr._models["clip"].status == "error"
         assert mgr._models["clip"].error is not None
-        assert "not found" in mgr._models["clip"].error.lower()
+        assert "checkpoint" in mgr._models["clip"].error.lower()
 
     def test_clip_done_when_weight_file_present_and_valid(self, tmp_path):
         mgr = self._run_worker(tmp_path, write_weight_file=True)

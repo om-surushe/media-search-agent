@@ -5,14 +5,15 @@ import { wsUrl } from '../lib/apiBase'
 export interface SetupWSState {
   models: Record<string, ModelDownloadState> | null
   complete: boolean
+  revision: number
 }
 
 /**
  * Connects to /ws/setup and streams per-model download progress.
  * Reconnects automatically on disconnect (while complete is false).
  */
-export function useSetupWS(): SetupWSState {
-  const [state, setState] = useState<SetupWSState>({ models: null, complete: false })
+export function useSetupWS(reconnectKey = 0): SetupWSState {
+  const [state, setState] = useState<SetupWSState>({ models: null, complete: false, revision: 0 })
 
   useEffect(() => {
     let closed = false
@@ -26,7 +27,7 @@ export function useSetupWS(): SetupWSState {
       ws.onmessage = (e) => {
         try {
           const msg: SetupWSUpdate = JSON.parse(e.data)
-          setState({ models: msg.models, complete: msg.type === 'complete' })
+          setState((prev) => ({ models: msg.models, complete: msg.type === 'complete', revision: prev.revision + 1 }))
         } catch {}
       }
 
@@ -55,7 +56,7 @@ export function useSetupWS(): SetupWSState {
       if (retryTimer) clearTimeout(retryTimer)
       ws?.close()
     }
-  }, [])
+  }, [reconnectKey])
 
   return state
 }

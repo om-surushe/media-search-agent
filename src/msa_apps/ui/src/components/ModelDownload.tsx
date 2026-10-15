@@ -13,7 +13,7 @@ import { SplashShell, ProgressBar, formatElapsed, DEPS_END_PCT } from './splash'
  * the models are on disk.
  *
  * The unified bar continues from where provisioning left off: deps fill 0→`BASE`%, the models fill
- * `BASE`→100 weighted by download size (CLIP ~850 MB dominates), so the single bar never resets.
+ * `BASE`→100 weighted by download size (CLIP ~1.71 GB dominates), so the single bar never resets.
  */
 
 // Where the deps phase ends and the model phase begins on the one continuous 0–100 bar.
@@ -122,7 +122,7 @@ export function ModelDownload({ onReady, startedAtMs, initialModels }: Props) {
     if (allDone || continued) onReady()
   }, [allDone, continued, onReady])
 
-  // Size-weighted fraction so the bar tracks bytes, not model count (CLIP ~850 MB ≫ the others).
+  // Size-weighted fraction so the bar tracks bytes, not model count (CLIP ~1.71 GB ≫ the others).
   const totalSize = models.reduce((s, m) => s + m.size_mb, 0) || 1
   const doneSize = rows.filter((r) => r.status === 'done').reduce((s, m) => s + m.size_mb, 0)
   const pct = BASE + (doneSize / totalSize) * SPAN

@@ -15,13 +15,13 @@ vi.mock('../api/setup', async (importOriginal) => {
 })
 
 const MODELS = [
-  { id: 'clip', label: 'Semantic search model (CLIP ViT-L-14)', size_mb: 850, present: false, integrity_hint: 'sha256:9ce2e8a8ebff', source: 'huggingface.co/timm/vit_large_patch14_clip_224.openai' },
+  { id: 'clip', label: 'Semantic search model (CLIP ViT-L-14)', size_mb: 1711, present: false, integrity_hint: 'sha256:9ce2e8a8ebff', source: 'huggingface.co/timm/vit_large_patch14_clip_224.openai' },
   { id: 'rtdetr', label: 'Object detection model (RT-DETR r18vd)', size_mb: 81, present: false, integrity_hint: 'rev:ac77a11ff017', source: 'huggingface.co/PekingU/rtdetr_r18vd' },
   { id: 'facenet_pytorch', label: 'Face recognition model (facenet-pytorch)', size_mb: 108, present: false, integrity_hint: '', source: 'github.com/timesler/facenet-pytorch' },
 ]
 
 function stubWs(models: Record<string, ModelDownloadState> | null, complete: boolean) {
-  vi.mocked(setupWs.useSetupWS).mockReturnValue({ models, complete })
+  vi.mocked(setupWs.useSetupWS).mockReturnValue({ models, complete, revision: 0 })
 }
 
 function renderModelDownload(onReady = vi.fn()) {
@@ -55,8 +55,8 @@ describe('ModelDownload', () => {
     expect(screen.getByText('Downloading AI models')).toBeInTheDocument()
     // the active (downloading) CLIP model appears BOTH as the detail line and its checklist row
     expect(screen.getAllByText(/Semantic search model \(CLIP ViT-L-14\)/).length).toBeGreaterThan(1)
-    expect(screen.getByText('~850 MB')).toBeInTheDocument()
-    expect(screen.getByText(/from huggingface\.co\/timm/)).toBeInTheDocument()
+    expect(screen.getByText('~1711 MB')).toBeInTheDocument()
+    expect(screen.getByText(/from huggingface\.co\/timm\/vit_large_patch14_clip_224\.openai/)).toBeInTheDocument()
   })
 
   it('weights the unified bar by download size and stays in the 60–100 band', () => {

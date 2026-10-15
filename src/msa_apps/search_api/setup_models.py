@@ -6,7 +6,7 @@ read this state; a background thread does the actual downloading so the async
 event loop is never blocked.
 
 Models downloaded:
-  - CLIP ViT-L-14/openai              (~850 MB)  via open_clip / huggingface_hub
+  - CLIP ViT-L-14/openai             (~1.71 GB) via open_clip / huggingface_hub
   - RT-DETR PekingU/rtdetr_r18vd       (~81 MB)  via HuggingFace transformers
   - facenet-pytorch VGGFace2           (~108 MB)  via torch hub (TORCH_HOME redirect)
 
@@ -29,6 +29,14 @@ from typing import Literal
 
 from loguru import logger
 
+from msa_indexer.models.clip_artifacts import (
+    CLIP_CHECKPOINT_SHA256,
+    CLIP_HF_REPO,
+    CLIP_MODEL_NAME,
+    CLIP_PRETRAINED,
+    clip_checkpoint_candidates,
+)
+
 # ── Types ─────────────────────────────────────────────────────────────────────
 
 ModelState = Literal["pending", "downloading", "verifying", "done", "error"]
@@ -46,13 +54,14 @@ MODEL_META = {
         # other two below. Bare technical names like "CLIP ViT-L-14" were
         # opaque to non-ML users seeing the first-launch download page.
         "label":   "Semantic search model (CLIP ViT-L-14)",
-        "size_mb": 850,
-        # SHA-256 of open_clip_model.safetensors (timm/vit_large_patch14_clip_224.openai)
-        "sha256":  "9ce2e8a8ebfff3793d7d375ad6d3c35cb9aebf3de7ace0fc7308accab7cd207e",
+        "size_mb": 1711,
+        # open_clip prefers the pinned HF safetensors artifact when available.
+        "sha256": CLIP_CHECKPOINT_SHA256["open_clip_model.safetensors"],
+        "filename": "open_clip_model.safetensors",
         # Download origin surfaced to the UI as a trust signal. Format is
         # "<host>/<org>/<repo>" with no scheme — short enough to fit a row,
         # specific enough to verify against the actual network traffic.
-        "source":  "huggingface.co/timm/vit_large_patch14_clip_224.openai",
+        "source":  f"huggingface.co/{CLIP_HF_REPO}",
     },
     "rtdetr": {
         "label":    "Object detection model (RT-DETR r18vd)",
@@ -127,19 +136,9 @@ class SetupManager:
         """Check which model weight files are already on disk."""
         clip_cache = models_dir / "clip"
 
-        # Look for the specific weight file that we later verify by hash.
-        # On Windows (symlink-less HuggingFace blobs/ layout) the file is stored
-        # by content hash rather than name; accept only files >100 MB so small
-        # metadata blobs don't falsely satisfy the check.
-        clip_present = clip_cache.exists() and (
-            any(clip_cache.rglob("open_clip_model.safetensors"))
-            or any(
-                f.is_file() and f.stat().st_size > 100_000_000
-                for bd in clip_cache.rglob("blobs")
-                if bd.is_dir()
-                for f in bd.iterdir()
-            )
-        )
+        # open_clip caches the selected hub checkpoint under the local HF cache;
+        # some platforms expose only its content-addressed blob filename.
+        clip_present = bool(clip_checkpoint_candidates(models_dir))
 
         # RT-DETR: look for model.safetensors under any snapshot of the default model.
         # HuggingFace hub layout: <cache>/models--<org>--<name>/snapshots/<commit>/model.safetensors
@@ -180,12 +179,13 @@ class SetupManager:
         """Return True only for a complete CLIP blob matching the pinned SHA-256."""
         clip_cache = models_dir / "clip"
         try:
-            candidates = list(clip_cache.rglob("open_clip_model.safetensors"))
-            candidates.extend(
-                f for bd in clip_cache.rglob("blobs") if bd.is_dir()
-                for f in bd.iterdir() if f.is_file() and f.stat().st_size > 100_000_000
-            )
-            return any(_verify_file(path, MODEL_META["clip"]["sha256"]) for path in candidates)
+            for path in clip_checkpoint_candidates(models_dir):
+                expected = CLIP_CHECKPOINT_SHA256.get(path.name)
+                if expected and _verify_file(path, expected):
+                    return True
+                if not expected and _sha256(path) in CLIP_CHECKPOINT_SHA256.values():
+                    return True
+            return False
         except OSError:
             return False
 
@@ -250,6 +250,10 @@ class SetupManager:
         try:
             models_dir.mkdir(parents=True, exist_ok=True)
             present = self.check_all_present(models_dir)
+            present["clip"] = self.has_valid_clip(models_dir)
+            if not present["clip"]:
+                for stale in clip_checkpoint_candidates(models_dir):
+                    stale.unlink(missing_ok=True)
         except Exception as exc:
             # Bootstrap failure (e.g. unwritable models_dir) — mark every still-pending
             # model as error and set complete so the WS loop terminates and the UI can
@@ -274,22 +278,13 @@ class SetupManager:
                 clip_cache.mkdir(parents=True, exist_ok=True)
                 import open_clip  # type: ignore[import]
                 open_clip.create_model_and_transforms(
-                    "ViT-L-14", pretrained="openai",
+                    CLIP_MODEL_NAME, pretrained=CLIP_PRETRAINED,
                     device="cpu", cache_dir=str(clip_cache),
                 )
-                # Verify the main weight file (open_clip_model.safetensors).
-                # Treat a missing file as a hard error — open_clip may have
-                # written only tokeniser metadata without the actual weights.
+                # Verify the exact approved artifact selected by open_clip.
                 self._set("clip", "verifying")
-                weight_files = list(clip_cache.rglob("open_clip_model.safetensors"))
-                if not weight_files:
-                    raise ValueError(
-                        "open_clip_model.safetensors not found after download"
-                    )
-                expected = MODEL_META["clip"]["sha256"]
-                if not _verify_file(weight_files[0], expected):
-                    weight_files[0].unlink(missing_ok=True)
-                    raise ValueError("SHA-256 mismatch for CLIP weights")
+                if not self.has_valid_clip(models_dir):
+                    raise ValueError("No approved, checksum-valid CLIP checkpoint found after download")
                 self._set("clip", "done")
                 logger.info("setup_models: CLIP ViT-L-14 downloaded and verified")
             except Exception as exc:

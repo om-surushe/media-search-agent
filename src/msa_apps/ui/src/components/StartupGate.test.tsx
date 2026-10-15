@@ -48,7 +48,7 @@ describe('StartupGate', () => {
       () => ({
         ready: false,
         models: [
-          { id: 'clip', label: 'CLIP', size_mb: 850, present: false, integrity_hint: '', source: 'huggingface.co/x' },
+          { id: 'clip', label: 'CLIP', size_mb: 1711, present: false, integrity_hint: '', source: 'huggingface.co/x' },
         ],
       }),
     )

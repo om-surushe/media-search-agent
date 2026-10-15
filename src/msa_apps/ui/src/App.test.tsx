@@ -102,7 +102,7 @@ describe('App launch flow', () => {
       routedFetch(() => ({
         ready: false,
         models: [
-          { id: 'clip', label: 'Semantic search model (CLIP ViT-L-14)', size_mb: 850, present: false, integrity_hint: '', source: 'huggingface.co/timm/x' },
+          { id: 'clip', label: 'Semantic search model (CLIP ViT-L-14)', size_mb: 1711, present: false, integrity_hint: '', source: 'huggingface.co/timm/vit_large_patch14_clip_224.openai' },
         ],
       })),
     )
