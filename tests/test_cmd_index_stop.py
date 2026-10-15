@@ -952,6 +952,39 @@ def test_noncooperative_kill_recovers_on_restart(lifecycle_workspace):
             f"Second run completed but Qdrant export did not — recovery "
             f"left the export path broken.\n{log_text[-2000:]}"
         )
+
+        # Simulate loss of the derived vector store while preserving canonical
+        # SQLite data, then exercise the user-facing full rebuild path.
+        import shutil
+        shutil.rmtree(ws.qdrant_dir)
+        rebuild_capture = ws.ws / "qdrant-rebuild-capture.log"
+        with rebuild_capture.open("wb") as rebuild_output:
+            rebuild = subprocess.run(
+                [str(ws.msa_bin), "index", "export", "--config",
+                 str(ws.config_path), "--recreate"],
+                env=ws.env, stdout=rebuild_output, stderr=subprocess.STDOUT,
+                timeout=300.0, check=False,
+            )
+        rebuild_log = rebuild_capture.read_text(errors="replace")
+        assert rebuild.returncode == 0, (
+            f"Qdrant rebuild from persistent SQLite failed (rc={rebuild.returncode})\n"
+            f"{rebuild_log[-2000:]}"
+        )
+        assert "Qdrant image/video export complete" in rebuild_log, (
+            "Qdrant rebuild did not report successful export from canonical SQLite.\n"
+            f"{rebuild_log[-2000:]}"
+        )
+        from qdrant_client import QdrantClient
+        from msa_settings import load_config
+        rebuilt_client = QdrantClient(path=str(ws.qdrant_dir))
+        try:
+            image_collection = load_config(str(ws.config_path)).collections.image
+            assert rebuilt_client.count(image_collection).count > 0, (
+                "Qdrant rebuild exited successfully but restored no image vectors"
+            )
+        finally:
+            rebuilt_client.close()
+
         # No Fortran abort across either run.
         capture1_text = capture1.read_text(errors="replace")
         for source_name, content in [
