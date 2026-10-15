@@ -409,6 +409,58 @@ def run_video_folder(config, source, *, result_limit: int = 25, after_index=None
         }
 
 
+def run_source_folder(config, source, *, result_limit: int = 25, after_source=None) -> dict:
+    """Run the complete local index pipeline for every supported source media item in disposable state."""
+    if not 1 <= result_limit <= 25:
+        raise ValueError("Result limit must be between 1 and 25")
+    capability = index_capability(config)
+    if not capability["available"]:
+        raise RuntimeError(str(capability["reason"]))
+    checkpoint, reason = _clip_checkpoint(config)
+    if checkpoint is None:
+        raise RuntimeError(reason or "Configured CLIP checkpoint is unavailable")
+
+    root = Path(resolve_for_access(str(source.path))).resolve()
+    if not root.is_dir():
+        raise ValueError("Configured source is not an accessible directory")
+    with tempfile.TemporaryDirectory(prefix="msa-adapter-workbench-") as temp_dir:
+        workspace = Path(temp_dir)
+        staged_root = workspace / "source"
+        stats = ScanStats()
+        files_found = 0
+        for original, stat in iter_media_entries(root, stats=stats):
+            relative = original.relative_to(root)
+            if stat.st_size > 2 * 1024 * 1024 * 1024:
+                raise ValueError("A media file exceeds the 2 GiB workbench limit")
+            _, safe_original = validated_sample_path(source, relative.as_posix())
+            staged_file = staged_root / relative
+            staged_file.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                shutil.copyfile(safe_original, staged_file)
+            except OSError as exc:
+                raise RuntimeError("Could not stage every supported media file from the configured source") from exc
+            files_found += 1
+        if stats.walk_errors:
+            raise RuntimeError("Could not scan the configured source completely; preview was not run")
+        if files_found == 0:
+            return {
+                "scope": "whole_configured_source", "media_found": 0, "media_processed": 0,
+                "image_embeddings": 0, "summary": {}, "results": [],
+                "results_truncated": False, "complete": True, "persisted": False,
+            }
+        processed, embeddings, summary, results = _run_staged_source(
+            config, source, workspace, staged_root, checkpoint,
+            result_limit=result_limit, after_source=after_source,
+        )
+        return {
+            "scope": "whole_configured_source", "media_found": files_found,
+            "media_processed": processed, "image_embeddings": embeddings,
+            "summary": summary, "results": results,
+            "results_truncated": files_found > len(results),
+            "complete": processed == files_found, "persisted": False,
+        }
+
+
 def _read_result(db: SQLiteStore, source_name: str, relative_path: str, media_id: str) -> dict:
     row = db.conn.execute(
         "SELECT mime, width, height, duration, gps_lat, gps_lon FROM media WHERE media_id=?",

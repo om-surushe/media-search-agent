@@ -4,7 +4,7 @@ import { fetchSetupStatus, retrySetup, type ModelInfo } from '@/api/setup'
 import { getSources, type MediaSource } from '@/api/indexer'
 import { useSetupWS } from '@/hooks/useSetupWS'
 
-type Stage = { id: string; number: number; name: string; runnable: boolean; reason?: string | null; description?: string }
+type Stage = { id: string; number: number; name: string; runnable: boolean; can_prepare?: boolean; reason?: string | null; description?: string }
 type Entry = { name: string; relative_path: string; extension: string; size_bytes: number }
 type Preview = { source: string; returned: number; has_more: boolean; entries: Entry[]; elapsed_seconds: number }
 type RunResult = { output?: Record<string, unknown>; error?: string; elapsed_seconds?: number }
@@ -26,6 +26,7 @@ export function AdapterWorkbenchPage() {
   const [modelLog, setModelLog] = useState<string[]>([])
   const [setupConnection, setSetupConnection] = useState(0)
   const retryRevision = useRef<number | null>(null)
+  const preparedStage = useRef<string | null>(null)
   const seenModelStates = useRef<Record<string, string>>({})
   const { models: liveModels, complete: modelSetupComplete, revision: setupRevision } = useSetupWS(setupConnection)
 
@@ -82,10 +83,31 @@ export function AdapterWorkbenchPage() {
     if (!loadingModels || retryRevision.current === null || setupRevision <= retryRevision.current || !modelSetupComplete) return
     retryRevision.current = null
     setLoadingModels(false)
-    void refreshModels(true)
-  }, [loadingModels, modelSetupComplete, setupRevision])
+    const stageId = preparedStage.current
+    preparedStage.current = null
+    void refreshModels().then(async status => {
+      if (!stageId) return
+      const states = Object.values(liveModels ?? {})
+      if (!status?.ready || states.length === 0 || states.some(model => model.status !== 'done')) {
+        const failed = states.filter(model => model.status === 'error').map(model => model.error).filter(Boolean)
+        setModelError(failed.length ? `Model setup failed: ${failed.join('; ')}` : 'Model setup did not verify all required weights.')
+        return
+      }
+      const response = await fetch(apiUrl('/adapters'))
+      if (!response.ok) throw new Error(response.statusText)
+      const catalog: Stage[] = await response.json()
+      setStages(catalog)
+      const stage = catalog.find(item => item.id === stageId)
+      if (!stage?.runnable) {
+        setModelError(stage?.reason ?? 'Stage prerequisites remain unavailable.')
+        return
+      }
+      await runStage(stageId, true)
+    }).catch(e => setModelError(String(e)))
+  }, [loadingModels, modelSetupComplete, setupRevision, liveModels])
 
-  async function loadModels() {
+  async function loadModels(runAfterSetup?: string) {
+    preparedStage.current = runAfterSetup ?? null
     const missing = models.filter(model => !model.present || liveModels?.[model.id]?.status === 'error')
     const sizeMb = missing.reduce((total, model) => total + model.size_mb, 0)
     const sources = [...new Set(missing.map(model => model.source).filter(Boolean))].join(', ')
@@ -97,10 +119,17 @@ export function AdapterWorkbenchPage() {
       await retrySetup()
       setSetupConnection(connection => connection + 1)
     } catch (e) {
+      preparedStage.current = null
       retryRevision.current = null
       setLoadingModels(false)
       setModelError(String(e))
     }
+  }
+
+  async function prepareAndRunStage(stageId: string) {
+    const maxDownloadMb = models.reduce((total, model) => total + model.size_mb, 0)
+    if (!window.confirm(`Stage 08 will download or verify the app's local models (up to ~${maxDownloadMb} MB), then process every supported item in “${source}”. Continue?`)) return
+    await loadModels(stageId)
   }
 
   async function runDiscovery() {
@@ -114,12 +143,12 @@ export function AdapterWorkbenchPage() {
     } catch (e) { setError(String(e)) } finally { setBusy(null) }
   }
 
-  async function runStage(stageId: string) {
-    const folderStage = ['identity', 'metadata', 'transcription', 'image-visual', 'video-keyframes'].includes(stageId)
+  async function runStage(stageId: string, alreadyConfirmed = false) {
+    const folderStage = ['identity', 'metadata', 'transcription', 'image-visual', 'video-keyframes', 'qdrant-export'].includes(stageId)
     if (!source || (!folderStage && !selectedPath)) return
     if (folderStage) {
-      const target = stageId === 'transcription' || stageId === 'video-keyframes' ? 'every video' : stageId === 'image-visual' ? 'every image' : 'every media file'
-      if (!window.confirm(`Run ${stageId} across ${target} in configured source “${source}”? This read-only run may take time.`)) return
+      const target = stageId === 'transcription' || stageId === 'video-keyframes' ? 'every video' : stageId === 'image-visual' ? 'every image' : stageId === 'qdrant-export' ? 'every supported image and video' : 'every media file'
+      if (!alreadyConfirmed && !window.confirm(`Run ${stageId} across ${target} in configured source “${source}”? This read-only run may take time.`)) return
     }
     setBusy(stageId)
     setResults(current => ({ ...current, [stageId]: {} }))
@@ -143,7 +172,7 @@ export function AdapterWorkbenchPage() {
     {discovery && <p className="text-sm text-zinc-500">Discovery: {discovery.returned} files sampled{discovery.has_more ? ' (more files exist)' : ''} in {discovery.elapsed_seconds}s.</p>}
     <section className="rounded-lg border border-zinc-200 dark:border-zinc-700 p-4">
       <h2 className="font-medium">Model setup</h2>
-      <p className="mt-1 text-sm text-zinc-500">Stage 05 always runs the configured RT-DETR object detector; optional face recognition follows Settings. Object detection may be slow on CPU. Model selection and optional detector settings are in <a className="text-blue-600 underline" href="/settings">Settings</a>. Downloads use the app’s verified sources; loading a preview never downloads models.</p>
+      <p className="mt-1 text-sm text-zinc-500">Stage 05 always runs the configured RT-DETR object detector; optional face recognition follows Settings. Object detection may be slow on CPU. Model selection and optional detector settings are in <a className="text-blue-600 underline" href="/settings">Settings</a>. Downloads use the app’s verified sources; ordinary previews never download models. Stage 08’s explicit prepare-and-run action is the exception.</p>
       {models.length > 0 && <ul className="mt-2 space-y-1 text-xs text-zinc-500">{models.map(model => {
         const live = liveModels?.[model.id]
         return <li key={model.id}>{model.label} · ~{model.size_mb} MB · {live?.status ?? (model.present ? 'cached' : 'missing')}{model.source ? ` · ${model.source}` : ''}{live?.error && <span className="block text-red-600">{live.error}</span>}</li>
@@ -153,19 +182,20 @@ export function AdapterWorkbenchPage() {
       {modelSetupReadOnly && <p className="mt-2 text-xs text-amber-700">Model downloads are disabled in read-only mode.</p>}
       {modelLog.length > 0 && <details open={loadingModels} className="mt-3 text-xs"><summary className="cursor-pointer font-medium">Model setup logs ({modelLog.length})</summary><ol role="log" aria-live="polite" className="mt-2 max-h-40 space-y-1 overflow-auto font-mono">{modelLog.map((line, index) => <li key={`${index}-${line}`}>{line}</li>)}</ol></details>}
     </section>
-    {entries.length > 0 && stages.some(stage => stage.runnable && !['discovery', 'identity', 'metadata', 'transcription', 'image-visual', 'video-keyframes'].includes(stage.id)) && <details className="text-sm"><summary className="cursor-pointer text-zinc-500">Optional sample selection for single-file stages 07–09</summary><div className="mt-2 flex flex-wrap items-center gap-2"><label htmlFor="sample-file">Sample file</label><select id="sample-file" value={selectedPath} onChange={e => setSelectedPath(e.target.value)} className="max-w-full rounded border bg-transparent px-2 py-1 text-sm"><option value="">Select a sample</option>{entries.map(entry => <option key={entry.relative_path} value={entry.relative_path}>{entry.relative_path}</option>)}</select></div></details>}
+    {entries.length > 0 && stages.some(stage => (stage.runnable || stage.can_prepare) && !['discovery', 'identity', 'metadata', 'transcription', 'image-visual', 'video-keyframes', 'qdrant-export'].includes(stage.id)) && <details className="text-sm"><summary className="cursor-pointer text-zinc-500">Optional sample selection for single-file stages 07 and 09</summary><div className="mt-2 flex flex-wrap items-center gap-2"><label htmlFor="sample-file">Sample file</label><select id="sample-file" value={selectedPath} onChange={e => setSelectedPath(e.target.value)} className="max-w-full rounded border bg-transparent px-2 py-1 text-sm"><option value="">Select a sample</option>{entries.map(entry => <option key={entry.relative_path} value={entry.relative_path}>{entry.relative_path}</option>)}</select></div></details>}
     <div className="space-y-3">{stages.map(stage => {
       const result = results[stage.id]
-      const folderStage = ['identity', 'metadata', 'transcription', 'image-visual', 'video-keyframes'].includes(stage.id)
+      const folderStage = ['identity', 'metadata', 'transcription', 'image-visual', 'video-keyframes', 'qdrant-export'].includes(stage.id)
       const canRun = stage.runnable && stage.id !== 'discovery'
       return <article key={stage.id} className="rounded-lg border border-zinc-200 dark:border-zinc-700 p-4">
         <div className="flex justify-between gap-3"><h2 className="font-medium">{String(stage.number).padStart(2, '0')} · {stage.name}</h2><span className="text-xs text-zinc-500">{stage.runnable ? 'Runnable' : 'Not runnable'}</span></div>
         {stage.description && <p className="mt-1 text-sm text-zinc-500">{stage.description}</p>}
         {!stage.runnable && <p className="mt-1 text-sm text-amber-700 dark:text-amber-400">{stage.reason}</p>}
         {stage.id === 'discovery' && stage.runnable && <button disabled={!source || Boolean(busy)} onClick={() => void runDiscovery()} className="mt-3 rounded bg-blue-600 px-3 py-1.5 text-sm text-white disabled:opacity-50">{busy === 'discovery' ? 'Running…' : 'Run Discovery (25 max)'}</button>}
-        {canRun && folderStage && <button disabled={Boolean(busy)} onClick={() => void runStage(stage.id)} className="mt-3 rounded bg-blue-600 px-3 py-1.5 text-sm text-white disabled:opacity-50">{busy === stage.id ? 'Running…' : stage.id === 'image-visual' ? 'Run on every image' : stage.id === 'video-keyframes' ? 'Run on every video' : `Run ${stage.name} on whole folder`}</button>}
+        {canRun && folderStage && <button disabled={Boolean(busy)} onClick={() => void runStage(stage.id)} className="mt-3 rounded bg-blue-600 px-3 py-1.5 text-sm text-white disabled:opacity-50">{busy === stage.id ? 'Running…' : stage.id === 'image-visual' ? 'Run on every image' : stage.id === 'video-keyframes' ? 'Run on every video' : stage.id === 'qdrant-export' ? 'Export every source item to temporary Qdrant' : `Run ${stage.name} on whole folder`}</button>}
         {canRun && !folderStage && stage.id !== 'image-visual' && selectedPath && <button disabled={Boolean(busy)} onClick={() => void runStage(stage.id)} className="mt-3 rounded bg-blue-600 px-3 py-1.5 text-sm text-white disabled:opacity-50">{busy === stage.id ? 'Running…' : 'Run on selected sample'}</button>}
         {canRun && !folderStage && !selectedPath && stage.id !== 'image-visual' && <p className="mt-3 text-xs text-zinc-500">Single-file stage; choose a sample only when you test this stage.</p>}
+        {stage.id === 'qdrant-export' && stage.can_prepare && source && models.length > 0 && !modelSetupReadOnly && <button disabled={Boolean(busy) || loadingModels} onClick={() => void prepareAndRunStage(stage.id)} className="mt-3 rounded bg-blue-600 px-3 py-1.5 text-sm text-white disabled:opacity-50">{loadingModels ? 'Preparing models…' : `Download prerequisites & run Stage 08 (up to ${models.reduce((total, model) => total + model.size_mb, 0)} MB)`}</button>}
         {result?.error && <p role="alert" className="mt-2 text-sm text-red-600">Failed in {result.elapsed_seconds?.toFixed(3)}s: {result.error}</p>}
         {result?.output && <div className="mt-2 space-y-2"><p className="text-xs text-zinc-500">Completed in {result.elapsed_seconds?.toFixed(3)}s</p><pre className="max-h-96 overflow-auto rounded bg-zinc-100 dark:bg-zinc-800 p-3 text-xs">{JSON.stringify(result.output, null, 2)}</pre></div>}
       </article>

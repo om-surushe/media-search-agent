@@ -59,11 +59,11 @@ describe('AdapterWorkbenchPage', () => {
     expect(String(vi.mocked(fetch).mock.calls.at(-1)?.[0])).not.toContain('relative_path=')
   })
 
-  it('shows a selected-sample button for runnable Stage 07', async () => {
+  it('shows a sample button for Stage 07 and a folder button for Stage 08', async () => {
     vi.mocked(fetch).mockImplementation((url: string) => Promise.resolve({
       ok: true,
       json: async () => url.endsWith('/adapters')
-        ? [{ id: 'discovery', number: 1, name: 'Discovery', runnable: true }, { id: 'finalization', number: 7, name: 'Local finalization', runnable: true }]
+        ? [{ id: 'discovery', number: 1, name: 'Discovery', runnable: true }, { id: 'finalization', number: 7, name: 'Local finalization', runnable: true }, { id: 'qdrant-export', number: 8, name: 'Qdrant export', runnable: true }]
         : url.includes('/api/setup/status')
           ? { ready: false, models: [] }
           : url.includes('/adapters/discovery/run')
@@ -73,14 +73,68 @@ describe('AdapterWorkbenchPage', () => {
 
     render(<AdapterWorkbenchPage />)
     fireEvent.click(await screen.findByRole('button', { name: 'Run Discovery (25 max)' }))
-    fireEvent.click(await screen.findByText('Optional sample selection for single-file stages 07–09'))
+    fireEvent.click(await screen.findByText('Optional sample selection for single-file stages 07 and 09'))
     fireEvent.change(screen.getByLabelText('Sample file'), { target: { value: 'clip.mp4' } })
-    fireEvent.click(screen.getByRole('button', { name: 'Run on selected sample' }))
+    fireEvent.click(screen.getAllByRole('button', { name: 'Run on selected sample' })[0])
 
     await waitFor(() => expect(vi.mocked(fetch)).toHaveBeenCalledWith(
       expect.stringContaining('/adapters/finalization/run?source_name=sample&relative_path=clip.mp4'),
       { method: 'POST' },
     ))
+    fireEvent.click(screen.getByRole('button', { name: 'Export every source item to temporary Qdrant' }))
+    await waitFor(() => expect(vi.mocked(fetch)).toHaveBeenCalledWith(
+      expect.stringContaining('/adapters/qdrant-export/run?source_name=sample'),
+      { method: 'POST' },
+    ))
+    expect(String(vi.mocked(fetch).mock.calls.at(-1)?.[0])).not.toContain('relative_path=')
+  })
+
+  it('prepares missing models and then automatically runs Stage 08', async () => {
+    let catalogRequests = 0
+    let statusRequests = 0
+    vi.mocked(fetch).mockImplementation((url: string) => Promise.resolve({
+      ok: true,
+      json: async () => url.endsWith('/adapters')
+        ? (++catalogRequests === 1
+          ? [{ id: 'discovery', number: 1, name: 'Discovery', runnable: true }, { id: 'qdrant-export', number: 8, name: 'Qdrant export', runnable: false, can_prepare: true, reason: 'CLIP weights are missing.' }]
+          : [{ id: 'discovery', number: 1, name: 'Discovery', runnable: true }, { id: 'qdrant-export', number: 8, name: 'Qdrant export', runnable: true }])
+        : url.includes('/api/setup/status')
+          ? { ready: ++statusRequests > 1, models: [
+              { id: 'clip', label: 'CLIP', size_mb: 1711, present: false, integrity_hint: '', source: 'huggingface.co/example' },
+              { id: 'rtdetr', label: 'RT-DETR', size_mb: 81, present: false, integrity_hint: '', source: 'huggingface.co/example' },
+              { id: 'facenet_pytorch', label: 'FaceNet', size_mb: 108, present: false, integrity_hint: '', source: 'github.com/example' },
+            ] }
+          : url.includes('/adapters/discovery/run')
+            ? { source: 'sample', returned: 1, has_more: false, entries: [{ name: 'clip.mp4', relative_path: 'clip.mp4', extension: '.mp4', size_bytes: 1 }], elapsed_seconds: 0.01 }
+            : url.includes('/api/setup/retry')
+              ? { status: 'retrying' }
+              : { relative_path: 'clip.mp4', qdrant_export: { store: 'disposable' }, persisted: false },
+    } as Response))
+    vi.mocked(useSetupWS).mockImplementation((connection = 0) => ({
+      models: connection > 0 ? {
+        clip: { status: 'done', error: null },
+        rtdetr: { status: 'done', error: null },
+        facenet_pytorch: { status: 'done', error: null },
+      } : null,
+      complete: connection > 0,
+      revision: connection > 0 ? 1 : 0,
+    }))
+
+    render(<AdapterWorkbenchPage />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Download prerequisites & run Stage 08 (up to 1900 MB)' }))
+
+    await waitFor(() => expect(vi.mocked(fetch)).toHaveBeenCalledWith(
+      expect.stringContaining('/api/setup/retry'), { method: 'POST' },
+    ))
+    await waitFor(() => expect(vi.mocked(fetch)).toHaveBeenCalledWith(
+      expect.stringContaining('/adapters/qdrant-export/run?source_name=sample'),
+      { method: 'POST' },
+    ))
+    const calls = vi.mocked(fetch).mock.calls.map(([url]) => String(url))
+    expect(calls.findIndex(url => url.includes('/api/setup/retry'))).toBeLessThan(
+      calls.findIndex(url => url.includes('/adapters/qdrant-export/run')),
+    )
+    expect(calls.find(url => url.includes('/adapters/qdrant-export/run'))).not.toContain('relative_path=')
   })
 
   it('shows the model loader when Stage 05 is unavailable', async () => {
