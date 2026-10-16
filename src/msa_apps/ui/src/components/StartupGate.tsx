@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { Loader2, Download, AlertTriangle, FolderOpen, RotateCcw, Check } from 'lucide-react'
 import { apiUrl } from '../lib/apiBase'
-import type { SetupStatus, ModelInfo } from '../api/setup'
+import { startSetup, type SetupStatus, type ModelInfo } from '../api/setup'
 import { ModelDownload } from './ModelDownload'
+import { SetupPrototype } from './SetupPrototype'
 import { SplashShell, ProgressBar, formatElapsed, DEPS_END_PCT } from './splash'
 
 /**
@@ -54,7 +55,7 @@ import { SplashShell, ProgressBar, formatElapsed, DEPS_END_PCT } from './splash'
  *     non-ok). The backend may still be coming up, so a re-poll Retry is the right first action.
  */
 
-type Phase = 'connecting' | 'provisioning' | 'starting' | 'models' | 'error' | 'ready'
+type Phase = 'connecting' | 'provisioning' | 'starting' | 'setup' | 'models' | 'error' | 'ready'
 
 /**
  * Why the gate is on the error screen — drives which recovery affordance is honest:
@@ -266,12 +267,12 @@ export function StartupGate({
                 setPhase('ready')
               } else {
                 setInitialModels(s?.models ?? [])
-                setPhase('models')
+                setPhase('setup')
               }
             } catch {
               if (cancelled) return
               setInitialModels([])
-              setPhase('models')
+              setPhase('setup')
             }
           } else if (body.status === 'error') {
             // TERMINAL: the shim called status.fail(...) and is holding this exact payload in
@@ -336,6 +337,17 @@ export function StartupGate({
   }, [retryNonce, pollIntervalMs, connectTimeoutMs, progressTimeoutMs, provStalledMs])
 
   if (phase === 'ready') return <>{children}</>
+
+  if (phase === 'setup') {
+    return (
+      <SetupPrototype
+        onStart={async () => {
+          await startSetup()
+          setPhase('models')
+        }}
+      />
+    )
+  }
 
   // First-run model download — same splash card, the bar continues 60→100 (spec §S-2).
   if (phase === 'models') {

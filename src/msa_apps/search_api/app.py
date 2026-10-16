@@ -243,21 +243,14 @@ async def _lifespan(app: FastAPI):
                 raise
             except Exception as _exc:
                 logger.warning("Instance lock unavailable: {}", _exc)
-        # Kick off model setup in the background immediately at startup.
-        # This runs regardless of whether any client connects, so headless
-        # deployments get the same first-launch behaviour as the browser UI.
+        # Setup downloads begin only after the user confirms through /api/setup/start.
         _startup_cfg = getattr(app.state, "S", None)
         if _startup_cfg is None:
             try:
                 from msa_settings import load_config as _lc
                 _startup_cfg = _lc()
             except Exception as _exc:
-                logger.warning("Could not resolve config for model setup: {}", _exc)
-        _models_dir = getattr(_startup_cfg, 'models_dir', None) if _startup_cfg is not None else None
-        if _models_dir is not None and not _search_browse_read_only():
-            _setup_models.get_manager().start_if_needed(_models_dir)
-        elif _search_browse_read_only():
-            logger.info("Search/Browse read-only mode: skipping automatic model setup")
+                logger.warning("Could not resolve config for startup: {}", _exc)
         # Reranker event ledger (ADR-012/013): build a best-effort LedgerWriter onto
         # app.state when msa_ranker is installed and event_logging is on. Absent package
         # or any failure → no writer → MSA behaves exactly as today.
@@ -3489,6 +3482,15 @@ def download_commercial_model(
     return {"status": "preparing", "model_id": model_id}
 
 
+@app.post("/api/setup/start", status_code=202)
+def start_setup(request: Request):
+    """Start first-launch setup after explicit user confirmation."""
+    if _search_browse_read_only():
+        raise HTTPException(status_code=409, detail="Setup downloads are disabled in Search/Browse read-only mode.")
+    _setup_models.get_manager().start_if_needed(_get_config(request).models_dir)
+    return {"status": "preparing"}
+
+
 @app.post("/api/setup/retry", status_code=202)
 def retry_setup(request: Request):
     """Re-trigger the first-launch model downloads: reset any errored models to pending and restart
@@ -3522,8 +3524,8 @@ async def ws_setup(websocket: WebSocket):
     """Stream first-launch model download progress.
 
     Connects → polls SetupManager state every second → sends {type:"complete"}
-    when all models are done or errored. The download itself is initiated at
-    API startup (lifespan); this handler is a pure progress subscriber and must
+    when all models are done or errored. The download itself is initiated by
+    /api/setup/start; this handler is a pure progress subscriber and must
     not call start_if_needed() — a reconnecting client must not race with an
     in-progress download.
     """

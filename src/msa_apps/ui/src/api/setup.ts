@@ -78,6 +78,11 @@ export async function fetchSetupStatus(): Promise<SetupStatus> {
  * worker). The setup screen's Retry button calls this BEFORE reloading — a plain reload only
  * re-subscribes to the manager's held complete/error state and never restarts a failed download.
  */
+export async function startSetup(): Promise<void> {
+  const res = await fetch(apiUrl('/api/setup/start'), { method: 'POST' })
+  if (!res.ok) throw new Error(`setup/start ${res.status}`)
+}
+
 export async function retrySetup(): Promise<void> {
   const res = await fetch(apiUrl('/api/setup/retry'), { method: 'POST' })
   if (!res.ok) throw new Error(`setup/retry ${res.status}`)

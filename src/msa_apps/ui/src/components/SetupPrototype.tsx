@@ -7,9 +7,11 @@ type View = 'prompt' | 'progress' | 'done' | 'later'
 const PREVIEW_DURATION_MS = 16_000
 const ESTIMATED_SETUP_MINUTES = 8
 
-export function SetupPrototype() {
+export function SetupPrototype({ onStart }: { onStart?: () => Promise<void> }) {
   const [view, setView] = useState<View>('prompt')
   const [progress, setProgress] = useState(0)
+  const [starting, setStarting] = useState(false)
+  const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
     if (view !== 'progress') return
@@ -31,6 +33,21 @@ export function SetupPrototype() {
     const url = new URL(window.location.href)
     url.searchParams.delete('setup-prototype')
     window.location.assign(`${url.pathname}${url.search}${url.hash}`)
+  }
+
+  const startSetup = async () => {
+    if (!onStart) {
+      setView('progress')
+      return
+    }
+    setStarting(true)
+    setError(null)
+    try {
+      await onStart()
+    } catch {
+      setError('Setup could not start. Please try again.')
+      setStarting(false)
+    }
   }
 
   if (view === 'progress') {
@@ -92,12 +109,14 @@ export function SetupPrototype() {
           <p className="mt-0.5 text-xs text-slate-500">Please keep the app open until setup finishes.</p>
         </div>
       </div>
+      {error && <p className="mt-4 text-sm text-red-400">{error}</p>}
       <button
         type="button"
-        onClick={() => setView('progress')}
-        className="mt-6 w-full rounded-xl bg-sky-500 px-4 py-2.5 text-sm font-medium text-white hover:bg-sky-400"
+        onClick={() => void startSetup()}
+        disabled={starting}
+        className="mt-6 w-full rounded-xl bg-sky-500 px-4 py-2.5 text-sm font-medium text-white hover:bg-sky-400 disabled:cursor-wait disabled:opacity-60"
       >
-        Set up now
+        {starting ? 'Starting setup…' : 'Set up now'}
       </button>
       <button
         type="button"
@@ -106,9 +125,11 @@ export function SetupPrototype() {
       >
         Set up later
       </button>
-      <p className="mt-4 text-center text-[11px] text-slate-600">
-        Prototype preview: progress is accelerated.
-      </p>
+      {!onStart && (
+        <p className="mt-4 text-center text-[11px] text-slate-600">
+          Prototype preview: progress is accelerated.
+        </p>
+      )}
     </SplashShell>
   )
 }
