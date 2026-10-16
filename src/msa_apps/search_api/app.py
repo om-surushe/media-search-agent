@@ -2697,7 +2697,7 @@ def _rescue_seq_trailing_comments(parent_map, seq_key: str) -> None:
         existing[1] = []
     existing[1] = rescued + existing[1]
     parent_map.ca.items[next_key] = existing
-from pydantic import BaseModel as _BaseModel
+from pydantic import BaseModel as _BaseModel, Field as _Field
 
 
 def _require_writable(source) -> None:
@@ -2721,8 +2721,8 @@ class _SourceAdd(_BaseModel):
 class _IndexerStart(_BaseModel):
     processing_order: Literal["default", "fastest", "newest", "oldest"] = "default"
     object_detection_enabled: Optional[bool] = None
-    image_captions_enabled: bool = False
-    video_scene_captions_enabled: bool = False
+    image_captions_enabled: Optional[bool] = None
+    video_scene_captions_enabled: Optional[bool] = None
 
 
 class _IndexerSettings(_BaseModel):
@@ -2823,13 +2823,20 @@ def indexer_start(request: Request, body: Optional[_IndexerStart] = None):
     if _search_browse_read_only():
         raise HTTPException(status_code=409, detail="Indexing is disabled in Search/Browse read-only mode.")
     try:
+        config = _get_config(request)
         result = indexer_manager.start(
             config_path=_config_path(request),
             venv_bin=_venv_bin(),
             processing_order=body.processing_order if body else "default",
             object_detection_enabled=body.object_detection_enabled if body else None,
-            image_captions_enabled=body.image_captions_enabled if body else False,
-            video_scene_captions_enabled=body.video_scene_captions_enabled if body else False,
+            image_captions_enabled=(
+                body.image_captions_enabled if body and body.image_captions_enabled is not None
+                else bool(getattr(config, "image_captions_enabled", False))
+            ),
+            video_scene_captions_enabled=(
+                body.video_scene_captions_enabled if body and body.video_scene_captions_enabled is not None
+                else bool(getattr(config, "video_scene_captions_enabled", False))
+            ),
         )
         return result
     except ValueError as e:
@@ -3304,17 +3311,25 @@ def serve_log(name: str, request: Request, tail: int = 2000):
 
 # Canonical defaults — used to show reset targets in the UI
 _MODEL_CONFIG_DEFAULTS: dict = {
-    "batch_size": 32,
-    "enable_object_detection": "auto",
-    "object_detector_backend": "rtdetr",
-    "object_model": "PekingU/rtdetr_r18vd",
+    "enable_object_detection": True,
     "object_confidence_threshold": 0.35,
+    "enable_video_object_detection": True,
     "enable_face_recognition": True,
-    "face_recognizer_backend": "facenet_pytorch",
-    "face_model": "vggface2",
     "face_confidence_threshold": 0.95,
     "face_min_size": 60,
-    "face_store_metadata": True,
+    "enable_video_shot_detection": True,
+    "enable_speech_transcription": True,
+    "shot_detection_threshold": 30.0,
+    "min_shot_length_frames": 15,
+    "keyframes_per_shot": 3,
+    "adaptive_video_keyframes_enabled": True,
+    "adaptive_keyframe_sensitivity_percent": 8.0,
+    "long_shot_coverage_enabled": True,
+    "long_shot_min_duration_seconds": 30.0,
+    "long_shot_interval_seconds": 10.0,
+    "video_frame_cache_budget_mb": 1024,
+    "image_captions_enabled": True,
+    "video_scene_captions_enabled": True,
 }
 
 # Keys that are read-only — never written by PATCH
@@ -3322,17 +3337,25 @@ _MODEL_CONFIG_READONLY = {"device", "model_name", "pretrained"}
 
 
 class _ModelConfigPatch(_BaseModel):
-    batch_size: Optional[int] = None
-    enable_object_detection: Optional[str | bool] = None
-    object_detector_backend: Optional[str] = None
-    object_model: Optional[str] = None
-    object_confidence_threshold: Optional[float] = None
+    enable_object_detection: Optional[Literal["auto"] | bool] = None
+    object_confidence_threshold: Optional[float] = _Field(None, ge=0, le=1)
+    enable_video_object_detection: Optional[bool] = None
     enable_face_recognition: Optional[bool] = None
-    face_recognizer_backend: Optional[str] = None
-    face_model: Optional[str] = None
-    face_confidence_threshold: Optional[float] = None
-    face_min_size: Optional[int] = None
-    face_store_metadata: Optional[bool] = None
+    face_confidence_threshold: Optional[float] = _Field(None, ge=0, le=1)
+    face_min_size: Optional[int] = _Field(None, ge=1, le=500)
+    enable_video_shot_detection: Optional[bool] = None
+    enable_speech_transcription: Optional[bool] = None
+    shot_detection_threshold: Optional[float] = _Field(None, gt=0, le=100)
+    min_shot_length_frames: Optional[int] = _Field(None, ge=1, le=300)
+    keyframes_per_shot: Optional[int] = _Field(None, ge=1, le=3)
+    adaptive_video_keyframes_enabled: Optional[bool] = None
+    adaptive_keyframe_sensitivity_percent: Optional[float] = _Field(None, gt=0, le=100)
+    long_shot_coverage_enabled: Optional[bool] = None
+    long_shot_min_duration_seconds: Optional[float] = _Field(None, gt=0, le=3600)
+    long_shot_interval_seconds: Optional[float] = _Field(None, gt=0, le=3600)
+    video_frame_cache_budget_mb: Optional[int] = _Field(None, ge=128, le=16384)
+    image_captions_enabled: Optional[bool] = None
+    video_scene_captions_enabled: Optional[bool] = None
 
 
 @app.get("/config/model")
@@ -3359,45 +3382,38 @@ def config_model_patch(body: _ModelConfigPatch, request: Request):
     updates = {k: v for k, v in body.model_dump().items() if v is not None}
     if not updates:
         raise HTTPException(status_code=400, detail="No fields provided")
-    config_file = _config_path(request)
+    config_path = Path(_config_path(request))
+    temp_path: Path | None = None
     try:
         ry = _ryaml()
-        with open(config_file, encoding="utf-8-sig") as f:
-            data = ry.load(f) or {}
+        with config_path.open(encoding="utf-8-sig") as stream:
+            data = ry.load(stream) or {}
         for key, value in updates.items():
             if key not in _MODEL_CONFIG_READONLY:
                 data[key] = value
-        with open(config_file, "w", encoding="utf-8") as f:
-            ry.dump(data, f)
-        # Refresh app.state.S so subsequent requests see the new values
+        fd, temp_name = tempfile.mkstemp(prefix=".config-", dir=config_path.parent)
+        temp_path = Path(temp_name)
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            ry.dump(data, stream)
+        os.replace(temp_path, config_path)
+
+        # Reload the exact config the UI edited so later indexing uses saved settings.
         from msa_settings import load_config as _lc
-        try:
-            _lc.cache_clear()  # type: ignore[attr-defined]
-        except AttributeError:
-            pass
-        try:
-            new_cfg = _lc()
-            setattr(request.app.state, "S", new_cfg)
-            setattr(request.app.state, "config", new_cfg)
-        except Exception:
-            pass
+        _lc.cache_clear()  # type: ignore[attr-defined]
+        new_cfg = _lc(str(config_path))
+        setattr(request.app.state, "S", new_cfg)
+        setattr(request.app.state, "config", new_cfg)
         return {"updated": list(updates.keys())}
-    except Exception as e:
-        logger.error(f"PATCH /config/model failed: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Internal server error")
+    except Exception as exc:
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)
+        logger.error("PATCH /config/model failed: {}", type(exc).__name__)
+        raise HTTPException(status_code=500, detail="Could not save processing settings.") from None
 
 
 # ── Setup: first-launch model download ───────────────────────────────────────
 
 from msa_apps.search_api import setup_models as _setup_models  # noqa: E402
-from msa_indexer.models.commercial_registry import (
-    MODEL_BY_ID as _COMMERCIAL_MODEL_BY_ID,
-    model_catalog as _model_catalog,
-)
-
-
-class _CommercialModelDownload(_BaseModel):
-    confirm_experimental: bool = False
 
 
 @app.get("/api/setup/status")
@@ -3450,38 +3466,6 @@ def get_setup_status(request: Request):
         "ready": all(present[model_id] for model_id in _setup_models.DEFAULT_SETUP_MODEL_IDS),
         "models": models_out, "read_only_mode": False,
     }
-
-
-@app.get("/api/models/catalog")
-def get_models_catalog(request: Request):
-    """List pinned local candidates, app-owned paths, clearance notes and hardware fit."""
-    config = _get_config(request)
-    manager = _setup_models.get_manager()
-    return _model_catalog(config.models_dir, manager.get_status())
-
-
-@app.post("/api/models/{model_id}/download", status_code=202)
-def download_commercial_model(
-    model_id: str, body: _CommercialModelDownload, request: Request,
-):
-    """Download one pinned candidate after explicit acknowledgment of unresolved clearance."""
-    if _search_browse_read_only():
-        raise HTTPException(status_code=409, detail="Model downloads are disabled in Search/Browse read-only mode.")
-    spec = _COMMERCIAL_MODEL_BY_ID.get(model_id)
-    if spec is None:
-        raise HTTPException(status_code=404, detail="Unknown model catalog ID.")
-    if spec.download_kind == "unavailable":
-        raise HTTPException(status_code=409, detail=spec.access_note or "No local checkpoint download is available.")
-    if spec.clearance != "cleared" and not body.confirm_experimental:
-        raise HTTPException(
-            status_code=409,
-            detail="This checkpoint is not commercially cleared. Confirm experimental evaluation to download it.",
-        )
-    try:
-        _setup_models.get_manager().start_if_needed(_get_config(request).models_dir, {model_id})
-    except RuntimeError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    return {"status": "preparing", "model_id": model_id}
 
 
 @app.get("/api/setup/job")

@@ -63,27 +63,12 @@ const STAT_ITEMS: { key: 'images' | 'videos' | 'faces' | 'people'; label: string
   { key: 'people',  label: 'People',  Icon: Users  },
 ]
 
-type IndexerOptions = {
-  processingOrder: ProcessingOrder
-  objectDetectionOverride: boolean | null
-  imageCaptionsEnabled: boolean
-  videoSceneCaptionsEnabled: boolean
-}
+type IndexerOptions = { processingOrder: ProcessingOrder }
 
-const DEFAULT_INDEXER_OPTIONS: IndexerOptions = {
-  processingOrder: 'default',
-  objectDetectionOverride: null,
-  imageCaptionsEnabled: false,
-  videoSceneCaptionsEnabled: false,
-}
+const DEFAULT_INDEXER_OPTIONS: IndexerOptions = { processingOrder: 'default' }
 
 function toSettingsUpdate(options: IndexerOptions): IndexerSettingsUpdate {
-  return {
-    processing_order: options.processingOrder,
-    object_detection_enabled: options.objectDetectionOverride,
-    image_captions_enabled: options.imageCaptionsEnabled,
-    video_scene_captions_enabled: options.videoSceneCaptionsEnabled,
-  }
+  return { processing_order: options.processingOrder }
 }
 
 export function IndexerPage() {
@@ -125,19 +110,13 @@ export function IndexerPage() {
 
   const saveSettingsMutation = useMutation({ mutationFn: saveIndexerSettings })
   const startMutation = useMutation({
-    mutationFn: (runOptions: { processingOrder: ProcessingOrder; objectDetectionEnabled: boolean; imageCaptionsEnabled: boolean; videoSceneCaptionsEnabled: boolean }) =>
-      startIndexer(runOptions.processingOrder, runOptions.objectDetectionEnabled, runOptions.imageCaptionsEnabled, runOptions.videoSceneCaptionsEnabled),
+    mutationFn: (processingOrder: ProcessingOrder) => startIndexer(processingOrder),
   })
   const stopMutation  = useMutation({ mutationFn: stopIndexer  })
 
   useEffect(() => {
     if (indexerSettings && !settingsLoadedRef.current) {
-      const loadedOptions: IndexerOptions = {
-        processingOrder: indexerSettings.processing_order,
-        objectDetectionOverride: indexerSettings.object_detection_enabled,
-        imageCaptionsEnabled: indexerSettings.image_captions_enabled,
-        videoSceneCaptionsEnabled: indexerSettings.video_scene_captions_enabled,
-      }
+      const loadedOptions: IndexerOptions = { processingOrder: indexerSettings.processing_order }
       optionsRef.current = loadedOptions
       setOptions(loadedOptions)
       settingsLoadedRef.current = true
@@ -175,13 +154,9 @@ export function IndexerPage() {
   const isRunning = status === 'running'
   const readOnlyMode = statusInfo?.read_only_mode ?? apiStatus?.read_only_mode ?? false
   const settingsReady = settingsLoaded || settingsLoadError
-  const objectDetectionEnabled = options.objectDetectionOverride ?? modelConfig?.effective?.object_detection_enabled ?? false
-  const detectionControlDisabled = isRunning || startMutation.isPending || startMutation.isSuccess || modelConfigLoading || modelConfigError || !settingsReady
-  const captionControlDisabled = isRunning || startMutation.isPending || startMutation.isSuccess || !settingsReady
   const imageCaptionCapability = indexerSettings?.capabilities.image_captions
   const videoCaptionCapability = indexerSettings?.capabilities.video_scene_captions
-  const runImageCaptions = options.imageCaptionsEnabled && Boolean(imageCaptionCapability?.available)
-  const runVideoCaptions = options.videoSceneCaptionsEnabled && Boolean(videoCaptionCapability?.available)
+  const captionsRequested = Boolean(modelConfig?.editable?.image_captions_enabled || modelConfig?.editable?.video_scene_captions_enabled)
   const runOrder = statusInfo?.summary?.processing_order
 
   useEffect(() => {
@@ -299,17 +274,6 @@ export function IndexerPage() {
             </select>
           </label>
 
-          <label className="flex items-center gap-2 text-xs text-zinc-600 dark:text-zinc-300">
-            <input
-              type="checkbox"
-              aria-label="Object Detection"
-              checked={objectDetectionEnabled}
-              disabled={detectionControlDisabled}
-              onChange={event => updateOptions({ objectDetectionOverride: event.target.checked })}
-            />
-            Object Detection
-          </label>
-
           {/* Action button */}
           {isRunning ? (
             <button
@@ -322,12 +286,7 @@ export function IndexerPage() {
             </button>
           ) : (
             <button
-              onClick={() => startMutation.mutate({
-                processingOrder: options.processingOrder,
-                objectDetectionEnabled,
-                imageCaptionsEnabled: runImageCaptions,
-                videoSceneCaptionsEnabled: runVideoCaptions,
-              })}
+              onClick={() => startMutation.mutate(options.processingOrder)}
               disabled={!hasSources || !settingsReady || modelConfigLoading || modelConfigError || startMutation.isPending || (startMutation.isSuccess && !isRunning)}
               className="flex items-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-sm rounded-md transition-colors disabled:opacity-50"
             >
@@ -338,43 +297,11 @@ export function IndexerPage() {
         </div>
 
         <div className="text-xs text-zinc-500 dark:text-zinc-400">
-          Indexer options are saved app-wide and used for future runs.
+          Extraction options are configured in Settings and used for future runs.
         </div>
-        <div className="space-y-1">
-          <label className="flex items-center gap-2 text-sm text-zinc-700 dark:text-zinc-200">
-            <input
-              type="checkbox"
-              aria-label="AI Image Captions"
-              checked={options.imageCaptionsEnabled}
-              disabled={captionControlDisabled || !imageCaptionCapability?.available}
-              onChange={event => updateOptions({ imageCaptionsEnabled: event.target.checked })}
-            />
-            AI Image Captions
-          </label>
-          <div className="pl-6 text-xs text-zinc-500 dark:text-zinc-400">
-            Offline BLIP base captioning on CPU for photos and video keyframes. Completed captions are skipped; inference runs sequentially.
-          </div>
-          <label className="flex items-center gap-2 text-sm text-zinc-700 dark:text-zinc-200">
-            <input
-              type="checkbox"
-              aria-label="AI Video Scene Captions"
-              checked={options.videoSceneCaptionsEnabled}
-              disabled={captionControlDisabled || !videoCaptionCapability?.available}
-              onChange={event => updateOptions({ videoSceneCaptionsEnabled: event.target.checked })}
-            />
-            AI Video Scene Captions
-          </label>
-          <div className="pl-6 text-xs text-zinc-500 dark:text-zinc-400">
-            Caption existing video keyframes offline. Completed scenes are skipped; frames are captioned sequentially.
-          </div>
-        </div>
-        {settingsReady && (!imageCaptionCapability?.available || !videoCaptionCapability?.available) && (
+        {settingsReady && captionsRequested && (!imageCaptionCapability?.available || !videoCaptionCapability?.available) && (
           <div role="status" className="text-xs text-amber-700 dark:text-amber-300">
-            Captions unavailable: {[imageCaptionCapability, videoCaptionCapability]
-              .filter(capability => capability && !capability.available)
-              .map(capability => capability!.reason)
-              .filter((reason, index, reasons) => reason && reasons.indexOf(reason) === index)
-              .join(' ') || 'the runtime capability could not be checked.'} Use the <a className="underline" href="/adapters">Adapter Workbench</a> to prepare the pinned model.
+            Caption processing is not ready yet. Complete setup before starting an indexing run.
           </div>
         )}
         {settingsLoadError && (
@@ -384,12 +311,12 @@ export function IndexerPage() {
         )}
         {saveSettingsMutation.isError && (
           <div role="alert" className="text-xs text-red-500 dark:text-red-400">
-            Could not save Indexer options. The current run can still use your selection.
+            Could not save processing order.
           </div>
         )}
         {modelConfigError && (
           <div role="alert" className="text-xs text-red-500 dark:text-red-400">
-            Could not load the effective Object Detection setting.
+            Could not load extraction settings.
           </div>
         )}
 

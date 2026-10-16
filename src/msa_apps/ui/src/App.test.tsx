@@ -7,6 +7,8 @@ import { queryClient } from './lib/queryClient'
 // their own tests). Stub the default route so revealing MainApp doesn't drag in BrowsePage's data
 // fetching, and stub the WS-backed hooks (jsdom has no WebSocket).
 vi.mock('@/pages/BrowsePage', () => ({ BrowsePage: () => <div>Browse</div> }))
+vi.mock('@/pages/IndexerPage', () => ({ IndexerPage: () => <div>Indexer destination</div> }))
+vi.mock('@/pages/SettingsPage', () => ({ SettingsPage: () => <div>Settings destination</div> }))
 vi.mock('./hooks/useIndexerStatus', () => ({
   useIndexerStatus: vi.fn(() => ({ status: null, connected: false })),
   useIndexerRunning: vi.fn(() => false),
@@ -78,6 +80,22 @@ describe('App launch flow', () => {
     expect(screen.getByLabelText(/media search agent launch splash/i)).toBeInTheDocument()
     // App strips ?launch on mount via history.replaceState.
     expect(window.location.search).toBe('')
+    expect(screen.queryByRole('link', { name: 'Keyframes' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: 'Adapter Workbench' })).not.toBeInTheDocument()
+  })
+
+  it.each([
+    ['/keyframes', '/indexer', 'Indexer destination'],
+    ['/adapters', '/settings', 'Settings destination'],
+  ])('redirects removed page %s to %s', async (from, to, destination) => {
+    window.history.replaceState({}, '', from)
+    vi.stubGlobal('fetch', routedFetch(() => ({ ready: true, job: null, read_only_mode: false })))
+
+    render(<App />)
+    await settleLaunchChain()
+
+    expect(screen.getByText(destination)).toBeInTheDocument()
+    expect(window.location.pathname).toBe(to)
   })
 
   it('dismisses the launch banner', async () => {

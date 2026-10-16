@@ -79,7 +79,7 @@ is embedded in the API process. The indexer is invoked as a job by the API or
 CLI. EXIF, video metadata, timestamps, GPS, thumbnails, shot/keyframe extraction,
 object labels, faces, transcripts, and captions are processing stages inside
 that job; they are not independent servers. Captioning starts its isolated CPU
-Transformers worker only when requested. Run the API and indexer commands above to see their
+Transformers worker only when enabled in Settings. Run the API and indexer commands above to see their
 logs rather than starting fictitious per-stage daemons.
 
 ## Model files
@@ -87,18 +87,16 @@ logs rather than starting fictitious per-stage daemons.
 Model weights are runtime assets, not source code. They are excluded by the
 root `.gitignore` rule `/models/` and must not be committed. With `MSA_DEV=1`,
 the checked-in development config resolves `models_dir: models` to the ignored
-repository `models/` folder. Core model setup downloads CLIP, RT-DETR, and
-facenet-pytorch weights there when the backend starts. Whisper base is fetched
-there on first transcription. The optional BLIP caption checkpoint is stored
-under `<models_dir>/captioning`, pinned to a Hub revision, and verified against
-its SHA-256 before Stage 09 uses it. Its download is an explicit action and is
-not part of the app's automatic core-model setup.
+repository `models/` folder. User-confirmed first-launch setup downloads CLIP,
+RT-DETR, FaceNet, and the pinned BLIP caption checkpoint there. Whisper base is
+fetched lazily on the first audio-bearing video. The ignored `models/` folder
+may contain these local weights; Git only carries IDs, revisions, checksums,
+and setup code.
 
-Each developer must provision weights locally; Git only carries the model IDs,
-versions/revisions, checksums, and setup code. The ignored `models/` folder may
-contain CLIP, RT-DETR, FaceNet, Whisper base, and the optional BLIP snapshot.
-New checkouts should run the backend to provision core weights; caption weights
-are fetched and verified from the Stage 09 Workbench setup action.
+New checkouts should complete the setup prompt to provision core weights.
+Maximum Detail enables all available extraction options by default; Balanced
+and Fast reduce processing time and storage by disabling optional stages. See
+[CONFIGURATION.md](CONFIGURATION.md) for defaults and preset behavior.
 
 ## Logs and stop
 

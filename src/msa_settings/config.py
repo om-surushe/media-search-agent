@@ -41,7 +41,7 @@ class IndexerConfig:
     model_version: str = "clip-2025-10"
     num_workers: int = 4
     # Face recognition
-    enable_face_recognition: bool = False
+    enable_face_recognition: bool = True
     face_recognizer_backend: str = "facenet_pytorch"
     face_model: str = "vggface2"
     face_confidence_threshold: float = 0.95
@@ -50,20 +50,21 @@ class IndexerConfig:
     face_clustering_enabled: bool = False
     face_cluster_min_size: int = 3
     face_cluster_similarity: float = 0.6
-    # Object detection
-    # enable_object_detection: "auto" enables on GPU only; True forces on (even CPU); False disables.
-    enable_object_detection: str | bool = "auto"
+    # Object detection. Set to "auto" to skip detection on CPU.
+    enable_object_detection: str | bool = True
     object_detector_backend: str = "rtdetr"
     object_model: str = "PekingU/rtdetr_r18vd"
     object_confidence_threshold: float = 0.35
-    enable_video_object_detection: bool = False
+    enable_video_object_detection: bool = True
     video_detection_max_frames: int = 10
     # Video shot detection and local speech recognition
-    enable_video_shot_detection: bool = False
-    enable_speech_transcription: bool = False
+    enable_video_shot_detection: bool = True
+    enable_speech_transcription: bool = True
     shot_detection_threshold: float = 30.0
     min_shot_length_frames: int = 15
-    keyframes_per_shot: int = 1
+    keyframes_per_shot: int = 3
+    image_captions_enabled: bool = True
+    video_scene_captions_enabled: bool = True
     # Advanced
     ann_method: str = "ivfflat"
     ann_lists: int = 100
@@ -150,9 +151,9 @@ class Config:
     models_dir: Path = Path("models")
     video_frame_cache_dir: Path = Path("video_frames")
     video_frame_cache_budget_mb: int = 1024
-    adaptive_video_keyframes_enabled: bool = False
+    adaptive_video_keyframes_enabled: bool = True
     adaptive_keyframe_sensitivity_percent: float = 8.0
-    long_shot_coverage_enabled: bool = False
+    long_shot_coverage_enabled: bool = True
     long_shot_min_duration_seconds: float = 30.0
     long_shot_interval_seconds: float = 10.0
     log_dir: Path = Path("logs")
@@ -163,7 +164,7 @@ class Config:
     device: str = "cpu"
     model_version: str = "clip-2025-10"
     num_workers: int = 4
-    enable_face_recognition: bool = False
+    enable_face_recognition: bool = True
     face_recognizer_backend: str = "facenet_pytorch"
     face_model: str = "vggface2"
     face_confidence_threshold: float = 0.95
@@ -172,17 +173,19 @@ class Config:
     face_clustering_enabled: bool = False
     face_cluster_min_size: int = 3
     face_cluster_similarity: float = 0.6
-    enable_object_detection: str | bool = "auto"
+    enable_object_detection: str | bool = True
     object_detector_backend: str = "rtdetr"
     object_model: str = "PekingU/rtdetr_r18vd"
     object_confidence_threshold: float = 0.35
-    enable_video_object_detection: bool = False
+    enable_video_object_detection: bool = True
     video_detection_max_frames: int = 10
-    enable_video_shot_detection: bool = False
-    enable_speech_transcription: bool = False
+    enable_video_shot_detection: bool = True
+    enable_speech_transcription: bool = True
     shot_detection_threshold: float = 30.0
     min_shot_length_frames: int = 15
-    keyframes_per_shot: int = 1
+    keyframes_per_shot: int = 3
+    image_captions_enabled: bool = True
+    video_scene_captions_enabled: bool = True
     ann_method: str = "ivfflat"
     ann_lists: int = 100
     # Reprocessing flags (set via CLI, not config file)

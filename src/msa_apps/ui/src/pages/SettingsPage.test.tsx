@@ -7,32 +7,51 @@ import { SettingsPage } from './SettingsPage'
 // ── API mock ───────────────────────────────────────────────────────────────
 
 const modelConfigData = {
-  readonly: { device: 'cuda', model_name: 'ViT-L-14', pretrained: 'openai' },
   editable: {
-    batch_size: 32,
-    enable_object_detection: 'auto' as const,
-    object_model: 'PekingU/rtdetr_r18vd',
+    enable_object_detection: true,
     object_confidence_threshold: 0.35,
+    enable_video_object_detection: true,
     enable_face_recognition: true,
-    face_recognizer_backend: 'facenet_pytorch',
-    face_model: 'vggface2',
     face_confidence_threshold: 0.95,
     face_min_size: 60,
-    face_store_metadata: true,
+    enable_video_shot_detection: true,
+    enable_speech_transcription: true,
+    shot_detection_threshold: 30,
+    min_shot_length_frames: 15,
+    keyframes_per_shot: 3,
+    adaptive_video_keyframes_enabled: true,
+    adaptive_keyframe_sensitivity_percent: 8,
+    long_shot_coverage_enabled: true,
+    long_shot_min_duration_seconds: 30,
+    long_shot_interval_seconds: 10,
+    video_frame_cache_budget_mb: 1024,
+    image_captions_enabled: true,
+    video_scene_captions_enabled: true,
   },
   defaults: {
-    batch_size: 32,
-    enable_object_detection: 'auto' as const,
-    object_model: 'PekingU/rtdetr_r18vd',
+    enable_object_detection: true,
     object_confidence_threshold: 0.35,
+    enable_video_object_detection: true,
     enable_face_recognition: true,
-    face_recognizer_backend: 'facenet_pytorch',
-    face_model: 'vggface2',
     face_confidence_threshold: 0.95,
     face_min_size: 60,
-    face_store_metadata: true,
+    enable_video_shot_detection: true,
+    enable_speech_transcription: true,
+    shot_detection_threshold: 30,
+    min_shot_length_frames: 15,
+    keyframes_per_shot: 3,
+    adaptive_video_keyframes_enabled: true,
+    adaptive_keyframe_sensitivity_percent: 8,
+    long_shot_coverage_enabled: true,
+    long_shot_min_duration_seconds: 30,
+    long_shot_interval_seconds: 10,
+    video_frame_cache_budget_mb: 1024,
+    image_captions_enabled: true,
+    video_scene_captions_enabled: true,
   },
+  effective: { object_detection_enabled: true },
 }
+
 const diagData = {
   msa_root: '/home/user/msa',
   config_file: '/home/user/msa/config.yaml',
@@ -57,21 +76,13 @@ const diagData = {
 }
 
 function mockFetch(platform = 'macos', diag: Record<string, unknown> = diagData): void {
-  vi.stubGlobal('fetch', vi.fn((url: string, opts?: RequestInit) => {
+  vi.stubGlobal('fetch', vi.fn((url: string) => {
     if (url === '/diagnostics')
       return Promise.resolve({ ok: true, json: () => Promise.resolve(diag) })
     if (url === '/platform')
       return Promise.resolve({ ok: true, json: () => Promise.resolve({ platform }) })
-    if (url === '/api/models/catalog')
-      return Promise.resolve({ ok: true, json: () => Promise.resolve({
-        hardware: { os: 'linux', architecture: 'x86_64', ram_gb: 16, cpu_count: 8, accelerator: 'cpu', hardware_recommendations_are_advisory: true },
-        models: [],
-      }) })
-    if (url === '/config/model') {
-      if (opts?.method === 'PATCH')
-        return Promise.resolve({ ok: true, json: () => Promise.resolve({ updated: ['batch_size'] }) })
+    if (url === '/config/model')
       return Promise.resolve({ ok: true, json: () => Promise.resolve(modelConfigData) })
-    }
     // DELETE / POST
     return Promise.resolve({ ok: true, json: () => Promise.resolve({ status: 'ok' }) })
   }))
@@ -222,7 +233,7 @@ describe('SettingsPage', () => {
         expect(screen.getByText(/uninstall-desktop\.sh/)).toBeInTheDocument()
       )
       // ADR-005 Tier-2 posture must be stated: user data is kept by default.
-      expect(screen.getByText(/index, config, logs and model cache are kept by default/)).toBeInTheDocument()
+      expect(screen.getByText(/app data are kept by default/)).toBeInTheDocument()
     })
 
     it('Windows instructions point at Apps and the app-data checkbox (default keep)', async () => {
@@ -242,125 +253,41 @@ describe('SettingsPage', () => {
     })
   })
 
-  describe('model configuration', () => {
-    it('renders Model Configuration heading', async () => {
-      renderPage()
-      await waitFor(() => expect(screen.getByText('Model Configuration')).toBeInTheDocument())
-    })
+  it('shows descriptive extraction settings without model names or catalogs', async () => {
+    renderPage()
+    expect(await screen.findByText('Media processing')).toBeInTheDocument()
+    expect(screen.getByText('Maximum detail')).toBeInTheDocument()
+    expect(screen.getByText('Scene-change sensitivity')).toBeInTheDocument()
+    expect(screen.getByRole('option', { name: '2 — balanced' })).toBeInTheDocument()
+    expect(screen.getByText('Describe photos')).toBeInTheDocument()
+    expect(screen.getByText('Config')).toBeInTheDocument()
+    expect(screen.queryByText(/Model Configuration|CLIP|Model catalog|Model cache|ViT-L-14/)).toBeNull()
+    expect(screen.queryByText('Models')).toBeNull()
+  })
 
-    it('shows read-only CLIP model fields', async () => {
-      renderPage()
-      await waitFor(() => screen.getByText('Model Configuration'))
-      expect(screen.getByText('ViT-L-14')).toBeInTheDocument()
-      expect(screen.getByText('cuda')).toBeInTheDocument()
-      expect(screen.getByText('openai')).toBeInTheDocument()
-    })
+  it('keeps edits as drafts until Save is clicked', async () => {
+    renderPage()
+    await screen.findByText('Media processing')
+    const toggle = screen.getAllByRole('checkbox')[0]
+    await userEvent.click(toggle)
+    expect(fetch).not.toHaveBeenCalledWith('/config/model', expect.objectContaining({ method: 'PATCH' }))
+    await userEvent.click(screen.getByRole('button', { name: 'Save settings' }))
+    await waitFor(() => expect(fetch).toHaveBeenCalledWith(
+      '/config/model',
+      expect.objectContaining({ method: 'PATCH' }),
+    ))
+  })
 
-    it('shows batch size input with current value', async () => {
-      renderPage()
-      await waitFor(() => screen.getByText('Model Configuration'))
-      const batchInput = screen.getByDisplayValue('32')
-      expect(batchInput).toBeInTheDocument()
-      expect(batchInput).toBeDisabled()
-    })
+  it('changes presets and Reset in draft without saving', async () => {
+    renderPage()
+    await screen.findByText('Media processing')
+    const balanced = screen.getByRole('button', { name: 'Balanced' })
+    await userEvent.click(balanced)
+    expect(balanced).toHaveAttribute('aria-pressed', 'true')
+    expect(fetch).not.toHaveBeenCalledWith('/config/model', expect.objectContaining({ method: 'PATCH' }))
 
-    it('reset button absent when value equals default', async () => {
-      renderPage()
-      await waitFor(() => screen.getByText('Model Configuration'))
-      // All values are at defaults in modelConfigData — no reset buttons visible
-      expect(screen.queryByTitle('Reset to default')).toBeNull()
-    })
-
-    it('reset button appears when batch_size differs from default', async () => {
-      const modified = {
-        ...modelConfigData,
-        editable: { ...modelConfigData.editable, batch_size: 16 },
-      }
-      vi.stubGlobal('fetch', vi.fn((url: string, opts?: RequestInit) => {
-        if (url === '/config/model') {
-          if (opts?.method === 'PATCH')
-            return Promise.resolve({ ok: true, json: () => Promise.resolve({ updated: ['batch_size'] }) })
-          return Promise.resolve({ ok: true, json: () => Promise.resolve(modified) })
-        }
-        if (url === '/diagnostics')
-          return Promise.resolve({ ok: true, json: () => Promise.resolve(diagData) })
-        return Promise.resolve({ ok: true, json: () => Promise.resolve({ status: 'ok' }) })
-      }))
-      renderPage()
-      await waitFor(() => screen.getByRole('button', { name: 'Edit' }))
-      await userEvent.click(screen.getByRole('button', { name: 'Edit' }))
-      await waitFor(() => screen.getByTitle('Reset to default'))
-      expect(screen.getByTitle('Reset to default')).toBeInTheDocument()
-    })
-
-    it('requires edit mode before model controls can be changed', async () => {
-      renderPage()
-      await waitFor(() => screen.getByText('Model Configuration'))
-      const toggle = screen.getAllByRole('switch')[0]
-      expect(toggle).toBeDisabled()
-      await userEvent.click(toggle)
-      expect(vi.mocked(fetch)).not.toHaveBeenCalledWith(
-        '/config/model',
-        expect.objectContaining({ method: 'PATCH' }),
-      )
-
-      await userEvent.click(screen.getByRole('button', { name: 'Edit' }))
-      expect(toggle).not.toBeDisabled()
-      await userEvent.click(toggle)
-      expect(vi.mocked(fetch)).toHaveBeenCalledWith(
-        '/config/model',
-        expect.objectContaining({ method: 'PATCH' }),
-      )
-    })
-
-    it('shows all buffalo options when backend is insightface', async () => {
-      const insightfaceConfig = {
-        ...modelConfigData,
-        editable: {
-          ...modelConfigData.editable,
-          face_recognizer_backend: 'insightface',
-          face_model: 'buffalo_l',
-        },
-      }
-      vi.stubGlobal('fetch', vi.fn((url: string, opts?: RequestInit) => {
-        if (url === '/config/model') {
-          if (opts?.method === 'PATCH')
-            return Promise.resolve({ ok: true, json: () => Promise.resolve({ updated: [] }) })
-          return Promise.resolve({ ok: true, json: () => Promise.resolve(insightfaceConfig) })
-        }
-        if (url === '/diagnostics')
-          return Promise.resolve({ ok: true, json: () => Promise.resolve(diagData) })
-        return Promise.resolve({ ok: true, json: () => Promise.resolve({ status: 'ok' }) })
-      }))
-      renderPage()
-      await waitFor(() => screen.getByText('Model Configuration'))
-      expect(screen.getByRole('option', { name: 'buffalo_s' })).toBeInTheDocument()
-      expect(screen.getByRole('option', { name: 'buffalo_l' })).toBeInTheDocument()
-      expect(screen.getByRole('option', { name: 'antelopev2' })).toBeInTheDocument()
-    })
-
-    it('renders unknown face_model as fallback option and keeps dropdown enabled in edit mode', async () => {
-      const staleConfig = {
-        ...modelConfigData,
-        editable: { ...modelConfigData.editable, face_model: 'unknown_xyz' },
-      }
-      vi.stubGlobal('fetch', vi.fn((url: string, opts?: RequestInit) => {
-        if (url === '/config/model') {
-          if (opts?.method === 'PATCH')
-            return Promise.resolve({ ok: true, json: () => Promise.resolve({ updated: [] }) })
-          return Promise.resolve({ ok: true, json: () => Promise.resolve(staleConfig) })
-        }
-        if (url === '/diagnostics')
-          return Promise.resolve({ ok: true, json: () => Promise.resolve(diagData) })
-        return Promise.resolve({ ok: true, json: () => Promise.resolve({ status: 'ok' }) })
-      }))
-      renderPage()
-      await waitFor(() => screen.getByRole('button', { name: 'Edit' }))
-      expect(screen.getByRole('option', { name: 'vggface2' })).toBeInTheDocument()
-      expect(screen.getByRole('option', { name: 'unknown_xyz' })).toBeInTheDocument()
-      await userEvent.click(screen.getByRole('button', { name: 'Edit' }))
-      const faceModelSelect = screen.getByDisplayValue('unknown_xyz')
-      expect(faceModelSelect).not.toBeDisabled()
-    })
+    await userEvent.click(screen.getByRole('button', { name: 'Reset to Maximum detail' }))
+    expect(screen.getByRole('button', { name: 'Maximum detail' })).toHaveAttribute('aria-pressed', 'true')
+    expect(fetch).not.toHaveBeenCalledWith('/config/model', expect.objectContaining({ method: 'PATCH' }))
   })
 })

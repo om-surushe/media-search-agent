@@ -1,6 +1,8 @@
-# Adapter Workbench
+# Adapter Workbench API
 
-The workbench operates on one enabled configured source. Stage 01 returns a
+The Adapter Workbench page has been removed from the app UI; its local API and
+adapter implementations remain available for development and integrations.
+The API operates on one enabled configured source. Stage 01 returns a
 read-only sample of at most 25 media names. Stages 02 and 03 process every
 supported media file recursively under the configured source; they return
 bounded result details and never persist to SQLite. Stage 04 transcribes all
@@ -8,17 +10,14 @@ videos in the configured source only when Whisper and its verified base
 checkpoint are already available; it never downloads or persists transcripts.
 Stage 05 processes every image in the configured source when the required local
 runtimes and verified model weights are available; it uses disposable storage,
-returns bounded details, and persists nothing. The page lists model presence and offers a button to start the app-managed
-verified downloads; live model states and errors appear in the setup log. The
-preview itself remains offline. Settings links to the configured model and
-detector options. Stage 09 uses the CPU PyTorch/Transformers runtime and a pinned local BLIP checkpoint. The API confines file operations
+returns bounded details, and persists nothing. The API confines file operations
 to the configured root, rejects traversal/escaping symlinks, and never returns
-absolute paths. Whole-source identity hashing can take time, so the UI confirms
-before starting it.
+absolute paths. Stage 09 uses the CPU PyTorch/Transformers runtime and a pinned
+local BLIP checkpoint.
 
 ## Current stage boundaries
 
-| Stage | Workbench behavior | Boundary |
+| Stage | API behavior | Boundary |
 |---|---|---|
 | 01 Discovery | Runnable; bounded, read-only sample | Enumerates supported media only. |
 | 02 Identity | Runnable; hashes the whole configured source | Uses SHA-256 and file stats for every media file; returns at most 25 result details and intentionally does not read or modify live SQLite fingerprints. |

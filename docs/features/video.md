@@ -11,8 +11,8 @@ For each video the indexer:
 1. **Detects shots** with PySceneDetect (content-aware boundary detection).
    A 30-second clip with a few cuts becomes, say, 4 shots; a single
    continuous take stays as one shot.
-2. **Picks keyframes per shot.** By default one representative frame per
-   shot — configurable up to 3 (start / middle / end) in
+2. **Picks keyframes per shot.** Maximum Detail selects up to three
+   representatives (start / middle / end) per shot; Balanced and Fast use fewer. See
    [`config.yaml`](../CONFIGURATION.md#video-shot-detection).
 3. **Embeds each keyframe** with CLIP, exactly like a still photo. Each
    keyframe becomes its own entry in the search index.
@@ -36,16 +36,17 @@ detected faces, and any GPS attached to that shot.
 
 ## Stored video scene captions
 
-The Indexer can opt in to generating captions for the existing video keyframes
-using the local SmolVLM2 runtime. These are descriptions of individual still
-frames, not temporal summaries of the clip. Completed captions are stored in
-SQLite and searched lexically alongside visual search; a matching result shows
-its timestamp and opens paused at that scene. Searching reads the stored text
-only and does not run inference.
+Maximum Detail generates captions for existing video keyframes with the
+local CPU captioning runtime. These describe individual still frames, not
+temporal summaries of the clip. Completed captions are stored in SQLite and
+searched lexically alongside visual search; a matching result shows its timestamp
+and opens paused at that scene. Searching reads the stored text only and does
+not run inference.
 
 ## Local speech transcripts
 
-Speech transcription is opt-in (`enable_speech_transcription: true`). The indexer
+Speech transcription is enabled by default in Maximum Detail; it can be turned
+off from Settings. The indexer
 uses the MIT-licensed OpenAI Whisper base model and PyAV to decode audio locally;
 it downloads the pinned ~145 MB model only for an audio-bearing video, and caches
 it under `models_dir/whisper`. Inference runs on CPU on macOS (the bundled PyTorch
@@ -105,9 +106,9 @@ Two knobs in `config.yaml` are worth knowing about:
 - **`shot_detection_threshold`** (default 30.0) — lower it for content
   with subtle cuts (concert footage with similar lighting across cuts);
   raise it if you're getting too many fragmentary shots.
-- **`keyframes_per_shot`** (default 1) — bump to 2 or 3 if you have lots
-  of long, dynamic shots where one frame doesn't capture the action.
-  Costs more index time; usually not needed.
+- **`keyframes_per_shot`** (default 3) — Maximum Detail keeps three frames per
+  shot to capture more visual detail. Balanced and Fast use fewer frames.
+  More frames increase index size and processing time.
 
 Defaults are tuned for typical consumer video. See
 [CONFIGURATION.md](../CONFIGURATION.md#video-shot-detection) for the full
@@ -115,16 +116,16 @@ list.
 
 ## Limitations
 
-- **Speech transcription is opt-in and speech-only.** Music and ambient sound
+- **Speech transcription is speech-only.** Music and ambient sound
   do not become searchable tags, and speaker identity/diarization is not inferred.
 - **Long static shots can over-represent.** A 10-minute fixed-camera
   recording of a sleeping baby still produces only the keyframes the
   shot detector picks, but those keyframes are heavily weighted in the
-  search index. If a single video is dominating your results, raising
-  the threshold slider usually fixes it.
+  search index. Long-shot coverage adds a small number of novelty-filtered
+  frames by default; if a video dominates results, try Balanced or Fast.
 - **No OCR or temporal video understanding from still captions.** Video scene
   captions describe sampled keyframes individually. Speech transcription is a
-  separate, opt-in text source; neither source identifies who is speaking on
+  separate text source; neither source identifies who is speaking on
   screen or infers events between frames.
 
 For the indexing pipeline at the architectural level — shot detector,

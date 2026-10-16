@@ -1,12 +1,11 @@
 # Configuration
 
-Reference for the `config.yaml` file that controls media sources, model
-selection, ports, and search behaviour.
+Reference for `config.yaml`, which controls media sources, processing,
+ports, and search behaviour.
 
-Most users only ever touch the **Indexer** page in the UI to add media
-folders — that writes the relevant entries into `config.yaml` for you.
-Everything else has sensible defaults. This page covers the file directly
-for the cases when you want to tune something.
+Use the **Indexer** page to add media folders and **Settings** to tune
+processing presets and extraction options. This page covers direct
+`config.yaml` editing for advanced configuration.
 
 ## Where it lives
 
@@ -21,11 +20,10 @@ with the app. It is never overwritten by updates or reinstalls.
 
 ## When changes take effect
 
-- **Desktop app (macOS / Windows)** — quit the app and relaunch it.
-- **Browser / headless installs** — restart the server (`msa api restart`).
-- **Indexer** — picks up the latest config every time you click **Run**.
-
-The UI does not hot-reload `config.yaml`.
+Manual `config.yaml` edits require a desktop-app relaunch or browser/headless
+server restart. Settings-page edits remain drafts until **Save settings**;
+presets and Reset also change only the draft. Saved processing options take
+effect on new indexing runs and do not retroactively update indexed media.
 
 ## Media sources
 
@@ -89,33 +87,33 @@ re-embed on the next run.
 
 ```yaml
 device: "auto"
-batch_size: 32
-num_workers: 4
 ```
 
 | Setting | Default | Notes |
 |---|---|---|
 | `device` | `auto` | Picks CUDA if available, then MPS (Apple Silicon), else CPU. Set to `cuda`, `mps`, or `cpu` to force. |
-| `batch_size` | `32` | How many images go through the model at once during indexing. Lower if you hit OOM on a small GPU. |
-| `num_workers` | `4` | Data-loader worker processes. Drop to `2` on machines with few cores. |
+
+`batch_size` and `num_workers` remain as legacy config keys but currently have
+no effect on indexing; they are not shown in Settings.
 
 ## Object detection
 
 ```yaml
-enable_object_detection: auto
+enable_object_detection: true
 object_detector_backend: "rtdetr"
 object_model: "PekingU/rtdetr_r18vd"
 object_confidence_threshold: 0.35
 enable_video_object_detection: true
-video_detection_max_frames: 10
 ```
 
 | Setting | Default | Notes |
 |---|---|---|
-| `enable_object_detection` | `auto` | `auto` enables it when a GPU is detected and skips it on CPU-only machines (RT-DETR is too slow without one). `true` forces it on; `false` disables. |
+| `enable_object_detection` | `true` | Maximum Detail keeps it enabled even on CPU, where indexing is slower. `auto` skips it on CPU-only machines; `false` disables it. |
 | `object_model` | `PekingU/rtdetr_r18vd` (81 MB) | Trade size for quality: `rtdetr_r34vd` (126 MB) or `rtdetr_r50vd` (172 MB). |
 | `object_confidence_threshold` | `0.35` | Tags below this score are dropped. Raise to reduce false positives, lower to surface more tags. |
-| `video_detection_max_frames` | `10` | Cap on keyframes-per-video that get tagged, to keep video indexing tractable. |
+| `enable_video_object_detection` | `true` | Run object detection on selected video frames. |
+
+`video_detection_max_frames` is a legacy key and currently has no effect.
 
 ## Face recognition
 
@@ -123,15 +121,15 @@ video_detection_max_frames: 10
 enable_face_recognition: true
 face_recognizer_backend: "facenet_pytorch"
 face_model: "vggface2"
-face_confidence_threshold: 0.80
-face_min_size: 20
+face_confidence_threshold: 0.95
+face_min_size: 60
 ```
 
 | Setting | Default | Notes |
 |---|---|---|
 | `face_recognizer_backend` | `facenet_pytorch` | MIT-licensed, MTCNN detector + InceptionResnetV1 / VGGFace2 embeddings. The recommended default. |
-| `face_confidence_threshold` | `0.80` | Below this, detections are dropped to avoid false-positive faces on non-face objects. |
-| `face_min_size` | `20` | Minimum face size in pixels. Smaller faces are skipped. |
+| `face_confidence_threshold` | `0.95` | Below this, detections are dropped to favor precision. |
+| `face_min_size` | `60` | Minimum face size in pixels. Smaller faces are skipped. |
 
 ## Video shot detection
 
@@ -142,7 +140,7 @@ shot and embedded.
 enable_video_shot_detection: true
 shot_detection_threshold: 30.0
 min_shot_length_frames: 15
-keyframes_per_shot: 1
+keyframes_per_shot: 3
 ```
 
 The defaults work well across most consumer video. Lower
@@ -163,17 +161,17 @@ budget is a soft limit while a frame is being consumed; older renditions are
 removed least-recently-used as new frames are written. Cache removal never
 removes source media, captions, detections, embeddings, or frame identity.
 
-Adaptive sampling is opt-in and additive: the current midpoint-per-shot rows
-remain available. Visual-change candidates are limited per shot; optional
-long-shot coverage only adds frames when the decoded image remains novel.
-Selector versions are recorded in SQLite, and rebuilds append a new version
-instead of deleting prior keyframes or derived search data. These flags remain
-off by default until benchmark and search/seek validation is accepted.
+Maximum Detail enables adaptive sampling by default and adds visual-change
+candidates to the existing midpoint-per-shot rows. Long-shot coverage is also
+enabled and adds frames only when the decoded image remains novel. Balanced and
+Fast presets can turn these options off. Selector versions are recorded in
+SQLite, and rebuilds append a new version instead of deleting prior keyframes
+or derived search data.
 
 ```yaml
-adaptive_video_keyframes_enabled: false
+adaptive_video_keyframes_enabled: true
 adaptive_keyframe_sensitivity_percent: 8.0
-long_shot_coverage_enabled: false
+long_shot_coverage_enabled: true
 long_shot_min_duration_seconds: 30.0
 long_shot_interval_seconds: 10.0
 ```
@@ -182,14 +180,23 @@ long_shot_interval_seconds: 10.0
 
 ## Speech transcription
 
-Transcription is opt-in because it adds model storage and CPU/GPU work during video indexing.
-When enabled, the pinned multilingual Whisper base checkpoint (~145 MB) downloads only
-when the indexer first encounters a video with an audio stream, then remains in
-`models_dir/whisper` for offline inference. Original media is only read.
+Transcription is enabled by default in Maximum Detail. It adds storage and
+processing time. The pinned multilingual Whisper base checkpoint (~145 MB)
+downloads only when the indexer first encounters an audio-bearing video, then
+remains in `models_dir/whisper` for offline inference. Original media is only read.
 
 ```yaml
 enable_speech_transcription: true
 ```
+
+The Settings page includes Maximum Detail, Balanced, and Fast presets. Maximum
+Detail enables all available extraction features; use Balanced or Fast to trade
+coverage for indexing time. Preset and control changes remain drafts until saved.
+Reset drafts Maximum Detail defaults.
+
+BLIP image/video-scene captions are enabled by default and their pinned local
+checkpoint is included in first-launch setup. Caption processing can be disabled
+in Settings; generated descriptions remain local.
 
 Transcript segments are stored in SQLite and searched through the local API's
 `POST /transcripts/search` endpoint. Search reads SQLite only; it does not load the

@@ -35,15 +35,15 @@ batch_size: 32
 num_workers: 4
 
 # ── Object detection ──────────────────────────────────────────────────────────
-# enable_object_detection: auto   → enabled when GPU present (cuda/mps), skipped on CPU
-#                          true   → always enabled (power-user CPU opt-in; indexing will be slow)
-#                          false  → always disabled
+# true   → always enabled for maximum extraction; CPU indexing may be slower
+# auto   → enabled when GPU present (cuda/mps), skipped on CPU
+# false  → always disabled
 # object_detector_backend: rtdetr (default, Apache-2.0)
 # object_model: HuggingFace model ID
 #   rtdetr variants:  PekingU/rtdetr_r18vd (default, 81 MB)
 #                     PekingU/rtdetr_r34vd (126 MB, higher quality)
 #                     PekingU/rtdetr_r50vd (172 MB, highest quality)
-enable_object_detection: auto
+enable_object_detection: true
 object_detector_backend: "rtdetr"
 object_model: "PekingU/rtdetr_r18vd"
 object_confidence_threshold: 0.35
@@ -75,10 +75,10 @@ face_cluster_similarity: 0.6
 enable_video_shot_detection: true
 # Opt in to local Whisper transcription. The ~145 MB base model downloads to
 # models_dir only when indexing a video with an audio stream; searches are offline.
-enable_speech_transcription: false
+enable_speech_transcription: true
 shot_detection_threshold: 30.0
 min_shot_length_frames: 15
-keyframes_per_shot: 1
+keyframes_per_shot: 3
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 # In dev mode, relative paths are resolved from the repo root.
@@ -97,12 +97,13 @@ face_thumb_dir: "data/face_thumbnails"
 models_dir: "models"
 video_frame_cache_dir: "video_frames"
 video_frame_cache_budget_mb: 1024
-# Both remain off until local benchmarks/user acceptance justify changing defaults.
-adaptive_video_keyframes_enabled: false
-adaptive_keyframe_sensitivity_percent: 8.0
-long_shot_coverage_enabled: false
+adaptive_video_keyframes_enabled: true
+adaptive_keyframe_sensitivity_percent: 22.0
+long_shot_coverage_enabled: true
 long_shot_min_duration_seconds: 30.0
 long_shot_interval_seconds: 10.0
+image_captions_enabled: true
+video_scene_captions_enabled: true
 
 # ── Approximate nearest neighbor tuning ───────────────────────────────────────
 ann_method: "ivfflat"

@@ -483,7 +483,7 @@ class TestConfigSourcesBomConfig:
 
     def test_patch_model_config_succeeds_with_bom_config(self, bom_client):
         """PATCH /config/model must not 500 when config.yaml has a UTF-8 BOM."""
-        r = bom_client.patch("/config/model", json={"batch_size": 16})
+        r = bom_client.patch("/config/model", json={"enable_object_detection": True})
         assert r.status_code == 200
 
 
@@ -693,6 +693,25 @@ class TestIndexerStatus:
         assert captured["image_captions_enabled"] is False
         assert captured["video_scene_captions_enabled"] is False
 
+    def test_start_uses_saved_caption_settings_when_run_options_are_omitted(self, client, monkeypatch):
+        from msa_apps.search_api import app as app_module
+        from msa_apps.search_api.app import indexer_manager
+
+        captured = {}
+        monkeypatch.setattr(app_module, "_get_config", lambda _request: SimpleNamespace(
+            image_captions_enabled=True, video_scene_captions_enabled=True,
+        ))
+        monkeypatch.setattr(
+            indexer_manager,
+            "start",
+            lambda **kwargs: captured.update(kwargs) or {"status": "running"},
+        )
+        response = client.post("/indexer/start", json={"processing_order": "newest"})
+        assert response.status_code == 200
+        assert captured["processing_order"] == "newest"
+        assert captured["image_captions_enabled"] is True
+        assert captured["video_scene_captions_enabled"] is True
+
     def test_start_rejects_invalid_processing_order(self, client):
         response = client.post("/indexer/start", json={"processing_order": "random"})
         assert response.status_code == 422
@@ -747,10 +766,16 @@ class TestModelConfigGet:
     def test_editable_fields(self, client):
         ed = client.get("/config/model").json()["editable"]
         for key in (
-            "batch_size", "enable_object_detection", "object_model",
-            "object_confidence_threshold", "enable_face_recognition",
-            "face_model", "face_confidence_threshold",
-            "face_min_size", "face_store_metadata",
+            "enable_object_detection", "object_confidence_threshold",
+            "enable_video_object_detection", "enable_face_recognition",
+            "face_confidence_threshold", "face_min_size",
+            "enable_video_shot_detection", "enable_speech_transcription",
+            "shot_detection_threshold", "min_shot_length_frames",
+            "keyframes_per_shot", "adaptive_video_keyframes_enabled",
+            "adaptive_keyframe_sensitivity_percent", "long_shot_coverage_enabled",
+            "long_shot_min_duration_seconds", "long_shot_interval_seconds",
+            "video_frame_cache_budget_mb", "image_captions_enabled",
+            "video_scene_captions_enabled",
         ):
             assert key in ed, f"missing editable key: {key}"
 
@@ -761,23 +786,27 @@ class TestModelConfigGet:
     def test_defaults_match_editable_keys(self, client):
         body = client.get("/config/model").json()
         assert set(body["defaults"].keys()) == set(body["editable"].keys())
+        assert body["defaults"]["enable_object_detection"] is True
+        assert body["defaults"]["enable_face_recognition"] is True
+        assert body["defaults"]["image_captions_enabled"] is True
+        assert body["defaults"]["video_scene_captions_enabled"] is True
 
 
 # ── PATCH /config/model ───────────────────────────────────────────────────────
 
 class TestModelConfigPatch:
     def test_patch_returns_200(self, client):
-        r = client.patch("/config/model", json={"batch_size": 16})
+        r = client.patch("/config/model", json={"enable_object_detection": True})
         assert r.status_code == 200
 
     def test_patch_reports_updated_keys(self, client):
-        r = client.patch("/config/model", json={"batch_size": 16})
-        assert "batch_size" in r.json()["updated"]
+        r = client.patch("/config/model", json={"enable_object_detection": True})
+        assert "enable_object_detection" in r.json()["updated"]
 
     def test_patch_persisted_to_yaml(self, client, tmp_path):
-        client.patch("/config/model", json={"batch_size": 8})
+        client.patch("/config/model", json={"keyframes_per_shot": 2})
         data = yaml.safe_load((tmp_path / "config.yaml").read_text())
-        assert data["batch_size"] == 8
+        assert data["keyframes_per_shot"] == 2
 
     def test_patch_boolean_field(self, client, tmp_path):
         client.patch("/config/model", json={"enable_object_detection": False})
@@ -793,7 +822,7 @@ class TestModelConfigPatch:
         """device is not in the Pydantic model so it cannot be patched."""
         original = yaml.safe_load((tmp_path / "config.yaml").read_text()).get("device")
         # Sending an unknown field — FastAPI ignores extra fields by default
-        client.patch("/config/model", json={"batch_size": 4})
+        client.patch("/config/model", json={"enable_object_detection": False})
         data = yaml.safe_load((tmp_path / "config.yaml").read_text())
         # device must be unchanged
         assert data.get("device") == original

@@ -317,6 +317,7 @@ class TestStartIfNeededThreadGuard:
             "clip": "done",
             "rtdetr": "done",
             "facenet_pytorch": "done",
+            "captioning": "done",
         })
         with patch("threading.Thread") as mock_thread:
             mgr.start_if_needed(tmp_path)
@@ -343,14 +344,13 @@ class TestStartIfNeededThreadGuard:
         assert mgr._models["facenet_pytorch"].status == "done"
 
 
-def test_startup_model_setup_does_not_auto_download_optional_caption_model(tmp_path):
+def test_startup_model_setup_includes_captioning_for_maximum_detail(tmp_path):
     mgr = SetupManager()
     with patch("threading.Thread") as mock_thread:
         mock_thread.return_value = MagicMock()
         mgr.start_if_needed(tmp_path)
     requested = mock_thread.call_args.kwargs["args"][1]
-    assert requested == frozenset({"clip", "rtdetr", "facenet_pytorch"})
-    assert "captioning" not in requested
+    assert requested == frozenset({"clip", "rtdetr", "facenet_pytorch", "captioning"})
 
 
 def test_caption_model_setup_downloads_pinned_blip_and_verifies_weights(monkeypatch, tmp_path):

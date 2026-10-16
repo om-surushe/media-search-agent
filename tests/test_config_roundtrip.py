@@ -201,7 +201,7 @@ class TestDeleteSourcePreservesConfig:
 
 class TestPatchModelPreservesConfig:
     def test_section_comments_survive_patch(self, api_client, cfg_file):
-        api_client.patch("/config/model", json={"batch_size": 16})
+        api_client.patch("/config/model", json={"object_confidence_threshold": 0.4})
         text = cfg_file.read_text()
         assert _has_comment(text, "CLIP model")
         assert _has_comment(text, "Object detection")
@@ -210,38 +210,37 @@ class TestPatchModelPreservesConfig:
 
     def test_key_order_preserved_after_patch(self, api_client, cfg_file):
         before = _key_order(cfg_file.read_text())
-        api_client.patch("/config/model", json={"batch_size": 16})
+        api_client.patch("/config/model", json={"object_confidence_threshold": 0.4})
         after = _key_order(cfg_file.read_text())
         original_in_after = [k for k in after if k in before]
         assert original_in_after == before
 
     def test_quoted_strings_preserved_after_patch(self, api_client, cfg_file):
-        api_client.patch("/config/model", json={"batch_size": 16})
+        api_client.patch("/config/model", json={"object_confidence_threshold": 0.4})
         text = cfg_file.read_text()
         assert 'model_name: "ViT-L-14"' in text
         assert 'object_model: "PekingU/rtdetr_r18vd"' in text
         assert 'face_model: "buffalo_l"' in text
 
     def test_unrelated_keys_untouched_after_patch(self, api_client, cfg_file):
-        api_client.patch("/config/model", json={"batch_size": 16})
+        api_client.patch("/config/model", json={"object_confidence_threshold": 0.4})
         text = cfg_file.read_text()
-        # Keys not in the patch body must be unchanged
         assert "pretrained" in text
         assert "device" in text
         assert "enable_face_recognition" in text
 
     def test_patched_value_written_correctly(self, api_client, cfg_file):
-        api_client.patch("/config/model", json={"batch_size": 16})
+        api_client.patch("/config/model", json={"object_confidence_threshold": 0.4})
         text = cfg_file.read_text()
-        assert "batch_size: 16" in text
+        assert "object_confidence_threshold: 0.4" in text
 
     def test_multiple_fields_patched_simultaneously(self, api_client, cfg_file):
         api_client.patch("/config/model", json={
-            "batch_size": 8,
+            "object_confidence_threshold": 0.4,
             "face_confidence_threshold": 0.8,
         })
         text = cfg_file.read_text()
-        assert "batch_size: 8" in text
+        assert "object_confidence_threshold: 0.4" in text
         assert "face_confidence_threshold: 0.8" in text
         assert _has_comment(text, "CLIP model")
         assert _has_comment(text, "Object detection")

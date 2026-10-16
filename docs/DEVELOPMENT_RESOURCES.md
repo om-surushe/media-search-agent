@@ -108,17 +108,17 @@ Model files are downloaded to ignored local caches, normally under the developme
 
 | Asset | Current use and source | How to obtain it | License / portability note |
 |---|---|---|---|
-| CLIP ViT-L-14, `openai` | Default image/text semantic embedding model. With the supported `open_clip` stack, setup uses the Hugging Face `timm/vit_large_patch14_clip_224.openai` safetensors checkpoint (~1.71 GB) and pins its SHA-256; validated equivalent `.bin`/`.pt` artifacts are accepted for platform/runtime fallbacks. | User-confirmed first-launch setup or the Adapter Workbench model-setup button invokes the app-managed downloader; downloads are verified before use. | The Hugging Face checkpoint card labels this artifact Apache-2.0. Review the exact upstream terms before redistribution; do not assume the software license alone covers weights. |
+| CLIP ViT-L-14, `openai` | Default image/text semantic embedding model. With the supported `open_clip` stack, setup uses the Hugging Face `timm/vit_large_patch14_clip_224.openai` safetensors checkpoint (~1.71 GB) and pins its SHA-256; validated equivalent `.bin`/`.pt` artifacts are accepted for platform/runtime fallbacks. | User-confirmed first-launch setup invokes the app-managed downloader; downloads are verified before use. | The Hugging Face checkpoint card labels this artifact Apache-2.0. Review the exact upstream terms before redistribution; do not assume the software license alone covers weights. |
 | RT-DETR `PekingU/rtdetr_r18vd` | Default object detector (~81 MB). [Model card](https://huggingface.co/PekingU/rtdetr_r18vd). Revision `ac77a11ff0170a41b771c03264987f8ce2b0d753` is pinned in `src/msa_apps/search_api/setup_models.py`; cache: `models/rtdetr/`. | Same API-startup setup manager; it fetches processor config and weights through Transformers/Hugging Face Hub. | Model card and `NOTICE` identify Apache-2.0. Alternatives in `config.yaml` comments are not preselected. |
 | facenet-pytorch / VGGFace2 | Default face detector/recognizer (~108 MB). [Project](https://github.com/timesler/facenet-pytorch); cache: `models/facenet_pytorch/`. | Same API-startup setup manager; `TORCH_HOME` is redirected to the app-owned model directory. | `NOTICE` records the library/weights terms and VGGFace2 provenance. Review it and upstream terms before commercial redistribution. Optional InsightFace weights are marked non-commercial in `NOTICE`; do not select or download them for commercial use. |
-| Whisper `base` | Optional local speech transcription; disabled by default. [OpenAI Whisper](https://github.com/openai/whisper); exact checkpoint URL/hash is in `NOTICE` and `src/msa_indexer/models/asr.py`; cache: `models/whisper/` (~145 MB). | See the explicit prefetch command below, or allow a copied test video with audio to trigger the app's lazy download. | Download is lazy; inference is local/offline afterward. Source and checkpoint terms are recorded in `NOTICE`. Do not enable it for a real media root just to test setup. |
-| BLIP base `Salesforce/blip-image-captioning-base` | Optional CPU image/video-keyframe captioning via Transformers. [Model card](https://huggingface.co/Salesforce/blip-image-captioning-base). Cache: `<models_dir>/captioning/`; pinned revision `82a37760796d32b1411fe092ab5d4e227313294b`, weight SHA-256 `d6638651a5526cc2ede56f2b5104d6851b0755816d220e5e046870430180c767` (~990 MB). | Explicit Stage 09 prepare-and-run button downloads the pinned snapshot and verifies its weight checksum. | Model card labels the checkpoint BSD-3-Clause. Runs on CPU with the existing PyTorch/Transformers runtime; no MLX or GPU required. |
+| Whisper `base` | Local speech transcription, enabled by default in Maximum Detail. [OpenAI Whisper](https://github.com/openai/whisper); exact checkpoint URL/hash is in `NOTICE` and `src/msa_indexer/models/asr.py`; cache: `models/whisper/` (~145 MB). | Download remains lazy: the first audio-bearing video triggers it. | Inference is local/offline afterward. Source and checkpoint terms are recorded in `NOTICE`. Use Balanced or Fast to turn transcription off. |
+| BLIP base `Salesforce/blip-image-captioning-base` | Default local CPU image/video-keyframe captioning via Transformers. [Model card](https://huggingface.co/Salesforce/blip-image-captioning-base). Cache: `<models_dir>/captioning/`; pinned revision `82a37760796d32b1411fe092ab5d4e227313294b`, weight SHA-256 `d6638651a5526cc2ede56f2b5104d6851b0755816d220e5e046870430180c767` (~990 MB). | Included in user-confirmed first-launch setup and verified before use. | Model card labels the checkpoint BSD-3-Clause. Runs on CPU with the existing PyTorch/Transformers runtime; no MLX or GPU required. |
 
-Core models are roughly 1 GB combined by the sizes above; full application packages and caches need more disk. The installation guide estimates about 5 GB free for an end-user installation. Allow extra space for Python/Node environments, wheel caches, and optional caption weights. Do not commit or sync the `models/` folder; provision each device locally from the sources above.
+Core setup assets are roughly 2.9 GB combined by the sizes above; full application packages and caches need more disk. The installation guide estimates about 5 GB free for an end-user installation. Allow extra space for Python/Node environments and wheel caches. Do not commit or sync the `models/` folder; provision each device locally from the sources above.
 
-### Explicit optional model downloads
+### Lazy model download
 
-Run these from the repository root only when you intentionally want the asset. The Whisper command mirrors the app's model loader and stores the base checkpoint in the ignored development cache:
+The Whisper command below mirrors the app's model loader and stores the base checkpoint in the ignored development cache:
 
 ```bash
 .venv/bin/python - <<'PY'
@@ -127,7 +127,7 @@ whisper.load_model("base", device="cpu", download_root="models/whisper")
 PY
 ```
 
-Download and verify the optional caption checkpoint from the Stage 09 Workbench. The setup action pins the Hub revision, fetches only required files, and verifies the weight SHA-256 before marking the model ready. No caption model is downloaded during normal startup.
+The BLIP checkpoint is downloaded and verified as part of confirmed first-launch setup. The app pins the Hub revision, fetches only required files, and verifies the weight SHA-256 before marking captioning ready.
 
 ### Research references (not installed or integrated)
 

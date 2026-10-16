@@ -200,7 +200,7 @@ describe('IndexerPage', () => {
       )
     })
 
-    it('restores app-wide saved Indexer options', async () => {
+    it('restores saved processing order and explains where extraction is configured', async () => {
       mockFetch({ '/indexer/settings': {
         processing_order: 'oldest', object_detection_enabled: true,
         image_captions_enabled: false, video_scene_captions_enabled: true,
@@ -211,99 +211,27 @@ describe('IndexerPage', () => {
       } })
       renderPage()
       await waitFor(() => expect(screen.getByRole('combobox', { name: /processing order/i })).toHaveValue('oldest'))
-      expect(screen.getByRole('checkbox', { name: /object detection/i })).toBeChecked()
-      expect(screen.getByRole('checkbox', { name: /ai video scene captions/i })).toBeChecked()
+      expect(screen.getByText(/Extraction options are configured in Settings/)).toBeInTheDocument()
     })
 
-    it('persists option changes app-wide', async () => {
+    it('persists processing-order changes only', async () => {
       renderPage()
       await waitFor(() => expect(screen.getByRole('combobox', { name: /processing order/i })).toBeEnabled())
       await userEvent.selectOptions(screen.getByRole('combobox', { name: /processing order/i }), 'newest')
       await waitFor(() => expect(vi.mocked(fetch)).toHaveBeenCalledWith('/indexer/settings', expect.objectContaining({
-        method: 'PUT',
-        body: JSON.stringify({
-          processing_order: 'newest', object_detection_enabled: null,
-          image_captions_enabled: false, video_scene_captions_enabled: false,
-        }),
+        method: 'PUT', body: JSON.stringify({ processing_order: 'newest' }),
       })))
     })
 
-    it('disables unavailable captions and never sends them to the indexer', async () => {
-      mockFetch({ '/indexer/settings': {
-        processing_order: 'default', object_detection_enabled: null,
-        image_captions_enabled: true, video_scene_captions_enabled: false,
-        capabilities: {
-          image_captions: { available: false, reason: 'CPU Transformers BLIP runtime is unavailable.' },
-          video_scene_captions: { available: false, reason: 'CPU Transformers BLIP runtime is unavailable.' },
-        },
-      } })
-      renderPage()
-      const captions = await screen.findByRole('checkbox', { name: /ai image captions/i })
-      await waitFor(() => expect(captions).toBeChecked())
-      expect(captions).toBeDisabled()
-      expect(screen.getByText(/CPU Transformers BLIP runtime is unavailable/)).toBeTruthy()
-      await userEvent.click(screen.getByRole('button', { name: /run indexer/i }))
-      await waitFor(() => expect(vi.mocked(fetch)).toHaveBeenCalledWith('/indexer/start', expect.objectContaining({
-        body: JSON.stringify({ processing_order: 'default', object_detection_enabled: false }),
-      })))
-    })
-
-    it('sends the selected processing order when Run is clicked', async () => {
+    it('sends only processing order when Run is clicked', async () => {
       renderPage()
       await waitFor(() => screen.getByRole('button', { name: /run indexer/i }))
       const fetchMock = vi.mocked(fetch)
       await userEvent.selectOptions(screen.getByRole('combobox', { name: /processing order/i }), 'oldest')
       await userEvent.click(screen.getByRole('button', { name: /run indexer/i }))
       expect(fetchMock).toHaveBeenCalledWith('/indexer/start', expect.objectContaining({
-        method: 'POST',
-        body: JSON.stringify({ processing_order: 'oldest', object_detection_enabled: false }),
+        method: 'POST', body: JSON.stringify({ processing_order: 'oldest' }),
       }))
-    })
-
-    it('defaults Object Detection from effective config and submits a per-run override', async () => {
-      mockFetch({ '/config/model': { effective: { object_detection_enabled: true } } })
-      renderPage()
-      const toggle = await screen.findByRole('checkbox', { name: /object detection/i })
-      expect(toggle).toBeChecked()
-      await userEvent.click(toggle)
-      await userEvent.click(screen.getByRole('button', { name: /run indexer/i }))
-      await waitFor(() => expect(vi.mocked(fetch)).toHaveBeenCalledWith('/indexer/start', expect.objectContaining({
-        body: JSON.stringify({ processing_order: 'default', object_detection_enabled: false }),
-      })))
-    })
-
-    it('keeps captions off by default and enables them only for the selected run', async () => {
-      renderPage()
-      const captions = await screen.findByRole('checkbox', { name: /ai image captions/i })
-      expect(captions).not.toBeChecked()
-      await userEvent.click(captions)
-      await userEvent.click(screen.getByRole('button', { name: /run indexer/i }))
-      await waitFor(() => expect(vi.mocked(fetch)).toHaveBeenCalledWith('/indexer/start', expect.objectContaining({
-        body: JSON.stringify({
-          processing_order: 'default', object_detection_enabled: false, image_captions_enabled: true,
-        }),
-      })))
-    })
-
-    it('keeps video scene captions off by default and enables them for the selected run', async () => {
-      renderPage()
-      const captions = await screen.findByRole('checkbox', { name: /ai video scene captions/i })
-      expect(captions).not.toBeChecked()
-      await userEvent.click(captions)
-      await userEvent.click(screen.getByRole('button', { name: /run indexer/i }))
-      await waitFor(() => expect(vi.mocked(fetch)).toHaveBeenCalledWith('/indexer/start', expect.objectContaining({
-        body: JSON.stringify({
-          processing_order: 'default', object_detection_enabled: false,
-          video_scene_captions_enabled: true,
-        }),
-      })))
-    })
-
-    it('disables caption options while indexing', async () => {
-      MockWebSocket.pendingMessage = runningUpdate
-      renderPage()
-      expect(await screen.findByRole('checkbox', { name: /ai image captions/i })).toBeDisabled()
-      expect(screen.getByRole('checkbox', { name: /ai video scene captions/i })).toBeDisabled()
     })
 
     it('shows video scene caption progress and counts from the run summary', async () => {
@@ -325,7 +253,7 @@ describe('IndexerPage', () => {
       }
       renderPage()
       expect(await screen.findByText('Captioning scene 2 of 3…')).toBeTruthy()
-      expect(screen.getAllByText('AI Video Scene Captions')).toHaveLength(2)
+      expect(screen.getAllByText('AI Video Scene Captions')).toHaveLength(1)
       expect(screen.getByText('Generated').parentElement).toHaveTextContent('Generated1')
     })
 
@@ -351,12 +279,6 @@ describe('IndexerPage', () => {
       expect(screen.getByText('Invalid image')).toBeTruthy()
       expect(screen.getByText('Generated')).toBeTruthy()
       expect(screen.getByText('Failed')).toBeTruthy()
-    })
-
-    it('disables Object Detection while indexing', async () => {
-      MockWebSocket.pendingMessage = runningUpdate
-      renderPage()
-      expect(await screen.findByRole('checkbox', { name: /object detection/i })).toBeDisabled()
     })
 
     it('disables Run Indexer until a source is configured', async () => {

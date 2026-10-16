@@ -105,7 +105,7 @@ export interface IndexerSettings {
   }
 }
 
-export type IndexerSettingsUpdate = Omit<IndexerSettings, 'capabilities'>
+export type IndexerSettingsUpdate = Pick<IndexerSettings, 'processing_order'>
 
 export async function getIndexerSettings(): Promise<IndexerSettings> {
   const res = await fetch(apiUrl('/indexer/settings'))
@@ -228,26 +228,28 @@ export async function getDiagnostics(): Promise<Diagnostics> {
 }
 
 export interface ModelConfigEditable {
-  batch_size: number
   enable_object_detection: 'auto' | boolean
-  object_model: string
   object_confidence_threshold: number
+  enable_video_object_detection: boolean
   enable_face_recognition: boolean
-  face_recognizer_backend: string
-  face_model: string
   face_confidence_threshold: number
   face_min_size: number
-  face_store_metadata: boolean
-}
-
-export interface ModelConfigReadonly {
-  device: string
-  model_name: string
-  pretrained: string
+  enable_video_shot_detection: boolean
+  enable_speech_transcription: boolean
+  shot_detection_threshold: number
+  min_shot_length_frames: number
+  keyframes_per_shot: number
+  adaptive_video_keyframes_enabled: boolean
+  adaptive_keyframe_sensitivity_percent: number
+  long_shot_coverage_enabled: boolean
+  long_shot_min_duration_seconds: number
+  long_shot_interval_seconds: number
+  video_frame_cache_budget_mb: number
+  image_captions_enabled: boolean
+  video_scene_captions_enabled: boolean
 }
 
 export interface ModelConfig {
-  readonly: ModelConfigReadonly
   editable: ModelConfigEditable
   defaults: ModelConfigEditable
   effective: { object_detection_enabled: boolean }
@@ -265,10 +267,7 @@ export async function patchModelConfig(updates: Partial<ModelConfigEditable>): P
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(updates),
   })
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({ detail: res.statusText }))
-    throw new Error(err.detail ?? 'Failed to save model config')
-  }
+  if (!res.ok) throw new Error(res.statusText)
 }
 
 export async function deleteSource(name: string): Promise<void> {

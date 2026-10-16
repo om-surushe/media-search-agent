@@ -68,7 +68,7 @@ JOB_VERSION = 1
 # Update this constant deliberately when upgrading the default model weights.
 RTDETR_DEFAULT_MODEL    = "PekingU/rtdetr_r18vd"
 RTDETR_DEFAULT_REVISION = "ac77a11ff0170a41b771c03264987f8ce2b0d753"
-DEFAULT_SETUP_MODEL_IDS = frozenset({"clip", "rtdetr", "facenet_pytorch"})
+DEFAULT_SETUP_MODEL_IDS = frozenset({"clip", "rtdetr", "facenet_pytorch", "captioning"})
 
 MODEL_META = {
     "clip": {
@@ -422,11 +422,33 @@ class SetupManager:
         if not self._load_job(models_dir):
             return
         with self._lock:
-            should_resume = self._job_status in ("pending", "running", "retrying")
+            job_status = self._job_status
             model_ids = self._job_models
-        if should_resume:
+
+        if job_status in ("pending", "running", "retrying"):
+            # Include newly required setup artifacts when resuming an older job.
+            model_ids = frozenset(model_ids | DEFAULT_SETUP_MODEL_IDS)
+            with self._lock:
+                self._job_models = model_ids
+                for model_id in model_ids:
+                    self._models.setdefault(model_id, ModelDownloadState())
             logger.info("Resuming persistent setup job {}", self._job_id)
             self.start_if_needed(models_dir, model_ids=set(model_ids))
+        elif job_status == "completed" and not self.is_ready(models_dir):
+            present = self.check_all_present(models_dir)
+            present["clip"] = self.has_valid_clip(models_dir)
+            present["captioning"] = self.has_valid_captioning(models_dir)
+            with self._lock:
+                self._job_models = DEFAULT_SETUP_MODEL_IDS
+                self._job_status = "retrying"
+                self._complete = False
+                self._download_started = False
+                for model_id in DEFAULT_SETUP_MODEL_IDS:
+                    if not present.get(model_id, False):
+                        self._models[model_id].status = "pending"
+                        self._models[model_id].error = None
+            logger.info("Persistent setup job {} needs newly required artifacts; resuming", self._job_id)
+            self.start_if_needed(models_dir, model_ids=set(DEFAULT_SETUP_MODEL_IDS))
 
     # ── State access ──────────────────────────────────────────────────────────
 
