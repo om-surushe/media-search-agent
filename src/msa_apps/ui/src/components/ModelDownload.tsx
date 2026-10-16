@@ -1,24 +1,11 @@
 import { useEffect, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { CheckCircle2, XCircle, Loader2, Circle, ShieldCheck, Download } from 'lucide-react'
+import { Download } from 'lucide-react'
 import { fetchSetupStatus, retrySetup, type SetupStatus, type ModelState, type ModelInfo } from '../api/setup'
 import { useSetupWS } from '../hooks/useSetupWS'
-import { SplashShell, ProgressBar, formatElapsed, DEPS_END_PCT } from './splash'
+import { SplashShell, ProgressBar, formatElapsed } from './splash'
 
-/**
- * First-run model-download phase (M-7 · spec §S-2), rendered INSIDE the startup splash by
- * StartupGate once `/health` reports the backend ready. It replaces the old standalone SetupPage:
- * the download already runs on its own in the API lifespan, so this is a pure progress subscriber
- * over `/ws/setup` (+ an initial `/api/setup/status` for the model list) that gates the app until
- * the models are on disk.
- *
- * The unified bar continues from where provisioning left off: deps fill 0→`BASE`%, the models fill
- * `BASE`→100 weighted by download size (CLIP ~1.71 GB dominates), so the single bar never resets.
- */
-
-// Where the deps phase ends and the model phase begins on the one continuous 0–100 bar.
-const BASE = DEPS_END_PCT
-const SPAN = 100 - BASE
+/** First-run setup progress after the user explicitly starts setup. */
 
 interface Props {
   /** Called when the models are ready (all done, or the user chose to continue with failures). */
@@ -27,41 +14,6 @@ interface Props {
   startedAtMs: number
   /** Model list from StartupGate's `/api/setup/status` check — avoids a refetch and a flash. */
   initialModels: ModelInfo[]
-}
-
-function StatusIcon({ status }: { status: ModelState }) {
-  switch (status) {
-    case 'done':
-      return <CheckCircle2 size={18} className="shrink-0 text-emerald-500" aria-label="Done" />
-    case 'downloading':
-      return <Loader2 size={18} className="shrink-0 animate-spin text-sky-400" aria-label="Downloading" />
-    case 'verifying':
-      return <ShieldCheck size={18} className="shrink-0 animate-pulse text-amber-400" aria-label="Verifying" />
-    case 'error':
-      return <XCircle size={18} className="shrink-0 text-red-400" aria-label="Failed" />
-    default:
-      return <Circle size={18} className="shrink-0 text-slate-500" aria-label="Waiting" />
-  }
-}
-
-function statusLabel(status: ModelState): string {
-  switch (status) {
-    case 'done': return 'Verified'
-    case 'downloading': return 'Downloading…'
-    case 'verifying': return 'Verifying integrity…'
-    case 'error': return 'Failed'
-    default: return 'Waiting…'
-  }
-}
-
-function statusColor(status: ModelState): string {
-  switch (status) {
-    case 'done': return 'text-emerald-400'
-    case 'downloading': return 'text-sky-400'
-    case 'verifying': return 'text-amber-400'
-    case 'error': return 'text-red-400'
-    default: return 'text-slate-500'
-  }
 }
 
 export function ModelDownload({ onReady, startedAtMs, initialModels }: Props) {
@@ -131,13 +83,19 @@ export function ModelDownload({ onReady, startedAtMs, initialModels }: Props) {
     if (allDone || continued) onReady()
   }, [allDone, continued, onReady])
 
-  // Size-weighted fraction so the bar tracks bytes, not model count (CLIP ~1.71 GB ≫ the others).
-  const totalSize = models.reduce((s, m) => s + m.size_mb, 0) || 1
-  const doneSize = rows.filter((r) => r.status === 'done').reduce((s, m) => s + m.size_mb, 0)
-  const pct = BASE + (doneSize / totalSize) * SPAN
-
-  const active = rows.find((r) => r.status === 'downloading' || r.status === 'verifying')
-  const detail = active ? active.label : 'Preparing the AI models…'
+  const totalSize = models.reduce((sum, model) => sum + model.size_mb, 0) || 1
+  const completedSize = rows.reduce((sum, model) => {
+    if (model.status === 'done') return sum + model.size_mb
+    if (model.status === 'downloading' && model.totalBytes > 0) {
+      return sum + model.size_mb * Math.min(model.downloadedBytes / model.totalBytes, 1)
+    }
+    return sum
+  }, 0)
+  const setupProgress = Math.min(completedSize / totalSize, 1)
+  const pct = setupProgress * 100
+  const remainingMs = setupProgress > 0.01
+    ? elapsedMs * (1 - setupProgress) / setupProgress
+    : null
 
   // Retry: actually restart the download on the backend (start_if_needed) BEFORE reloading — a plain
   // reload only re-subscribes to the manager's held complete/error state. The reload then gives a
@@ -154,79 +112,23 @@ export function ModelDownload({ onReady, startedAtMs, initialModels }: Props) {
 
   return (
     <SplashShell icon={<Download size={22} className="shrink-0 text-sky-400" aria-hidden />}>
-      <p className="text-base font-medium text-slate-100">Downloading AI models</p>
-      <p className="mt-1 text-sm text-slate-400">{detail}</p>
+      <p className="text-base font-medium text-slate-100">Setting up Media Search Agent</p>
+      <p className="mt-1 text-sm text-slate-400">Please keep the app open until setup finishes.</p>
 
-      <ProgressBar pct={pct} rightLabel={`${formatElapsed(elapsedMs)} elapsed`} />
-
-      <ul className="mt-4 grid gap-2 overflow-hidden" aria-label="AI models">
-        {rows.map((model) => (
-          <li
-            key={model.id}
-            className="flex min-w-0 items-start gap-3 rounded-xl border border-slate-700/50 bg-slate-800/50 px-3.5 py-3"
-          >
-            <StatusIcon status={model.status} />
-            <div className="min-w-0 flex-1">
-              <div className="flex min-w-0 items-baseline justify-between gap-2">
-                <span className="min-w-0 flex-1 truncate text-sm font-medium text-slate-100">
-                  {model.label}
-                </span>
-                <span className="shrink-0 text-xs text-slate-400">~{model.size_mb} MB</span>
-              </div>
-              {model.error ? (
-                <p className="mt-0.5 truncate text-xs text-red-400" title={model.error}>
-                  {model.error}
-                </p>
-              ) : (
-                <p className={`mt-0.5 truncate text-xs ${statusColor(model.status)}`}>
-                  {statusLabel(model.status)}
-                  {model.status === 'done' && model.integrity_hint && (
-                    <span className="ml-1.5 font-mono text-[10px] text-emerald-600/70">
-                      {model.integrity_hint}…
-                    </span>
-                  )}
-                </p>
-              )}
-              {model.status === 'downloading' && (
-                <div className="mt-2">
-                  <progress
-                    className="h-2 w-full accent-sky-500"
-                    max={model.totalBytes > 0 ? model.totalBytes : undefined}
-                    value={model.totalBytes > 0 ? Math.min(model.downloadedBytes, model.totalBytes) : undefined}
-                    aria-label={`${model.label} file download progress`}
-                  />
-                  <p className="text-[10px] text-slate-500">
-                    {model.filename ? `${model.filename} · ` : ''}
-                    {model.totalBytes > 0
-                      ? `${(model.downloadedBytes / 1024 ** 2).toFixed(1)} / ${(model.totalBytes / 1024 ** 2).toFixed(1)} MB`
-                      : 'Transfer in progress'}
-                  </p>
-                </div>
-              )}
-              {model.source && model.status !== 'done' && !model.error && (
-                <p className="mt-0.5 truncate font-mono text-[10px] text-slate-500" title={model.source}>
-                  from {model.source}
-                </p>
-              )}
-            </div>
-          </li>
-        ))}
-      </ul>
+      <ProgressBar
+        pct={pct}
+        rightLabel={remainingMs === null ? 'Estimating time…' : `About ${formatElapsed(remainingMs)} remaining`}
+      />
 
       {showFailureUI ? (
         <div className="mt-5 grid gap-2">
-          {statusFailed && (
-            <p className="text-sm text-red-300">
-              Couldn’t load the setup status from Media Search Agent. The backend may still be
-              starting, or setup hit an error.
-            </p>
-          )}
+          <p className="text-sm text-red-300">Setup couldn’t finish. Check your connection and try again.</p>
           <button
             type="button"
             onClick={onRetry}
             className="w-full rounded-xl border border-red-500/40 bg-red-900/20 px-4 py-2.5 text-sm font-medium text-red-300 hover:bg-red-900/30"
           >
-            {statusFailed ? 'Try again' : 'Retry failed downloads'}
+            Try setup again
           </button>
           <button
             type="button"
@@ -236,12 +138,12 @@ export function ModelDownload({ onReady, startedAtMs, initialModels }: Props) {
             Continue anyway
           </button>
           <p className="text-center text-xs text-slate-500">
-            Affected features may not work until you retry.
+            Some features may not work until setup finishes.
           </p>
         </div>
       ) : (
         <p className="mt-5 text-xs text-slate-600">
-          One-time setup — after this the app works fully offline, no connection needed.
+          This one-time setup lets the app work offline afterward.
         </p>
       )}
     </SplashShell>

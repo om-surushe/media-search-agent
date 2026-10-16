@@ -343,6 +343,7 @@ export function StartupGate({
       <SetupPrototype
         onStart={async () => {
           await startSetup()
+          startedRef.current = Date.now()
           setPhase('models')
         }}
       />
