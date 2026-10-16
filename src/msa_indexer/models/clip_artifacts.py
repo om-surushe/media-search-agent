@@ -25,6 +25,8 @@ def clip_checkpoint_candidates(models_dir: Path) -> list[Path]:
         path
         for blob_dir in cache.rglob("blobs") if blob_dir.is_dir()
         for path in blob_dir.iterdir()
-        if path.is_file() and path.stat().st_size > 100_000_000
+        if path.is_file()
+        and not path.name.endswith((".incomplete", ".lock"))
+        and path.stat().st_size > 100_000_000
     )
     return list(dict.fromkeys(candidates))

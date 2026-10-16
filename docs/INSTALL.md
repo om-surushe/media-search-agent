@@ -99,17 +99,15 @@ stage:
    GPU the CUDA-enabled build is selected automatically (~2 GB); other
    machines get the smaller CPU/Apple Silicon build.
 3. **Application dependencies** (~1.5 GB).
-4. **Model weights** (~1.5 GB) — CLIP from OpenAI's CDN, RT-DETR from Hugging
-   Face, facenet-pytorch from its project GitHub releases.
+4. **Model weights** — downloaded into the app-owned model directory.
 
-Allow several minutes on a typical home connection — the setup screen never
-sits silent, so if it's moving, it's working. Later launches start in
-seconds.
+The setup screen reports downloaded bytes, overall progress, transfer speed,
+and an estimated time remaining once the download rate is measurable.
 
-Setup is resumable: if the download dies or you quit partway (even a crash),
-the next launch picks up where it left off — finished stages are not
-re-downloaded. If a stage fails, the setup screen shows the error with the
-log-file path and a **Retry** button.
+Setup is a persistent job stored at `<models_dir>/setup-job.json`. If you quit
+or the app crashes, the next launch resumes that job and its partial downloads;
+finished, validated artifacts are reused. A failed job stays available to
+resume from the setup screen.
 
 On Linux/headless installs the same model downloads happen on first run of
 the server; the browser UI shows the progress.
@@ -150,9 +148,8 @@ your data.)
 | `~/.config/MediaSearchAgent/` | `config.yaml` |
 | `~/.cache/MediaSearchAgent/` | Caches |
 
-**All platforms** — model weights live in shared per-user caches
-(`~/.cache/huggingface/`, `~/.cache/clip/`, `~/.cache/torch/checkpoints/`,
-~1.5 GB total) and survive reinstalls.
+**All platforms** — model weights and the setup job live under the configured
+app-owned `models_dir`; media indexes are separate and are rebuilt when needed.
 
 Your media folders are never copied or written to.
 

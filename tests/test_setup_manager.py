@@ -90,12 +90,20 @@ class TestCheckAllPresentClip:
         assert SetupManager().check_all_present(tmp_path)["clip"] is False
 
     def test_present_with_large_blob(self, tmp_path):
-        """A ≥100 MB file in blobs/ satisfies the Windows symlink-less layout."""
+        """A ≥100 MB complete blob is discoverable in the Windows symlink-less layout."""
         blobs = tmp_path / "clip" / "blobs"
         blobs.mkdir(parents=True)
         large = blobs / "abcdef01234567"
         large.write_bytes(b"x" * (100 * 1024 * 1024 + 1))  # 100 MB + 1 byte
         assert SetupManager().check_all_present(tmp_path)["clip"] is True
+
+    def test_incomplete_blob_is_not_discoverable(self, tmp_path):
+        blobs = tmp_path / "clip" / "blobs"
+        blobs.mkdir(parents=True)
+        partial = blobs / "abcdef01234567.incomplete"
+        partial.touch()
+        partial.write_bytes(b"x" * (100 * 1024 * 1024 + 1))
+        assert SetupManager().check_all_present(tmp_path)["clip"] is False
 
 
 class TestHasValidClip:
@@ -107,6 +115,34 @@ class TestHasValidClip:
         clip.parent.mkdir()
         clip.write_bytes(b"not model weights")
         assert manager.has_valid_clip(tmp_path) is False
+
+
+def test_persistent_setup_job_round_trip_preserves_progress(tmp_path):
+    from msa_apps.search_api.setup_models import DEFAULT_SETUP_MODEL_IDS
+
+    manager = SetupManager()
+    manager._models_dir = tmp_path
+    manager._job_id = "test-job"
+    manager._job_status = "running"
+    manager._job_created_at = 1.0
+    manager._job_attempt = 1
+    manager._speed_bps = 300_000
+    manager._job_models = DEFAULT_SETUP_MODEL_IDS
+    manager._active_models = DEFAULT_SETUP_MODEL_IDS
+    manager._persistent_run = True
+    manager._set("clip", "downloading")
+    manager._set_progress("clip", 64 * 1024 * 1024, 1711 * 1024 * 1024, "clip.incomplete")
+    manager._persist_job(force=True)
+
+    resumed = SetupManager()
+    job = resumed.get_job(tmp_path)
+
+    assert job is not None
+    assert job["id"] == "test-job"
+    assert job["downloaded_bytes"] == 64 * 1024 * 1024
+    assert job["progress_percent"] > 0
+    assert job["eta_seconds"] is not None
+    assert job["models"]["clip"]["status"] == "pending"
 
 
 # ---------------------------------------------------------------------------

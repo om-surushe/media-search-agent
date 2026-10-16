@@ -15,13 +15,13 @@ vi.mock('./hooks/useSetupWS', () => ({
   useSetupWS: vi.fn(() => ({ models: null, complete: false })),
 }))
 
-// URL-aware fetch: /health drives the gate → ready; /api/setup/status decides first-run vs warm
-// launch (models present → straight to the app). Any other API call the mounted app makes returns
+// URL-aware fetch: /health drives the gate → ready; /api/setup/job decides first-run vs warm
+// launch (no job and ready → straight to the app). Any other API call the mounted app makes returns
 // a benign empty payload so MainApp renders without throwing.
 function routedFetch(setup: () => unknown) {
   return vi.fn((input: RequestInfo | URL) => {
     const url = String(input)
-    if (url.includes('/api/setup/status')) {
+    if (url.includes('/api/setup/job')) {
       return Promise.resolve({ ok: true, json: async () => setup() } as Response)
     }
     if (url.includes('/health')) {
@@ -31,7 +31,7 @@ function routedFetch(setup: () => unknown) {
   })
 }
 
-// The gate→reveal chain is a fixed multi-hop async chain (/health → /api/setup/status → reveal);
+// The gate→reveal chain is a fixed multi-hop async chain (/health → /api/setup/job → reveal);
 // fake timers let us own the single clock and drain each hop deterministically rather than betting
 // the tail settles inside a wall-clock budget on a loaded runner (the historical ~1/168 flake).
 async function settleLaunchChain() {
@@ -69,8 +69,8 @@ describe('App launch flow', () => {
 
   it('reveals the app and shows the launch banner once the backend and models are ready', async () => {
     window.history.replaceState({}, '', '/browse?launch=1')
-    // Warm launch: /health ready and the models are already on disk, so the gate reveals AppInner.
-    vi.stubGlobal('fetch', routedFetch(() => ({ ready: true, models: [] })))
+    // Warm launch: /health and setup-job report ready, so the gate reveals AppInner.
+    vi.stubGlobal('fetch', routedFetch(() => ({ ready: true, job: null, read_only_mode: false })))
 
     render(<App />)
     await settleLaunchChain()
@@ -82,7 +82,7 @@ describe('App launch flow', () => {
 
   it('dismisses the launch banner', async () => {
     window.history.replaceState({}, '', '/browse?launch=1')
-    vi.stubGlobal('fetch', routedFetch(() => ({ ready: true, models: [] })))
+    vi.stubGlobal('fetch', routedFetch(() => ({ ready: true, job: null, read_only_mode: false })))
 
     render(<App />)
     await settleLaunchChain()
@@ -95,22 +95,20 @@ describe('App launch flow', () => {
   })
 
   it('stays on the splash (app gated) while first-run model downloads are still needed', async () => {
-    // First run: /health ready but models missing → the gate holds on the in-splash model download;
-    // the main app (its nav) never mounts until the models are ready.
+    // First run: /health ready but no setup job exists → confirmation is shown and app remains gated.
     vi.stubGlobal(
       'fetch',
       routedFetch(() => ({
         ready: false,
-        models: [
-          { id: 'clip', label: 'Semantic search model (CLIP ViT-L-14)', size_mb: 1711, present: false, integrity_hint: '', source: 'huggingface.co/timm/vit_large_patch14_clip_224.openai' },
-        ],
+        job: null,
+        read_only_mode: false,
       })),
     )
 
     render(<App />)
     await settleLaunchChain()
 
-    expect(screen.getByText('Downloading AI models')).toBeInTheDocument()
+    expect(screen.getByText('Finish setting up')).toBeInTheDocument()
     // The app shell (main navigation) must not have mounted behind the gate.
     expect(screen.queryByRole('navigation')).not.toBeInTheDocument()
   })

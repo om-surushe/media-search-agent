@@ -21,8 +21,11 @@ are verified by torch hub's own integrity check on download.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import threading
+import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -56,6 +59,9 @@ from msa_indexer.models.commercial_registry import (
 # ── Types ─────────────────────────────────────────────────────────────────────
 
 ModelState = Literal["pending", "downloading", "verifying", "done", "error"]
+JobState = Literal["pending", "running", "retrying", "completed", "failed"]
+JOB_FILENAME = "setup-job.json"
+JOB_VERSION = 1
 
 # Pinned revision for the default RT-DETR model. HuggingFace hub verifies
 # per-blob SHA-256 during download, so we don't maintain a separate hash.
@@ -178,6 +184,19 @@ class SetupManager:
         self._running = False
         self._active_models: frozenset[str] = frozenset()
         self._complete = False
+        self._models_dir: Path | None = None
+        self._job_id: str | None = None
+        self._job_models: frozenset[str] = frozenset()
+        self._job_status: JobState | None = None
+        self._job_created_at: float | None = None
+        self._job_updated_at: float | None = None
+        self._job_attempt = 0
+        self._speed_bps: float | None = None
+        self._last_sample_at: float | None = None
+        self._last_sample_bytes: int | None = None
+        self._last_persist_at = 0.0
+        self._persist_lock = threading.Lock()
+        self._persistent_run = False
 
     # ── Presence checks ───────────────────────────────────────────────────────
 
@@ -185,8 +204,7 @@ class SetupManager:
         """Check which model weight files are already on disk."""
         clip_cache = models_dir / "clip"
 
-        # open_clip caches the selected hub checkpoint under the local HF cache;
-        # some platforms expose only its content-addressed blob filename.
+        # Exclude partial/lock files; readiness and the worker additionally verify the pinned hash.
         clip_present = bool(clip_checkpoint_candidates(models_dir))
 
         # RT-DETR: look for model.safetensors under any snapshot of the default model.
@@ -269,7 +287,146 @@ class SetupManager:
 
     def is_ready(self, models_dir: Path) -> bool:
         present = self.check_all_present(models_dir)
+        present["clip"] = self.has_valid_clip(models_dir)
         return all(present[model_id] for model_id in DEFAULT_SETUP_MODEL_IDS)
+
+    # ── Persistent job ────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _job_path(models_dir: Path) -> Path:
+        return models_dir / JOB_FILENAME
+
+    def _progress_locked(self) -> tuple[int, int, float, float | None]:
+        active = self._job_models or DEFAULT_SETUP_MODEL_IDS
+        total = sum(MODEL_META[model_id]["size_mb"] * 1024 * 1024 for model_id in active)
+        downloaded = 0
+        for model_id in active:
+            state = self._models[model_id]
+            expected = MODEL_META[model_id]["size_mb"] * 1024 * 1024
+            if state.status == "done":
+                downloaded += expected
+            elif state.status in ("pending", "downloading", "verifying"):
+                downloaded += min(state.downloaded_bytes, expected)
+        progress = min(downloaded / total, 1.0) if total else 1.0
+        remaining = max(total - downloaded, 0)
+        eta = remaining / self._speed_bps if self._speed_bps else None
+        return downloaded, total, progress, eta
+
+    def _record_sample_locked(self) -> None:
+        downloaded, _, _, _ = self._progress_locked()
+        now = time.monotonic()
+        if self._last_sample_at is not None and self._last_sample_bytes is not None:
+            elapsed = now - self._last_sample_at
+            delta = downloaded - self._last_sample_bytes
+            if elapsed > 0 and delta > 0:
+                sample = delta / elapsed
+                self._speed_bps = sample if self._speed_bps is None else self._speed_bps * 0.75 + sample * 0.25
+        self._last_sample_at = now
+        self._last_sample_bytes = downloaded
+
+    def _job_snapshot_locked(self) -> dict[str, Any]:
+        downloaded, total, progress, eta = self._progress_locked()
+        active = self._job_models or DEFAULT_SETUP_MODEL_IDS
+        return {
+            "version": JOB_VERSION,
+            "id": self._job_id,
+            "status": self._job_status,
+            "attempt": self._job_attempt,
+            "created_at": self._job_created_at,
+            "updated_at": self._job_updated_at,
+            "downloaded_bytes": downloaded,
+            "total_bytes": total,
+            "progress_percent": round(progress * 100, 1),
+            "bytes_per_second": round(self._speed_bps, 1) if self._speed_bps else None,
+            "eta_seconds": round(eta) if eta is not None else None,
+            "models": {model_id: self._models[model_id].to_dict() for model_id in sorted(active)},
+        }
+
+    def _persist_job(self, *, force: bool = False) -> None:
+        with self._persist_lock:
+            now = time.monotonic()
+            if not force and now - self._last_persist_at < 1:
+                return
+            with self._lock:
+                if self._models_dir is None or self._job_id is None:
+                    return
+                self._job_updated_at = time.time()
+                snapshot = self._job_snapshot_locked()
+                job_path = self._job_path(self._models_dir)
+            job_path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = job_path.with_suffix(".tmp")
+            temporary.write_text(json.dumps(snapshot, indent=2) + "\n", encoding="utf-8")
+            os.replace(temporary, job_path)
+            self._last_persist_at = now
+
+    def _load_job(self, models_dir: Path) -> bool:
+        job_path = self._job_path(models_dir)
+        if not job_path.is_file():
+            return False
+        try:
+            data = json.loads(job_path.read_text(encoding="utf-8"))
+            if data.get("version") != JOB_VERSION or not data.get("id"):
+                raise ValueError("unsupported setup job")
+            if data.get("status") not in {"pending", "running", "retrying", "completed", "failed"}:
+                raise ValueError("invalid setup job status")
+            models_data = data.get("models")
+            if not isinstance(models_data, dict):
+                raise ValueError("invalid setup job model state")
+            active = frozenset(models_data.keys())
+            if not active or not active <= set(MODEL_META):
+                raise ValueError("invalid setup job models")
+            with self._lock:
+                self._models_dir = models_dir
+                self._job_id = str(data["id"])
+                self._job_status = data.get("status", "pending")
+                self._job_attempt = int(data.get("attempt", 0))
+                self._job_created_at = float(data.get("created_at") or time.time())
+                self._job_updated_at = float(data.get("updated_at") or self._job_created_at)
+                self._speed_bps = data.get("bytes_per_second")
+                self._job_models = active
+                self._active_models = active
+                for model_id, model_data in models_data.items():
+                    if not isinstance(model_data, dict):
+                        raise ValueError("invalid setup job model state")
+                    state = self._models[model_id]
+                    loaded_status = model_data.get("status", "pending")
+                    if loaded_status not in {"pending", "downloading", "verifying", "done", "error"}:
+                        raise ValueError("invalid setup model status")
+                    state.status = "pending" if (
+                        self._job_status in ("pending", "running", "retrying")
+                        and loaded_status in ("downloading", "verifying")
+                    ) else loaded_status
+                    state.error = model_data.get("error")
+                    state.downloaded_bytes = int(model_data.get("downloaded_bytes", 0))
+                    state.total_bytes = int(model_data.get("total_bytes", 0))
+                    state.filename = model_data.get("filename")
+                self._download_started = False
+                self._running = False
+                self._complete = self._job_status in ("completed", "failed")
+                self._last_sample_at = None
+                self._last_sample_bytes = None
+            return True
+        except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+            logger.error("Could not load setup job: {}", type(exc).__name__)
+            return False
+
+    def get_job(self, models_dir: Path) -> dict[str, Any] | None:
+        with self._lock:
+            loaded = self._job_id is not None and self._models_dir == models_dir
+        if not loaded and not self._load_job(models_dir):
+            return None
+        with self._lock:
+            return self._job_snapshot_locked()
+
+    def resume_if_needed(self, models_dir: Path) -> None:
+        if not self._load_job(models_dir):
+            return
+        with self._lock:
+            should_resume = self._job_status in ("pending", "running", "retrying")
+            model_ids = self._job_models
+        if should_resume:
+            logger.info("Resuming persistent setup job {}", self._job_id)
+            self.start_if_needed(models_dir, model_ids=set(model_ids))
 
     # ── State access ──────────────────────────────────────────────────────────
 
@@ -288,10 +445,17 @@ class SetupManager:
     ) -> None:
         """Start downloads for the requested models; optional caption weights are opt-in."""
         requested = frozenset(model_ids or DEFAULT_SETUP_MODEL_IDS)
+        persistent_run = requested == DEFAULT_SETUP_MODEL_IDS
         unknown = requested - MODEL_META.keys()
         if unknown:
             raise ValueError(f"Unknown model setup target: {', '.join(sorted(unknown))}")
         with self._lock:
+            job_loaded = self._job_id is not None and self._models_dir == models_dir
+        if persistent_run and not job_loaded:
+            self._load_job(models_dir)
+        with self._lock:
+            if persistent_run and self._job_id is not None and self._job_status != "completed" and self._job_models:
+                requested = self._job_models
             if self._running:
                 if requested <= self._active_models:
                     return
@@ -300,19 +464,37 @@ class SetupManager:
             any_error = any(state.status == "error" for state in states)
             in_progress = any(state.status in ("downloading", "verifying") for state in states)
             all_done = all(state.status == "done" for state in states)
-            if self._download_started and all_done and not any_error:
-                return
             if in_progress:
+                return
+            if self._job_status == "completed" and all_done and not any_error:
+                return
+            if self._download_started and all_done and not any_error:
                 return
             for model_id in requested:
                 state = self._models[model_id]
-                if state.status == "error":
+                if state.status in ("error", "downloading", "verifying"):
                     state.status = "pending"
                     state.error = None
+            if persistent_run:
+                now = time.time()
+                if self._job_id is None:
+                    self._job_id = str(uuid.uuid4())
+                    self._job_created_at = now
+                    self._job_attempt = 0
+                self._models_dir = models_dir
+                self._job_models = requested
+                self._job_attempt += 1
+                self._job_status = "retrying" if self._job_attempt > 1 else "running"
+                self._job_updated_at = now
+                self._last_sample_at = None
+                self._last_sample_bytes = None
+            self._persistent_run = persistent_run
             self._download_started = True
             self._running = True
             self._active_models = requested
             self._complete = False
+        if persistent_run:
+            self._persist_job(force=True)
 
         thread = threading.Thread(
             target=self._download_worker,
@@ -435,10 +617,14 @@ class SetupManager:
             state = self._models[model]
             state.status = status
             state.error = error
-            if status in ("pending", "done", "error"):
+            if status == "done":
                 state.downloaded_bytes = 0
                 state.total_bytes = 0
                 state.filename = None
+            persistent_run = self._persistent_run
+        logger.info("Model setup: {} -> {}", model, status)
+        if persistent_run:
+            self._persist_job(force=True)
 
     def _set_progress(
         self, model: str, downloaded_bytes: int, total_bytes: int, filename: str | None,
@@ -448,6 +634,10 @@ class SetupManager:
             state.downloaded_bytes = max(0, downloaded_bytes)
             state.total_bytes = max(0, total_bytes)
             state.filename = Path(filename).name if filename else None
+            self._record_sample_locked()
+            persistent_run = self._persistent_run
+        if persistent_run:
+            self._persist_job()
 
     # ── Download worker (runs in background thread) ───────────────────────────
 
@@ -473,9 +663,15 @@ class SetupManager:
                     if state.status == "pending":
                         state.status = "error"
                         state.error = f"Setup failed to start ({type(exc).__name__})"
+                persistent_run = self._persistent_run
+                if persistent_run:
+                    self._job_status = "failed"
                 self._complete = True
                 self._running = False
-                self._active_models = frozenset()
+                if not persistent_run:
+                    self._active_models = frozenset()
+            if persistent_run:
+                self._persist_job(force=True)
             return
 
         # ── CLIP ViT-L-14/openai ──────────────────────────────────────────
@@ -489,11 +685,44 @@ class SetupManager:
             try:
                 clip_cache = models_dir / "clip"
                 clip_cache.mkdir(parents=True, exist_ok=True)
+                os.environ["HF_HUB_DISABLE_XET"] = "1"
+                from huggingface_hub import constants as hf_constants  # type: ignore[import]
+
+                hf_constants.HF_HUB_DISABLE_XET = True
                 import open_clip  # type: ignore[import]
-                open_clip.create_model_and_transforms(
-                    CLIP_MODEL_NAME, pretrained=CLIP_PRETRAINED,
-                    device="cpu", cache_dir=str(clip_cache),
-                )
+
+                stop_progress = threading.Event()
+                expected_bytes = MODEL_META["clip"]["size_mb"] * 1024 * 1024
+
+                def report_clip_progress() -> None:
+                    while not stop_progress.wait(0.5):
+                        partials = list(clip_cache.rglob("*.incomplete"))
+                        if partials:
+                            partial = max(partials, key=lambda path: path.stat().st_size)
+                            self._set_progress("clip", partial.stat().st_size, expected_bytes, partial.name)
+
+                progress_thread = threading.Thread(target=report_clip_progress, daemon=True)
+                progress_thread.start()
+                try:
+                    for attempt in range(1, 4):
+                        try:
+                            open_clip.create_model_and_transforms(
+                                CLIP_MODEL_NAME, pretrained=CLIP_PRETRAINED,
+                                device="cpu", cache_dir=str(clip_cache),
+                            )
+                            break
+                        except Exception as exc:
+                            if attempt == 3:
+                                raise
+                            delay = 2 ** attempt
+                            logger.warning(
+                                "CLIP download interrupted ({}); retrying in {}s",
+                                type(exc).__name__, delay,
+                            )
+                            stop_progress.wait(delay)
+                finally:
+                    stop_progress.set()
+                    progress_thread.join(timeout=1)
                 # Verify the exact approved artifact selected by open_clip.
                 self._set("clip", "verifying")
                 if not self.has_valid_clip(models_dir):
@@ -599,10 +828,20 @@ class SetupManager:
             self._download_commercial_model(model_id, models_dir)
 
         with self._lock:
+            failed = any(self._models[model_id].status == "error" for model_id in model_ids)
+            persistent_run = self._persistent_run
+            if persistent_run:
+                self._job_status = "failed" if failed else "completed"
+            else:
+                self._active_models = frozenset()
             self._complete = True
             self._running = False
-            self._active_models = frozenset()
-        logger.info("setup_models: requested model downloads complete")
+            self._persistent_run = False
+        if persistent_run:
+            self._persist_job(force=True)
+            logger.info("Setup job {} finished with status {}", self._job_id, self._job_status)
+        else:
+            logger.info("Requested model downloads complete")
 
 
 # ── Module-level singleton ────────────────────────────────────────────────────

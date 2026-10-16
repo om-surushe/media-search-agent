@@ -65,6 +65,29 @@ export interface SetupWSUpdate {
   models: Record<string, ModelDownloadState>
 }
 
+export type SetupJobState = 'pending' | 'running' | 'retrying' | 'completed' | 'failed'
+
+export interface SetupJob {
+  version: number
+  id: string
+  status: SetupJobState
+  attempt: number
+  created_at: number
+  updated_at: number
+  downloaded_bytes: number
+  total_bytes: number
+  progress_percent: number
+  bytes_per_second: number | null
+  eta_seconds: number | null
+  models: Record<string, ModelDownloadState>
+}
+
+export interface SetupJobResponse {
+  ready: boolean
+  job: SetupJob | null
+  read_only_mode: boolean
+}
+
 import { apiUrl } from '../lib/apiBase'
 
 export async function fetchSetupStatus(): Promise<SetupStatus> {
@@ -73,11 +96,12 @@ export async function fetchSetupStatus(): Promise<SetupStatus> {
   return res.json()
 }
 
-/**
- * Re-trigger the first-launch model downloads (resets errored models and restarts the background
- * worker). The setup screen's Retry button calls this BEFORE reloading — a plain reload only
- * re-subscribes to the manager's held complete/error state and never restarts a failed download.
- */
+export async function fetchSetupJob(): Promise<SetupJobResponse> {
+  const res = await fetch(apiUrl('/api/setup/job'), { cache: 'no-store' })
+  if (!res.ok) throw new Error(`setup/job ${res.status}`)
+  return res.json()
+}
+
 export async function startSetup(): Promise<void> {
   const res = await fetch(apiUrl('/api/setup/start'), { method: 'POST' })
   if (!res.ok) throw new Error(`setup/start ${res.status}`)

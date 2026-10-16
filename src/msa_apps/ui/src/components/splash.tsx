@@ -11,7 +11,7 @@ export const DEPS_END_PCT = 60
  * Shared chrome for the first-run splash (M-7 · spec §S-2). Both phases of first run render inside
  * the SAME card so the experience reads as one continuous screen rather than two hand-offs:
  *   1. StartupGate — provisioning (Python + PyTorch/CUDA + deps) via `/health`.
- *   2. ModelDownload — the AI-model download via `/api/setup/status` + `/ws/setup`.
+ *   2. ModelDownload — persistent setup-job progress via `/api/setup/job` polling.
  *
  * Keeping the shell and the bar here (not duplicated per phase) is what guarantees the card, the
  * header, and the progress bar are pixel-identical across the hand-off — the bar just keeps filling.

@@ -4,9 +4,7 @@ Tests for Phase 2F Item 6 — startup readiness signal.
 /health must return {"status": "starting"} until the app is ready,
 then {"status": "ready"} once the lifespan startup completes.
 
-Also covers the lifespan model-setup sequencing added in Phase 1C:
-- SetupManager.start_if_needed() is called at startup, not at WebSocket connection time.
-- /ws/setup is a pure progress subscriber and must not call start_if_needed().
+Also covers persistent setup-job resume at startup and WebSocket compatibility.
 """
 import pytest
 from types import SimpleNamespace
@@ -51,7 +49,7 @@ class TestHealthEndpoint:
         from msa_apps.search_api import setup_models as _sm
         app.state._skip_instance_lock = True
         try:
-            with patch.object(_sm.get_manager(), "start_if_needed"):
+            with patch.object(_sm.get_manager(), "resume_if_needed"):
                 with TestClient(app) as client:
                     assert getattr(client.app.state, "_ready", False) is True
                     r = client.get("/health")
@@ -65,10 +63,10 @@ class TestHealthEndpoint:
 # ---------------------------------------------------------------------------
 
 class TestLifespanModelSetup:
-    """_lifespan must kick off SetupManager at startup regardless of client connections."""
+    """_lifespan resumes persistent setup jobs independently of clients."""
 
-    def test_lifespan_calls_start_if_needed_with_models_dir(self, tmp_path):
-        """When app.state.S is set, start_if_needed is called with S.models_dir."""
+    def test_lifespan_resumes_setup_job_with_models_dir(self, tmp_path):
+        """When app.state.S is set, resume_if_needed receives S.models_dir."""
         from msa_apps.search_api.app import app
         from msa_apps.search_api import setup_models as _sm
 
@@ -76,16 +74,16 @@ class TestLifespanModelSetup:
         app.state.S = fake_cfg
         app.state._skip_instance_lock = True
         try:
-            with patch.object(_sm.get_manager(), "start_if_needed") as mock_start:
+            with patch.object(_sm.get_manager(), "resume_if_needed") as mock_resume:
                 with TestClient(app):
                     pass
-            mock_start.assert_called_once_with(fake_cfg.models_dir)
+            mock_resume.assert_called_once_with(fake_cfg.models_dir)
         finally:
             del app.state.S
             del app.state._skip_instance_lock
 
     def test_lifespan_still_ready_when_config_unavailable(self, tmp_path):
-        """If config cannot be resolved, startup completes and start_if_needed is not called."""
+        """If config cannot be resolved, startup completes without resuming a setup job."""
         from msa_apps.search_api.app import app
         from msa_apps.search_api import setup_models as _sm
 
@@ -96,10 +94,10 @@ class TestLifespanModelSetup:
             del app.state.S
         try:
             with patch("msa_settings.load_config", side_effect=RuntimeError("no config.yaml")), \
-                 patch.object(_sm.get_manager(), "start_if_needed") as mock_start:
+                 patch.object(_sm.get_manager(), "resume_if_needed") as mock_resume:
                 with TestClient(app) as client:
                     assert getattr(client.app.state, "_ready", False) is True
-            mock_start.assert_not_called()
+            mock_resume.assert_not_called()
         finally:
             if had_S:
                 app.state.S = saved_S
@@ -120,7 +118,7 @@ class TestLifespanModelSetup:
                     mock_start.reset_mock()  # ignore the one call the lifespan makes at startup
                     r = client.post("/api/setup/retry")
                     assert r.status_code == 202
-                    assert r.json() == {"status": "retrying"}
+                    assert r.json() == {"job": None}
                     mock_start.assert_called_once_with(fake_cfg.models_dir)
         finally:
             del app.state.S

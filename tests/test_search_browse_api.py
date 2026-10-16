@@ -678,12 +678,12 @@ def test_read_only_query_engine_skips_encoder_when_clip_is_missing(monkeypatch, 
         deps.reset_query_engine()
 
 
-def test_normal_runtime_keeps_automatic_model_setup(client, monkeypatch):
+def test_normal_runtime_resumes_persistent_setup_job(client, monkeypatch):
     import msa_apps.search_api.app as api_module
 
     monkeypatch.delenv("MSA_SEARCH_BROWSE_READ_ONLY", raising=False)
-    start_setup = MagicMock()
-    monkeypatch.setattr(api_module._setup_models.get_manager(), "start_if_needed", start_setup)
+    resume_setup = MagicMock()
+    monkeypatch.setattr(api_module._setup_models.get_manager(), "resume_if_needed", resume_setup)
 
     with client:
-        start_setup.assert_called_once_with(client.app.state.S.models_dir)
+        resume_setup.assert_called_once_with(client.app.state.S.models_dir)

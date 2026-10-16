@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { Loader2, Download, AlertTriangle, FolderOpen, RotateCcw, Check } from 'lucide-react'
 import { apiUrl } from '../lib/apiBase'
-import { startSetup, type SetupStatus, type ModelInfo } from '../api/setup'
+import { fetchSetupJob, startSetup } from '../api/setup'
 import { ModelDownload } from './ModelDownload'
-import { SetupPrototype } from './SetupPrototype'
+import { SetupPrompt } from './SetupPrompt'
 import { SplashShell, ProgressBar, formatElapsed, DEPS_END_PCT } from './splash'
 
 /**
@@ -11,10 +11,9 @@ import { SplashShell, ProgressBar, formatElapsed, DEPS_END_PCT } from './splash'
  *
  * Polls `apiUrl('/health')` every second and renders a branded staged-progress
  * screen until the backend is ready. It then owns the WHOLE first-run experience in
- * ONE splash: once `/health` reports `ready` it checks `/api/setup/status`, and if the
- * AI models still need downloading it hands to the in-splash `ModelDownload` phase (the
- * bar continues 60→100) rather than revealing the app and popping a separate setup
- * screen. `children` mount only once provisioning AND the models are ready.
+ * ONE splash: once `/health` reports `ready` it checks the persistent setup job. An
+ * unfinished job resumes automatically and the UI polls its progress; a missing job asks
+ * for confirmation. `children` mount only once provisioning and setup are ready.
  *
  * Health payloads it understands:
  *   - provisioning responder: `{ status: 'provisioning'|'error', stage, pct, detail, log }`
@@ -136,12 +135,7 @@ export function StartupGate({
   const [errorKind, setErrorKind] = useState<ErrorKind>('unreachable')
   const [elapsedMs, setElapsedMs] = useState(0)
   const [retryNonce, setRetryNonce] = useState(0)
-  // Model list from the post-ready `/api/setup/status` check, handed to the model-download phase.
-  const [initialModels, setInitialModels] = useState<ModelInfo[]>([])
   const startedRef = useRef(Date.now())
-  // The overall first-run start — NOT reset on Retry (unlike startedRef) — so the model phase's
-  // elapsed clock continues from provisioning instead of resetting at the hand-off.
-  const overallStartRef = useRef(Date.now())
   // True while provisioning is plausibly still in progress: set on a `provisioning` tick and CLEARED
   // on any reachable non-provisioning answer (a `starting`/unrecognized 200, OR a non-ok response) —
   // once the responder answers with anything else we are no longer in the unreachable-blip regime.
@@ -259,19 +253,12 @@ export function StartupGate({
             // the model phase, which retries the fetch itself rather than trapping the user.
             stop = true
             try {
-              const sres = await fetch(apiUrl('/api/setup/status'), { cache: 'no-store' })
+              const setup = await fetchSetupJob()
               if (cancelled) return
-              const s = (sres.ok ? await sres.json().catch(() => null) : null) as SetupStatus | null
-              if (cancelled) return
-              if (s && s.ready) {
-                setPhase('ready')
-              } else {
-                setInitialModels(s?.models ?? [])
-                setPhase('setup')
-              }
+              if (setup.ready) setPhase('ready')
+              else setPhase(setup.job ? 'models' : 'setup')
             } catch {
               if (cancelled) return
-              setInitialModels([])
               setPhase('setup')
             }
           } else if (body.status === 'error') {
@@ -340,7 +327,7 @@ export function StartupGate({
 
   if (phase === 'setup') {
     return (
-      <SetupPrototype
+      <SetupPrompt
         onStart={async () => {
           await startSetup()
           startedRef.current = Date.now()
@@ -350,14 +337,10 @@ export function StartupGate({
     )
   }
 
-  // First-run model download — same splash card, the bar continues 60→100 (spec §S-2).
+  // Persistent setup job progress; polling survives browser and application restarts.
   if (phase === 'models') {
     return (
-      <ModelDownload
-        onReady={() => setPhase('ready')}
-        startedAtMs={overallStartRef.current}
-        initialModels={initialModels}
-      />
+      <ModelDownload onReady={() => setPhase('ready')} />
     )
   }
 

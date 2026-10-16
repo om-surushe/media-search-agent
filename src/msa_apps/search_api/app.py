@@ -251,6 +251,8 @@ async def _lifespan(app: FastAPI):
                 _startup_cfg = _lc()
             except Exception as _exc:
                 logger.warning("Could not resolve config for startup: {}", _exc)
+        if _startup_cfg is not None and not _search_browse_read_only():
+            _setup_models.get_manager().resume_if_needed(_startup_cfg.models_dir)
         # Reranker event ledger (ADR-012/013): build a best-effort LedgerWriter onto
         # app.state when msa_ranker is installed and event_logging is on. Absent package
         # or any failure → no writer → MSA behaves exactly as today.
@@ -3482,28 +3484,38 @@ def download_commercial_model(
     return {"status": "preparing", "model_id": model_id}
 
 
+@app.get("/api/setup/job")
+def get_setup_job(request: Request):
+    """Return the persistent setup job; clients poll this instead of holding a socket."""
+    if _search_browse_read_only():
+        return {"ready": True, "job": None, "read_only_mode": True}
+    config = _get_config(request)
+    manager = _setup_models.get_manager()
+    job = manager.get_job(config.models_dir)
+    ready = manager.is_ready(config.models_dir) if job is None or job["status"] == "completed" else False
+    return {"ready": ready, "job": job, "read_only_mode": False}
+
+
 @app.post("/api/setup/start", status_code=202)
 def start_setup(request: Request):
-    """Start first-launch setup after explicit user confirmation."""
+    """Create or resume the persistent first-launch setup job."""
     if _search_browse_read_only():
         raise HTTPException(status_code=409, detail="Setup downloads are disabled in Search/Browse read-only mode.")
-    _setup_models.get_manager().start_if_needed(_get_config(request).models_dir)
-    return {"status": "preparing"}
+    config = _get_config(request)
+    manager = _setup_models.get_manager()
+    manager.start_if_needed(config.models_dir)
+    return {"job": manager.get_job(config.models_dir)}
 
 
 @app.post("/api/setup/retry", status_code=202)
 def retry_setup(request: Request):
-    """Re-trigger the first-launch model downloads: reset any errored models to pending and restart
-    the background worker. This is what the setup screen's Retry button needs — a plain page reload
-    only re-subscribes to the manager's held complete/error state (``/ws/setup`` is a pure subscriber
-    that must never call ``start_if_needed``). Idempotent and safe: ``start_if_needed`` is a no-op
-    when a download is already cleanly in flight or fully done, and only resets+restarts once every
-    in-progress model has settled with at least one error."""
+    """Retry the existing persistent setup job."""
     if _search_browse_read_only():
         raise HTTPException(status_code=409, detail="Model downloads are disabled in Search/Browse read-only mode.")
-    S = _get_config(request)
-    _setup_models.get_manager().start_if_needed(S.models_dir)
-    return {"status": "retrying"}
+    config = _get_config(request)
+    manager = _setup_models.get_manager()
+    manager.start_if_needed(config.models_dir)
+    return {"job": manager.get_job(config.models_dir)}
 
 
 @app.post("/api/setup/captioning/retry", status_code=202)
@@ -3519,43 +3531,18 @@ def retry_captioning_setup(request: Request):
     return {"status": "preparing"}
 
 
+# Adapter Workbench still uses this stream for optional one-off model downloads.
+# First-launch setup uses the persistent polled job above.
 @app.websocket("/ws/setup")
 async def ws_setup(websocket: WebSocket):
-    """Stream first-launch model download progress.
-
-    Connects → polls SetupManager state every second → sends {type:"complete"}
-    when all models are done or errored. The download itself is initiated by
-    /api/setup/start; this handler is a pure progress subscriber and must
-    not call start_if_needed() — a reconnecting client must not race with an
-    in-progress download.
-    """
     await websocket.accept()
-
-    # WebSocket handlers cannot use Depends(), so resolve config the same way
-    # _get_config() does: prefer app.state.S so that test config_override and
-    # runtime hot-reload are both respected.
-    _cfg = (
-        getattr(websocket.app.state, "S", None)
-        or getattr(websocket.app.state, "config", None)
-    )
-    if _cfg is None:
-        try:
-            from msa_settings import load_config as _lc
-            _cfg = _lc()
-        except Exception:
-            await websocket.close(code=1011)
-            return
-
-    models_dir: Path = _cfg.models_dir
     manager = _setup_models.get_manager()
-
     try:
         while True:
-            status = manager.get_status()
             complete = manager.is_complete()
             await websocket.send_json({
-                "type":   "complete" if complete else "update",
-                "models": status,
+                "type": "complete" if complete else "update",
+                "models": manager.get_status(),
             })
             if complete:
                 break

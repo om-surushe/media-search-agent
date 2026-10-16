@@ -3,23 +3,20 @@ import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { StartupGate } from './StartupGate'
 
-// The model-download phase is covered in ModelDownload.test.tsx; here we stub it so the gate's
-// hand-off can be asserted without a QueryClient/WebSocket. It only renders in the 'models' phase.
+// The model-download phase is covered in ModelDownload.test.tsx; here we stub the view so the
+// gate hand-off can be tested without a QueryClient.
 vi.mock('./ModelDownload', () => ({
-  ModelDownload: (props: { initialModels: unknown[] }) => (
-    <div>MODELS PHASE ({props.initialModels.length} models)</div>
-  ),
+  ModelDownload: () => <div>MODELS PHASE</div>,
 }))
 
-// URL-aware fetch stub: /health drives the gate; once it reports `ready`, StartupGate checks
-// /api/setup/status before revealing children. `setup` defaults to models-present (ready:true) so
-// the ready path goes straight to children; tests exercising the model phase pass a not-ready setup.
-function stubHealth(body: () => unknown, setup: () => unknown = () => ({ ready: true, models: [] })) {
+// URL-aware fetch stub: /health drives startup; the persistent setup-job response determines the
+// setup view or whether the app can be revealed.
+function stubHealth(body: () => unknown, setup: () => unknown = () => ({ ready: true, job: null })) {
   vi.stubGlobal(
     'fetch',
     vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input)
-      const payload = url.includes('/api/setup/status') ? setup() : body()
+      const payload = url.includes('/api/setup/job') ? setup() : body()
       return { ok: true, json: async () => payload } as unknown as Response
     }),
   )
@@ -41,23 +38,17 @@ describe('StartupGate', () => {
   })
 
   it('hands to the model-download phase (same splash) when the backend is ready but models are missing', async () => {
-    // /health ready but /api/setup/status not-ready → the gate STAYS up and shows the in-splash
-    // model download (not the app), passing the fetched model list through. Reveals nothing yet.
+    // /health ready with an unfinished job → resume into the persistent job progress screen.
     stubHealth(
       () => ({ status: 'ready' }),
-      () => ({
-        ready: false,
-        models: [
-          { id: 'clip', label: 'CLIP', size_mb: 1711, present: false, integrity_hint: '', source: 'huggingface.co/x' },
-        ],
-      }),
+      () => ({ ready: false, job: { id: 'job-1', status: 'running' } }),
     )
     render(
       <StartupGate pollIntervalMs={5}>
         <div>THE APP</div>
       </StartupGate>,
     )
-    expect(await screen.findByText(/MODELS PHASE \(1 models\)/i)).toBeInTheDocument()
+    expect(await screen.findByText('MODELS PHASE')).toBeInTheDocument()
     expect(screen.queryByText('THE APP')).not.toBeInTheDocument() // app still gated behind the models
   })
 
@@ -494,8 +485,8 @@ describe('StartupGate', () => {
       'fetch',
       vi.fn(async (input: RequestInfo | URL) => {
         // Models present, so a `ready` /health goes straight to children (no model phase here).
-        if (String(input).includes('/api/setup/status')) {
-          return { ok: true, json: async () => ({ ready: true, models: [] }) } as unknown as Response
+        if (String(input).includes('/api/setup/job')) {
+          return { ok: true, json: async () => ({ ready: true, job: null }) } as unknown as Response
         }
         return {
           ok: true,
