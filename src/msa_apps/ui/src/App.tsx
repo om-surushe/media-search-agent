@@ -13,6 +13,7 @@ import { KeyframesPage } from '@/pages/KeyframesPage'
 import { CollectionsPage } from '@/pages/CollectionsPage'
 import { AdapterWorkbenchPage } from '@/pages/AdapterWorkbenchPage'
 import { StartupGate } from '@/components/StartupGate'
+import { SetupPrototype } from '@/components/SetupPrototype'
 import { useIndexerRunning } from '@/hooks/useIndexerStatus'
 import { useCloseWhileIndexingGuard } from '@/hooks/useCloseWhileIndexing'
 
@@ -71,6 +72,10 @@ function AppInner() {
 }
 
 export function App() {
+  const showSetupPrototype = new URLSearchParams(window.location.search).get('setup-prototype') === '1'
+
+  if (showSetupPrototype) return <SetupPrototype />
+
   // StartupGate owns the entire first run in one splash: it polls /health for provisioning, then
   // gates on /api/setup/status + /ws/setup for the AI-model download, revealing AppInner only once
   // both are done (M-7 · spec §S-2). In browser/dev mode /health is same-origin and already ready
