@@ -29,6 +29,7 @@ function MainApp() {
           <Route path="browse"   element={<BrowsePage />} />
           <Route path="people"   element={<PeoplePage />} />
           <Route path="collections" element={<CollectionsPage />} />
+          <Route path="collections/:collectionId" element={<CollectionsPage />} />
           <Route path="indexer"  element={<IndexerPage />} />
           <Route path="settings" element={<SettingsPage />} />
           <Route path="keyframes" element={<Navigate to="/indexer" replace />} />

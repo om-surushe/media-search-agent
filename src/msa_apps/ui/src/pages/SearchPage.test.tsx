@@ -106,6 +106,47 @@ describe('SearchPage', () => {
     expect(calls.some(([url]) => String(url) === '/track/open')).toBe(false)
   })
 
+  it('selects multiple search results visibly for collection actions', async () => {
+    const items = ['image-match', 'video-match'].map((id, index) => ({
+      id, path: `/tmp/${id}.jpg`, thumbnail: null, score: 0.8, caption_excerpt: 'a match',
+      tags: [], type: index ? 'video' : 'image', timestamp: null, shot_id: null,
+      date: null, gps_lat: null, gps_lon: null, place: null,
+    }))
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      const body = url === '/search' ? { results: items, search_id: null }
+        : url.includes('/collections?') ? { items: [{ collection_id: 'col-trip', name: 'Trip', description: '', created_at: '' }], count: 1 }
+          : url.endsWith('/collections/col-trip/items') && init?.method === 'POST' ? { added: 2 }
+            : []
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(body) })
+    }))
+    renderPage()
+    fireEvent.change(screen.getByPlaceholderText(/describe what you're looking for/i), { target: { value: 'match' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Search' }))
+    await screen.findByText('2 results')
+    fireEvent.click(screen.getByRole('button', { name: 'Select assets' }))
+    const first = await screen.findByRole('checkbox', { name: 'Select image-match' })
+    const second = screen.getByRole('checkbox', { name: 'Select video-match' })
+
+    fireEvent.click(first)
+    fireEvent.click(second)
+
+    expect(first).toBeChecked()
+    expect(second).toBeChecked()
+    expect(screen.getByText('2 assets selected')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Add to collection' }))
+    await screen.findByRole('option', { name: 'Trip' })
+    fireEvent.change(screen.getByLabelText('Existing collection'), { target: { value: 'col-trip' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Add selected assets' }))
+
+    expect(await screen.findByRole('status')).toHaveTextContent('Added 2 of 2 selected assets to “Trip”.')
+    expect(screen.getByRole('button', { name: 'Select assets' })).toBeInTheDocument()
+    expect(screen.queryByRole('checkbox', { name: 'Select image-match' })).toBeNull()
+    expect(fetch).toHaveBeenCalledWith('/collections/col-trip/items', expect.objectContaining({
+      method: 'POST', body: JSON.stringify({ media_ids: ['image-match', 'video-match'] }),
+    }))
+  })
+
   it('labels lexical results when semantic visual search is unavailable', async () => {
     const searchResult = {
       id: 'lexical-video', path: '/tmp/clip.mp4', thumbnail: null, score: null,
