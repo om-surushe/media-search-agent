@@ -2,6 +2,9 @@ import { useState, useCallback, useRef, useEffect } from 'react'
 import { Search, AlertTriangle } from 'lucide-react'
 import { useSearch } from '../hooks/useSearch'
 import { useIndexerPhase } from '../hooks/useIndexerStatus'
+import { useQuery } from '@tanstack/react-query'
+import { getIndexStats } from '../api/indexer'
+import { LibraryEmptyState } from '../components/LibraryEmptyState'
 import { MediaCard } from '../components/media/MediaCard'
 import { MediaDetailDrawer } from '../components/media/MediaDetailDrawer'
 import { MediaSelectionToolbar } from '../components/media/MediaSelectionToolbar'
@@ -31,16 +34,28 @@ export function SearchPage() {
   const [selectedSearchId, setSelectedSearchId] = useState<string | null>(null)
   const selection = useMediaSelection()
   const { running: indexerRunning, phase: indexerPhase } = useIndexerPhase()
+  const { data: indexStats, isLoading: indexStatsLoading, refetch: refetchIndexStats } = useQuery({
+    queryKey: ['indexer-stats'],
+    queryFn: getIndexStats,
+    staleTime: 0,
+    refetchInterval: indexerRunning ? 5_000 : false,
+  })
+  const noIndexedMedia = !!indexStats && indexStats.images + indexStats.videos === 0
+  const wasIndexerRunning = useRef(indexerRunning)
 
   const debouncedFilters = useDebounce(filters, 300)
   const { data, isFetching, isError } = useSearch(submitted, debouncedFilters)
   const allResults = data?.results
   const searchId = data?.search_id ?? null
   const results = minScore > 0
-    ? allResults?.filter(r => r.caption_excerpt || (r.score ?? 0) * 100 >= minScore)
+    ? allResults?.filter(r => (r.score == null && r.caption_excerpt) || (r.score ?? 0) * 100 >= minScore)
     : allResults
 
   useEffect(() => { selection.clear() }, [submitted, debouncedFilters, minScore, selection.clear])
+  useEffect(() => {
+    if (wasIndexerRunning.current && !indexerRunning) void refetchIndexStats()
+    wasIndexerRunning.current = indexerRunning
+  }, [indexerRunning, refetchIndexStats])
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
@@ -49,7 +64,7 @@ export function SearchPage() {
 
   return (
     <div className="flex flex-col h-full gap-4">
-      {indexerRunning && (
+      {indexerRunning && !noIndexedMedia && (
         <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-700 text-amber-800 dark:text-amber-300 text-sm">
           <AlertTriangle size={15} className="shrink-0" />
           {indexerPhase === 'exporting'
@@ -83,9 +98,10 @@ export function SearchPage() {
 
         {/* Results */}
         <div className="flex-1 overflow-y-auto">
-          {!submitted && (
+          {!submitted && noIndexedMedia && <LibraryEmptyState indexing={indexerRunning} />}
+          {!submitted && !noIndexedMedia && (
             <div className="flex items-center justify-center h-full text-zinc-300 dark:text-zinc-600 text-sm">
-              Enter a search query to find photos and videos
+              {indexStatsLoading ? 'Checking your library…' : 'Enter a search query to find photos and videos'}
             </div>
           )}
 
@@ -104,7 +120,13 @@ export function SearchPage() {
             </div>
           )}
 
-          {submitted && !isFetching && allResults?.length === 0 && (
+          {submitted && !isFetching && allResults?.length === 0 && indexStatsLoading && (
+            <div className="text-zinc-400 dark:text-zinc-500 text-sm">Checking your library…</div>
+          )}
+          {submitted && !isFetching && allResults?.length === 0 && noIndexedMedia && (
+            <LibraryEmptyState indexing={indexerRunning} />
+          )}
+          {submitted && !isFetching && allResults?.length === 0 && !indexStatsLoading && !noIndexedMedia && (
             <div className="text-zinc-400 dark:text-zinc-500 text-sm">No results found for "{submitted}"</div>
           )}
           {submitted && !isFetching && (allResults?.length ?? 0) > 0 && results?.length === 0 && (

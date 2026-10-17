@@ -37,6 +37,19 @@ const intelligence = {
   },
 }
 
+class MockWebSocket {
+  onmessage: ((event: { data: string }) => void) | null = null
+  static pendingMessage: object | null = null
+
+  constructor(_url: string) {
+    if (MockWebSocket.pendingMessage) {
+      const message = MockWebSocket.pendingMessage
+      setTimeout(() => this.onmessage?.({ data: JSON.stringify(message) }), 0)
+    }
+  }
+  close() {}
+}
+
 function renderPage() {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   return render(
@@ -47,6 +60,8 @@ function renderPage() {
 }
 
 beforeEach(() => {
+  MockWebSocket.pendingMessage = { type: 'update', status: { status: 'idle' }, log: [] }
+  vi.stubGlobal('WebSocket', MockWebSocket)
   vi.stubGlobal('IntersectionObserver', class {
     observe() {}
     disconnect() {}
@@ -66,6 +81,33 @@ beforeEach(() => {
 afterEach(() => vi.unstubAllGlobals())
 
 describe('BrowsePage shared inspector', () => {
+  it('directs an empty-library user to add a media folder', async () => {
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      const body = url.startsWith('/media?') ? { items: [], count: 0, limit: 48, offset: 0 }
+        : url === '/people' ? { people: [] } : url === '/tags' ? [] : {}
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(body) })
+    }))
+    renderPage()
+
+    expect(await screen.findByRole('heading', { name: 'Your library is not indexed yet' })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'Add a media folder' })).toHaveAttribute('href', '/indexer')
+  })
+
+  it('explains that an empty library is still being indexed', async () => {
+    MockWebSocket.pendingMessage = { type: 'update', status: { status: 'running' }, log: [] }
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      const body = url.startsWith('/media?') ? { items: [], count: 0, limit: 48, offset: 0 }
+        : url === '/people' ? { people: [] } : url === '/tags' ? [] : {}
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(body) })
+    }))
+    renderPage()
+
+    expect(await screen.findByRole('heading', { name: 'Your media is being indexed' })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'View indexing progress' })).toHaveAttribute('href', '/indexer')
+  })
+
   it('selects browse results visibly for collection actions', async () => {
     vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
       const url = String(input)

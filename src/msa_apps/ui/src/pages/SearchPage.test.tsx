@@ -73,6 +73,95 @@ afterEach(() => {
 // ── Tests ──────────────────────────────────────────────────────────────────
 
 describe('SearchPage', () => {
+  it('guides a first-time user to add a folder when no media is indexed', async () => {
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const body = String(input) === '/indexer/stats'
+        ? { images: 0, videos: 0, total_video_duration: 0, faces: 0, people: 0, last_indexed_at: null }
+        : []
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(body) })
+    }))
+    renderPage()
+
+    expect(await screen.findByRole('heading', { name: 'Your library is not indexed yet' })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'Add a media folder' })).toHaveAttribute('href', '/indexer')
+  })
+
+  it('shows an in-progress next step instead of an empty search result while indexing the first library', async () => {
+    MockWebSocket.pendingMessage = runningUpdate
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      const body = url === '/indexer/stats'
+        ? { images: 0, videos: 0, total_video_duration: 0, faces: 0, people: 0, last_indexed_at: null }
+        : url === '/search' ? { results: [], search_id: null } : []
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(body) })
+    }))
+    renderPage()
+    fireEvent.change(screen.getByPlaceholderText(/describe what you're looking for/i), { target: { value: 'sunset' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Search' }))
+
+    expect(await screen.findByRole('heading', { name: 'Your media is being indexed' })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'View indexing progress' })).toHaveAttribute('href', '/indexer')
+    expect(screen.queryByText(/No results found for/)).toBeNull()
+  })
+
+  it('removes first-time guidance after indexing completes', async () => {
+    let indexed = false
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const body = String(input) === '/indexer/stats'
+        ? { images: indexed ? 1 : 0, videos: 0, total_video_duration: 0, faces: 0, people: 0, last_indexed_at: null }
+        : []
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(body) })
+    }))
+    MockWebSocket.pendingMessage = runningUpdate
+    renderPage()
+    expect(await screen.findByRole('heading', { name: 'Your media is being indexed' })).toBeInTheDocument()
+
+    indexed = true
+    MockWebSocket.lastInstance?.onmessage?.({ data: JSON.stringify({
+      type: 'update',
+      status: { status: 'complete', run_id: 'abc', started_at: null, finished_at: null, elapsed_seconds: 10, return_code: 0 },
+      log: [],
+    }) })
+
+    expect(await screen.findByText('Enter a search query to find photos and videos')).toBeInTheDocument()
+  })
+
+  it('keeps a genuine no-match message when media is already indexed', async () => {
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      const body = url === '/indexer/stats'
+        ? { images: 5, videos: 2, total_video_duration: 0, faces: 0, people: 0, last_indexed_at: null }
+        : url === '/search' ? { results: [], search_id: null } : []
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(body) })
+    }))
+    renderPage()
+    fireEvent.change(screen.getByPlaceholderText(/describe what you're looking for/i), { target: { value: 'unicorn' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Search' }))
+
+    expect(await screen.findByText('No results found for "unicorn"')).toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: 'Your library is not indexed yet' })).toBeNull()
+  })
+  it('filters captioned semantic matches below the score threshold', async () => {
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      const body = url === '/indexer/stats'
+        ? { images: 1, videos: 0, total_video_duration: 0, faces: 0, people: 0, last_indexed_at: null }
+        : url === '/search' ? {
+          results: [{ id: 'unrelated', path: '/tmp/unrelated.jpg', thumbnail: null, score: 0.05,
+            caption_excerpt: 'A distant shoreline.', tags: [], type: 'image', timestamp: null,
+            shot_id: null, date: null, gps_lat: null, gps_lon: null, place: null }],
+          search_id: null,
+        } : []
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(body) })
+    }))
+    renderPage()
+    fireEvent.change(screen.getByPlaceholderText(/describe what you're looking for/i), { target: { value: 'ducks' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Search' }))
+
+    expect(await screen.findByText('All 1 results are below the 15% score threshold — try lowering it.')).toBeInTheDocument()
+    expect(screen.queryByText('1 result')).toBeNull()
+  })
+
   it('opens the shared drawer and displays stored AI caption provenance', async () => {
     const payload = {
       media: { id: 'captioned-image', type: 'image', mime: 'image/jpeg', filename: 'dog.jpg', source_name: 'fixture', source_folder: 'photos', path: '/tmp/dog.jpg', size_bytes: 12, width: 2, height: 2, duration: null, captured_at: null, added_at: null, filesystem_mtime: null, camera: null, lens: null, gps_lat: null, gps_lon: null, place: null, gps_processed: false, gps_data_mode: null, gps_sensitive: false, hash_blake3: null, fingerprints: [] },

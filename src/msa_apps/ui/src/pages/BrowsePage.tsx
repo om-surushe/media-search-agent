@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
-import { Link } from 'react-router-dom'
 import { useMedia } from '../hooks/useMedia'
+import { useIndexerPhase } from '../hooks/useIndexerStatus'
+import { LibraryEmptyState } from '../components/LibraryEmptyState'
 import { MediaCard } from '../components/media/MediaCard'
 import { MediaDetailDrawer } from '../components/media/MediaDetailDrawer'
 import { MediaSelectionToolbar } from '../components/media/MediaSelectionToolbar'
@@ -18,6 +19,7 @@ export function BrowsePage() {
   const [filters, setFilters] = useState<MediaFilters>({})
   const [selected, setSelected] = useState<MediaItem | null>(null)
   const selection = useMediaSelection()
+  const { running: indexerRunning } = useIndexerPhase()
   const loaderRef = useRef<HTMLDivElement>(null)
 
   const {
@@ -77,16 +79,7 @@ export function BrowsePage() {
               No media matches your filters
             </div>
           ) : (
-            <div className="flex flex-col items-center justify-center h-48 gap-2 text-center px-6">
-              <p className="text-zinc-300 dark:text-zinc-400 text-sm font-medium">Your library is empty</p>
-              <p className="text-zinc-500 dark:text-zinc-600 text-xs">
-                Add media folders on the{' '}
-                <Link to="/indexer" className="text-blue-400 hover:text-blue-300 underline">
-                  Indexer page
-                </Link>
-                , then run the indexer to get started.
-              </p>
-            </div>
+            <LibraryEmptyState indexing={indexerRunning} />
           )
         )}
 
