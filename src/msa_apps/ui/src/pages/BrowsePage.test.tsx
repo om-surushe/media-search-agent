@@ -66,6 +66,32 @@ beforeEach(() => {
 afterEach(() => vi.unstubAllGlobals())
 
 describe('BrowsePage shared inspector', () => {
+  it('selects browse results visibly for collection actions', async () => {
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      const body = url.startsWith('/media?') ? {
+        items: [
+          { id: 'browse-image', path: '/tmp/image.jpg', type: 'image', date: null },
+          { id: 'browse-video', path: '/tmp/video.mp4', type: 'video', date: null },
+        ], count: 2, limit: 48, offset: 0,
+      } : url === '/people' ? { people: [] } : url === '/tags' ? [] : {}
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(body) })
+    }))
+    renderPage()
+    await screen.findByRole('button', { name: 'Select assets' })
+    fireEvent.click(screen.getByRole('button', { name: 'Select assets' }))
+    const image = await screen.findByRole('checkbox', { name: 'Select browse-image' })
+    const video = screen.getByRole('checkbox', { name: 'Select browse-video' })
+
+    fireEvent.click(image)
+    fireEvent.click(video)
+
+    expect(image).toBeChecked()
+    expect(video).toBeChecked()
+    expect(screen.getByText('2 assets selected')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Add to collection' })).toBeInTheDocument()
+  })
+
   it('opens the shared drawer and displays the stored AI description without write requests', async () => {
     const { container } = renderPage()
     // The card preview is decorative; locate its button by the indexed thumbnail URL.

@@ -3,7 +3,9 @@ import { Link } from 'react-router-dom'
 import { useMedia } from '../hooks/useMedia'
 import { MediaCard } from '../components/media/MediaCard'
 import { MediaDetailDrawer } from '../components/media/MediaDetailDrawer'
+import { MediaSelectionToolbar } from '../components/media/MediaSelectionToolbar'
 import { FilterBar } from '../components/filters/FilterBar'
+import { useMediaSelection } from '../hooks/useMediaSelection'
 import type { MediaFilters, MediaItem } from '../api/types'
 
 function hasActiveFilters(filters: MediaFilters): boolean {
@@ -15,6 +17,7 @@ function hasActiveFilters(filters: MediaFilters): boolean {
 export function BrowsePage() {
   const [filters, setFilters] = useState<MediaFilters>({})
   const [selected, setSelected] = useState<MediaItem | null>(null)
+  const selection = useMediaSelection()
   const loaderRef = useRef<HTMLDivElement>(null)
 
   const {
@@ -29,6 +32,8 @@ export function BrowsePage() {
   const items = data?.pages.flat() ?? []
   const filtersActive = hasActiveFilters(filters)
   const initialLoad = isFetching && items.length === 0
+
+  useEffect(() => { selection.clear() }, [filters, selection.clear])
 
   // Infinite scroll via IntersectionObserver
   useEffect(() => {
@@ -86,20 +91,28 @@ export function BrowsePage() {
         )}
 
         {items.length > 0 && (
-          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6 gap-3">
-            {items.map(item => (
-              <MediaCard
-                key={item.id}
-                id={item.id}
-                path={item.path}
-                type={item.type}
-                date={item.date}
-                place={item.place}
-                duration={item.duration ?? undefined}
-                onClick={() => setSelected(item)}
-              />
-            ))}
-          </div>
+          <>
+            <div className="mb-3 flex justify-end">
+              <MediaSelectionToolbar active={selection.active} selectedIds={selection.selectedIds} onStart={selection.start} onCancel={selection.clear} />
+            </div>
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6 gap-3">
+              {items.map(item => (
+                <MediaCard
+                  key={item.id}
+                  id={item.id}
+                  path={item.path}
+                  type={item.type}
+                  date={item.date}
+                  place={item.place}
+                  duration={item.duration ?? undefined}
+                  selectionEnabled={selection.active}
+                  selected={selection.selectedIds.includes(item.id)}
+                  onSelect={() => selection.toggle(item.id)}
+                  onClick={() => setSelected(item)}
+                />
+              ))}
+            </div>
+          </>
         )}
 
         {/* Infinite scroll sentinel */}

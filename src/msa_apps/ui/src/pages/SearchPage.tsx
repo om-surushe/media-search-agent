@@ -4,7 +4,9 @@ import { useSearch } from '../hooks/useSearch'
 import { useIndexerPhase } from '../hooks/useIndexerStatus'
 import { MediaCard } from '../components/media/MediaCard'
 import { MediaDetailDrawer } from '../components/media/MediaDetailDrawer'
+import { MediaSelectionToolbar } from '../components/media/MediaSelectionToolbar'
 import { FilterPanel } from '../components/filters/FilterPanel'
+import { useMediaSelection } from '../hooks/useMediaSelection'
 import type { SearchFilters, SearchItem } from '../api/types'
 
 function useDebounce<T>(value: T, delay: number): T {
@@ -27,6 +29,7 @@ export function SearchPage() {
   // Snapshot the search_id at click time so an open stays tied to the search that produced
   // the result — a later background refetch changing data.search_id can't re-attribute it.
   const [selectedSearchId, setSelectedSearchId] = useState<string | null>(null)
+  const selection = useMediaSelection()
   const { running: indexerRunning, phase: indexerPhase } = useIndexerPhase()
 
   const debouncedFilters = useDebounce(filters, 300)
@@ -36,6 +39,8 @@ export function SearchPage() {
   const results = minScore > 0
     ? allResults?.filter(r => r.caption_excerpt || (r.score ?? 0) * 100 >= minScore)
     : allResults
+
+  useEffect(() => { selection.clear() }, [submitted, debouncedFilters, minScore, selection.clear])
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
@@ -110,9 +115,12 @@ export function SearchPage() {
 
           {results && results.length > 0 && (
             <>
-              <div className="text-xs text-zinc-400 dark:text-zinc-500 mb-3">
-                {results.length} result{results.length !== 1 ? 's' : ''}
-                {isFetching && ' · updating…'}
+              <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+                <div className="text-xs text-zinc-400 dark:text-zinc-500">
+                  {results.length} result{results.length !== 1 ? 's' : ''}
+                  {isFetching && ' · updating…'}
+                </div>
+                <MediaSelectionToolbar active={selection.active} selectedIds={selection.selectedIds} onStart={selection.start} onCancel={selection.clear} />
               </div>
               <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-3">
                 {results.map(item => (
@@ -125,6 +133,9 @@ export function SearchPage() {
                     place={item.place}
                     captionExcerpt={item.caption_excerpt}
                     sceneMatches={item.scene_matches}
+                    selectionEnabled={selection.active}
+                    selected={selection.selectedIds.includes(item.id)}
+                    onSelect={() => selection.toggle(item.id)}
                     onClick={() => { setSelected(item); setSelectedSearchId(searchId) }}
                   />
                 ))}
