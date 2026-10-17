@@ -41,6 +41,7 @@ export interface IndexerRunSummary {
   }
   processing_order?: ProcessingOrder
   total_found?: number
+  files_walked?: number
   already_indexed?: number
   needs_processing?: number
   images_to_process?: number

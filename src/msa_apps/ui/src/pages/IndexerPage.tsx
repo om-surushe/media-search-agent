@@ -36,6 +36,31 @@ function formatRate(s: number | null | undefined): string {
   return `${formatDuration(s)}/min`
 }
 
+function statusLabel(status: string): string {
+  if (status === 'running') return 'Indexing'
+  if (status === 'complete') return 'Completed'
+  if (status === 'error') return 'Failed'
+  if (status === 'stopped') return 'Cancelled'
+  return 'Idle'
+}
+
+function activityLabel(phase: string | undefined): string {
+  switch (phase) {
+    case 'counting': return 'Scanning your media folders'
+    case 'analyzing': return 'Checking which files need indexing'
+    case 'processing': return 'Indexing photos and videos'
+    case 'exporting': return 'Updating the searchable library'
+    case 'export_blocked': return 'Waiting to update the searchable library'
+    case 'captioning': return 'Adding photo captions'
+    case 'captioning_error': return 'Photo captioning reported errors'
+    case 'scene_captioning': return 'Adding video scene captions'
+    case 'scene_captioning_error': return 'Video captioning reported errors'
+    case 'complete': return 'Preparing the searchable library'
+    case 'commit_stats': return 'Saving the run summary'
+    default: return 'Processing your media files'
+  }
+}
+
 function parseActivityLine(line: string | null): { timestamp: string | null; fileName: string | null; message: string } | null {
   if (!line) return null
 
@@ -73,13 +98,13 @@ function toSettingsUpdate(options: IndexerOptions): IndexerSettingsUpdate {
 
 export function IndexerPage() {
   const wsUpdate = useIndexerWS()
-  const statusInfo = wsUpdate?.status ?? null
   const logLines   = wsUpdate?.log ?? []
   const { data: apiStatus } = useQuery({
     queryKey: ['indexer-status'],
     queryFn: getIndexerStatus,
     retry: false,
   })
+  const statusInfo = wsUpdate?.status ?? apiStatus ?? null
 
   const [logOpen, setLogOpen] = useState(false)
   const [logExpanded, setLogExpanded] = useState(false)
@@ -173,6 +198,11 @@ export function IndexerPage() {
   const activityLine = parseActivityLine(lastLine)
   const summary = statusInfo?.summary ?? null
   const eta = summary?.estimated_remaining_seconds ?? null
+  const currentActivity = isRunning ? activityLabel(summary?.phase) : null
+  const totalFiles = summary?.total_found
+  const filesWalked = summary?.files_walked
+  const hasCaptionFailures = summary?.captioning != null || summary?.video_scene_captioning != null
+  const captionFailures = (summary?.captioning?.failed ?? 0) + (summary?.video_scene_captioning?.failed ?? 0)
   const showSummaryGrid = (isRunning || status === 'complete') && summary && (
     summary.total_found != null ||
     summary.already_indexed != null ||
@@ -191,6 +221,47 @@ export function IndexerPage() {
           Indexing and source changes are disabled in this Search/Browse read-only session.
         </div>
       )}
+
+      <section aria-label="Indexing status" aria-live="polite" className="rounded-lg border border-slate-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 p-4 space-y-2">
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+          <span className={cn(
+            'rounded-full px-2.5 py-1 text-sm font-semibold',
+            status === 'running' && 'bg-green-100 text-green-800 dark:bg-green-950 dark:text-green-300',
+            status === 'complete' && 'bg-indigo-100 text-indigo-800 dark:bg-indigo-950 dark:text-indigo-300',
+            status === 'error' && 'bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-300',
+            status === 'stopped' && 'bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300',
+            status === 'idle' && 'bg-zinc-100 text-zinc-700 dark:bg-zinc-700 dark:text-zinc-200',
+          )}>{statusLabel(status)}</span>
+          {elapsed != null && <span className="text-xs text-zinc-500 dark:text-zinc-400">{isRunning ? `${formatElapsed(elapsed)} elapsed` : `Finished in ${formatElapsed(elapsed)}`}</span>}
+        </div>
+        {isRunning && <p className="text-sm text-zinc-700 dark:text-zinc-200">
+          <span className="font-medium">Currently:</span> {currentActivity}
+          {activityLine?.fileName && <span className="ml-1 text-zinc-500">· {activityLine.fileName}</span>}
+        </p>}
+        {totalFiles != null && filesWalked != null && totalFiles > 0 && (
+          <div className="space-y-1">
+            <div className="text-sm tabular-nums text-zinc-700 dark:text-zinc-200">
+              {formatCount(filesWalked)} of {formatCount(totalFiles)} files checked
+            </div>
+            <progress aria-label="Files checked" value={filesWalked} max={totalFiles} className="h-2 w-full accent-indigo-600" />
+          </div>
+        )}
+        {isRunning && totalFiles != null && filesWalked == null && (
+          <p className="text-sm text-zinc-500 dark:text-zinc-400">{formatCount(totalFiles)} media files found</p>
+        )}
+        {isRunning && eta != null && <p className="text-xs text-zinc-500 dark:text-zinc-400">Estimated remaining time: about {formatDuration(eta)}</p>}
+        {status === 'complete' && summary && (
+          <p className="text-sm text-zinc-700 dark:text-zinc-200">
+            {summary.needs_processing != null ? `${formatCount(summary.needs_processing)} files processed` : 'Indexing finished'}
+            {summary.already_indexed != null && ` · ${formatCount(summary.already_indexed)} already up to date`}
+          </p>
+        )}
+        {status === 'error' && <p className="text-sm text-red-700 dark:text-red-300">
+          Indexing failed{statusInfo?.return_code != null ? ` (exit code ${statusInfo.return_code})` : ''}. Open the log below for details.
+        </p>}
+        {status === 'stopped' && <p className="text-sm text-amber-700 dark:text-amber-300">The indexing run was cancelled.</p>}
+        {hasCaptionFailures && <p className="text-xs text-zinc-600 dark:text-zinc-300">AI caption failures: {formatCount(captionFailures)}</p>}
+      </section>
 
       {/* Stats bar */}
       <div className="space-y-1.5">
@@ -225,39 +296,6 @@ export function IndexerPage() {
       {/* Control card */}
       <div className="bg-slate-100 dark:bg-zinc-800 rounded-lg p-4 space-y-3">
         <div className="flex items-center justify-between">
-          {/* Status */}
-          <div className="flex items-center gap-3">
-            <span className={cn(
-              'w-2.5 h-2.5 rounded-full shrink-0',
-              status === 'idle'     && 'bg-zinc-400 dark:bg-zinc-500',
-              status === 'running'  && 'bg-green-500 animate-pulse',
-              status === 'complete' && 'bg-indigo-500 dark:bg-indigo-400',
-              status === 'stopped'  && 'bg-amber-500 dark:bg-amber-400',
-              status === 'error'    && 'bg-red-500 dark:bg-red-400',
-            )} />
-            <div>
-              <div className="text-sm font-medium text-zinc-900 dark:text-zinc-100">
-                {status === 'idle'     && 'Ready'}
-                {status === 'running'  && 'Running…'}
-                {status === 'complete' && 'Complete'}
-                {status === 'stopped'  && 'Stopped'}
-                {status === 'error'    && 'Error'}
-              </div>
-              {elapsed != null && (
-                <div className="text-xs text-zinc-500 dark:text-zinc-400">
-                  {isRunning
-                    ? `${formatElapsed(elapsed)} elapsed`
-                    : `Finished in ${formatElapsed(elapsed)}`}
-                </div>
-              )}
-              {isRunning && eta != null && (
-                <div className="text-xs text-zinc-500 dark:text-zinc-400">
-                  Estimated remaining time: about {formatDuration(eta)}
-                </div>
-              )}
-            </div>
-          </div>
-
           <label className="flex items-center gap-2 text-xs text-zinc-600 dark:text-zinc-300">
             Processing order
             <select
@@ -331,21 +369,9 @@ export function IndexerPage() {
           </div>
         )}
 
-        {isRunning && summary?.phase === 'counting' && (
-          <div className="text-xs text-zinc-500 dark:text-zinc-400 bg-white dark:bg-zinc-900 px-3 py-2 rounded">
-            Scanning library...
-          </div>
-        )}
-
         {!hasSources && !isRunning && (
           <div className="text-xs text-amber-600 dark:text-amber-400 bg-white dark:bg-zinc-900 px-3 py-2 rounded">
             Setup required. Add at least one media source above to enable indexing.
-          </div>
-        )}
-
-        {isRunning && summary?.phase === 'analyzing' && (
-          <div className="text-xs text-zinc-500 dark:text-zinc-400 bg-white dark:bg-zinc-900 px-3 py-2 rounded">
-            Found about {formatCount(summary.total_found)} media items. Checking what needs indexing...
           </div>
         )}
 
@@ -469,25 +495,6 @@ export function IndexerPage() {
                 {formatRate(summary.avg_video_seconds_per_min)}
               </div>
             </div>
-          </div>
-        )}
-
-        {/* Current activity (last log line while running) */}
-        {isRunning && activityLine && (
-          <div className="bg-white dark:bg-zinc-900 px-3 py-2 rounded space-y-0.5">
-            <div className="text-[11px] text-zinc-400 dark:text-zinc-500 font-mono truncate">
-              {[activityLine.timestamp, activityLine.fileName].filter(Boolean).join('  ') || 'Current activity'}
-            </div>
-            <div className="text-xs text-zinc-500 dark:text-zinc-400 font-mono leading-5 line-clamp-2 break-words">
-              {activityLine.message}
-            </div>
-          </div>
-        )}
-
-        {/* Error detail */}
-        {status === 'error' && statusInfo?.return_code != null && (
-          <div className="text-xs text-red-500 dark:text-red-400">
-            Exited with code {statusInfo.return_code}. Check the log below for details.
           </div>
         )}
 

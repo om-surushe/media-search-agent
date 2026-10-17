@@ -41,6 +41,8 @@ const runningUpdate: WSMessage = {
 
 function mockFetch(overrides: Record<string, object> = {}) {
   vi.stubGlobal('fetch', vi.fn((url: string, opts?: RequestInit) => {
+    if (url === '/indexer/status')
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(overrides[url] ?? { status: 'idle', run_id: null, started_at: null, finished_at: null, elapsed_seconds: null, return_code: null }) })
     if (url === '/indexer/settings' && opts?.method === 'PUT') {
       const capabilities = {
         image_captions: { available: true, reason: null },
@@ -165,9 +167,9 @@ describe('IndexerPage', () => {
   })
 
   describe('status and controls', () => {
-    it('shows Ready and Run Indexer when idle', async () => {
+    it('shows Idle and Run Indexer when idle', async () => {
       renderPage()
-      await waitFor(() => expect(screen.getByText('Ready')).toBeTruthy())
+      await waitFor(() => expect(screen.getByText('Idle')).toBeTruthy())
       expect(screen.getByRole('button', { name: /run indexer/i })).toBeTruthy()
     })
 
@@ -179,10 +181,10 @@ describe('IndexerPage', () => {
       expect(screen.queryByText('Main library')).toBeNull()
     })
 
-    it('shows Running and Stop when WS reports running', async () => {
+    it('shows Indexing and Stop when WS reports running', async () => {
       MockWebSocket.pendingMessage = runningUpdate
       renderPage()
-      await waitFor(() => expect(screen.getByText('Running…')).toBeTruthy())
+      await waitFor(() => expect(screen.getByText('Indexing')).toBeTruthy())
       expect(screen.getByRole('button', { name: /stop/i })).toBeTruthy()
     })
 
@@ -192,12 +194,60 @@ describe('IndexerPage', () => {
       await waitFor(() => expect(screen.getByText(/42s elapsed/i)).toBeTruthy())
     })
 
-    it('shows last log line as current activity when running', async () => {
+    it('shows plain-language activity and keeps technical log lines collapsed', async () => {
       MockWebSocket.pendingMessage = runningUpdate
       renderPage()
-      await waitFor(() =>
-        expect(screen.getByText(/Indexing IMG_001\.heic/)).toBeTruthy()
-      )
+      expect(await screen.findByText('Processing your media files')).toBeInTheDocument()
+      expect(screen.queryByText('Indexing IMG_001.heic')).toBeNull()
+      await userEvent.click(screen.getByRole('button', { name: /log \(1 lines\)/i }))
+      expect(screen.getByText(/Indexing IMG_001\.heic/)).toBeInTheDocument()
+    })
+
+    it('shows checked files against the real total and a friendly activity phase', async () => {
+      MockWebSocket.pendingMessage = {
+        type: 'update',
+        status: { ...runningUpdate.status, summary: { phase: 'processing', total_found: 10, files_walked: 4 } },
+        log: [],
+      }
+      renderPage()
+      expect(await screen.findByText('4 of 10 files checked')).toBeInTheDocument()
+      expect(screen.getByText('Indexing photos and videos')).toBeInTheDocument()
+      expect(screen.getByRole('progressbar', { name: 'Files checked' })).toHaveAttribute('value', '4')
+      expect(screen.getByRole('progressbar', { name: 'Files checked' })).toHaveAttribute('max', '10')
+    })
+
+    it('summarizes completed work and reports tracked caption failures', async () => {
+      MockWebSocket.pendingMessage = {
+        type: 'update',
+        status: {
+          ...runningUpdate.status,
+          status: 'complete',
+          summary: {
+            phase: 'complete', total_found: 10, needs_processing: 6, already_indexed: 4,
+            captioning: { model_id: 'caption-model', prompt_version: 'v1', status: 'complete', total: 2, generated: 1, skipped: 0, failed: 1, elapsed_seconds: 4 },
+          },
+        },
+        log: [],
+      }
+      renderPage()
+      expect(await screen.findByText('Completed')).toBeInTheDocument()
+      expect(screen.getByText('6 files processed · 4 already up to date')).toBeInTheDocument()
+      expect(screen.getByText('AI caption failures: 1')).toBeInTheDocument()
+      expect(screen.queryByRole('progressbar', { name: 'Files checked' })).toBeNull()
+    })
+
+    it.each([
+      ['error', 'Failed'],
+      ['stopped', 'Cancelled'],
+    ] as const)('uses the clear %s outcome label', async (runStatus, label) => {
+      MockWebSocket.pendingMessage = {
+        type: 'update',
+        status: { ...runningUpdate.status, status: runStatus, summary: { phase: 'processing', total_found: 10, files_walked: 4 } },
+        log: [],
+      }
+      renderPage()
+      expect(await screen.findByText(label)).toBeInTheDocument()
+      expect(screen.getByText('4 of 10 files checked')).toBeInTheDocument()
     })
 
     it('restores saved processing order and explains where extraction is configured', async () => {
@@ -292,7 +342,7 @@ describe('IndexerPage', () => {
   describe('log viewer', () => {
     it('log section is absent when log is empty', async () => {
       renderPage()
-      await waitFor(() => screen.getByText('Ready'))
+      await waitFor(() => screen.getByText('Idle'))
       expect(screen.queryByText(/log \(/i)).toBeNull()
     })
 
