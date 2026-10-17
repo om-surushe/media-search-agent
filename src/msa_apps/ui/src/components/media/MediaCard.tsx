@@ -17,10 +17,14 @@ interface MediaCardProps {
   onClick: () => void
 }
 
-function formatDuration(s: number): string {
-  const m = Math.floor(s / 60)
-  const sec = Math.floor(s % 60)
-  return `${m}:${sec.toString().padStart(2, '0')}`
+function formatVideoTime(s: number): string {
+  const totalSeconds = Math.floor(Math.max(0, s))
+  const hours = Math.floor(totalSeconds / 3600)
+  const minutes = Math.floor((totalSeconds % 3600) / 60)
+  const seconds = totalSeconds % 60
+  return hours > 0
+    ? `${hours}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`
+    : `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`
 }
 
 function formatDate(iso: string | null | undefined): string {
@@ -57,18 +61,19 @@ export function MediaCard({ id, path: _path, type, date, place, captionExcerpt, 
         {type === 'video' && (
           <div className="absolute top-1.5 left-1.5 flex items-center gap-1 bg-black/70 rounded px-1.5 py-0.5 text-xs text-white">
             <Film size={10} />
-            {duration != null ? formatDuration(duration) : 'video'}
+            <span>VIDEO</span>
+            {duration != null && <span>· {formatVideoTime(duration)}</span>}
           </div>
         )}
       </div>
 
       {/* Footer */}
       <div className="px-2 py-1.5 flex flex-col gap-1 min-h-[3rem]">
-        {sceneMatches?.length ? (
+        {type === 'video' && sceneMatches?.length ? (
           <div className="space-y-0.5 text-xs text-indigo-700 dark:text-indigo-300">
             {sceneMatches.slice(0, 3).map(match => (
-              <div key={`${match.keyframe_id}-${match.timestamp}`} className="truncate" title={`${match.timestamp.toFixed(1)}s · ${match.caption_excerpt}`}>
-                <span className="font-semibold">{match.timestamp.toFixed(1)}s ·</span> {match.caption_excerpt}
+              <div key={`${match.keyframe_id}-${match.timestamp}`} className="truncate" title={`${formatVideoTime(match.timestamp)} · ${match.caption_excerpt}`}>
+                <span className="font-semibold">{formatVideoTime(match.timestamp)} ·</span> {match.caption_excerpt}
               </div>
             ))}
           </div>

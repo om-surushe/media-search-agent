@@ -125,7 +125,8 @@ describe('SearchPage', () => {
     fireEvent.change(screen.getByPlaceholderText(/describe what you're looking for/i), { target: { value: 'pink shirts' } })
     fireEvent.click(screen.getByRole('button', { name: 'Search' }))
     expect(await screen.findByRole('status')).toHaveTextContent('Semantic visual search is unavailable')
-    expect(screen.getByTitle('6.8s · people in pink shirts')).toBeInTheDocument()
+    expect(screen.getByTitle('00:06 · people in pink shirts')).toBeInTheDocument()
+    expect(screen.getByText('VIDEO')).toBeInTheDocument()
   })
 
   it('shows multiple timestamped scene matches and opens the video at the best scene', async () => {
@@ -149,8 +150,9 @@ describe('SearchPage', () => {
     fireEvent.change(screen.getByPlaceholderText(/describe what you're looking for/i), { target: { value: 'pink shirts' } })
     fireEvent.click(screen.getByRole('button', { name: 'Search' }))
 
-    const firstScene = await screen.findByTitle('6.8s · people wearing pink shirts')
-    expect(screen.getByTitle('18.2s · pink shirts near a window')).toBeInTheDocument()
+    const firstScene = await screen.findByTitle('00:06 · people wearing pink shirts')
+    expect(screen.getByTitle('00:18 · pink shirts near a window')).toBeInTheDocument()
+    expect(screen.getByText('VIDEO')).toBeInTheDocument()
     fireEvent.click(firstScene.closest('button')!)
 
     const video = container.querySelector('video')!

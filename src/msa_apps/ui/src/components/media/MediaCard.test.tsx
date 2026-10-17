@@ -33,20 +33,35 @@ describe('MediaCard', () => {
   })
 
   describe('video badge', () => {
-    it('shows video badge for video type', () => {
+    it('shows a clear video indicator for video type', () => {
       render(<MediaCard {...baseProps} type="video" />)
-      // Badge shows "video" text when no duration
-      expect(screen.getByText('video')).toBeInTheDocument()
+      expect(screen.getByText('VIDEO')).toBeInTheDocument()
     })
 
     it('shows formatted duration when video has duration', () => {
       render(<MediaCard {...baseProps} type="video" duration={125} />)
-      expect(screen.getByText('2:05')).toBeInTheDocument()
+      expect(screen.getByText('· 02:05')).toBeInTheDocument()
     })
 
-    it('does not show video badge for image type', () => {
-      render(<MediaCard {...baseProps} type="image" />)
-      expect(screen.queryByText('video')).toBeNull()
+    it('formats long durations with hours', () => {
+      render(<MediaCard {...baseProps} type="video" duration={3665} />)
+      expect(screen.getByText('· 1:01:05')).toBeInTheDocument()
+    })
+
+    it('does not show video metadata for image type', () => {
+      render(<MediaCard {...baseProps} type="image" duration={125} sceneMatches={[{ keyframe_id: 1, timestamp: 65, caption_excerpt: 'a scene' }]} />)
+      expect(screen.queryByText('VIDEO')).toBeNull()
+      expect(screen.queryByText('· 01:05')).toBeNull()
+      expect(screen.queryByText('a scene')).toBeNull()
+    })
+  })
+
+  describe('matching scene context', () => {
+    it('shows matching timestamp and the stored scene description', () => {
+      render(<MediaCard {...baseProps} type="video" sceneMatches={[{ keyframe_id: 1, timestamp: 65, caption_excerpt: 'a person entering the room' }]} />)
+      expect(screen.getByTitle('01:05 · a person entering the room')).toBeInTheDocument()
+      expect(screen.getByText('01:05 ·')).toBeInTheDocument()
+      expect(screen.getByText(/a person entering the room/)).toBeInTheDocument()
     })
   })
 
