@@ -35,8 +35,11 @@ if [ ! -d ".venv" ]; then
     exit 1
 fi
 
-# Activate virtual environment
-source .venv/bin/activate
+PYTHON="$PROJECT_ROOT/.venv/bin/python"
+if [[ ! -x "$PYTHON" ]]; then
+    echo "Error: Python environment not found at $PROJECT_ROOT/.venv. Run: bash scripts/dev-setup.sh" >&2
+    exit 1
+fi
 
 # Check if Qdrant is running
 if ! curl -s http://localhost:6333/health > /dev/null 2>&1; then
@@ -50,5 +53,6 @@ echo "   API will be available at: http://localhost:8000"
 echo "   Health check: http://localhost:8000/health"
 echo ""
 
-# Start uvicorn
-exec uvicorn msa_apps.search_api.app:app --host "$BIND_HOST" --port 8000 --reload
+# Load the checkout directly, even if the venv's editable install predates a repo move.
+export PYTHONPATH="$PROJECT_ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
+exec "$PYTHON" -m uvicorn msa_apps.search_api.app:app --host "$BIND_HOST" --port 8000 --reload

@@ -4,13 +4,14 @@ set -euo pipefail
 
 MSA_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VENV="${MSA_DEV_VENV_DIR:-$MSA_ROOT/.venv}"
-CLI="$VENV/bin/msa"
+PYTHON="$VENV/bin/python"
 
-if [[ ! -x "$CLI" ]]; then
+if [[ ! -x "$PYTHON" ]]; then
   echo "Missing CLI environment at $VENV. Run: bash scripts/dev-setup.sh or set MSA_DEV_VENV_DIR." >&2
   exit 1
 fi
 
 unset MSA_CONFIG_PATH MSA_DATA_DIR MSA_LOG_DIR MSA_CACHE_DIR MSA_VENV_DIR MSA_DEV_VENV_DIR
 export MSA_DEV=1
-exec "$CLI" index run "$@"
+export PYTHONPATH="$MSA_ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
+exec "$PYTHON" -c 'from msa_cli.cli import main; main()' index run "$@"

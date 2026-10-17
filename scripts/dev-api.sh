@@ -5,9 +5,7 @@ set -euo pipefail
 MSA_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VENV="${MSA_DEV_VENV_DIR:-$MSA_ROOT/.venv}"
 PYTHON="$VENV/bin/python"
-UVICORN="$VENV/bin/uvicorn"
-
-if [[ ! -x "$UVICORN" ]]; then
+if [[ ! -x "$PYTHON" ]]; then
   echo "Missing backend environment at $VENV. Run: bash scripts/dev-setup.sh or set MSA_DEV_VENV_DIR." >&2
   exit 1
 fi
@@ -15,6 +13,7 @@ fi
 # Do not accidentally load an installed-app config or data directory.
 unset MSA_CONFIG_PATH MSA_DATA_DIR MSA_LOG_DIR MSA_CACHE_DIR MSA_VENV_DIR MSA_DEV_VENV_DIR
 export MSA_ROOT MSA_DEV=1
+export PYTHONPATH="$MSA_ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
 
 read -r CONFIG_HOST CONFIG_PORT < <("$PYTHON" - "$MSA_ROOT/config.yaml" <<'PY'
 import sys
@@ -29,7 +28,7 @@ HOST="${MSA_DEV_API_HOST:-$CONFIG_HOST}"
 PORT="${MSA_DEV_API_PORT:-$CONFIG_PORT}"
 
 cd "$MSA_ROOT"
-exec "$UVICORN" msa_apps.search_api.app:app \
+exec "$PYTHON" -m uvicorn msa_apps.search_api.app:app \
   --host "$HOST" --port "$PORT" \
   --reload \
   --reload-dir "$MSA_ROOT/src/msa_apps/search_api" \

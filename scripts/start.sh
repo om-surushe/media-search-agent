@@ -320,7 +320,8 @@ log_bold "Starting FastAPI..."
 
 UVICORN_LOG="$MSA_LOG_DIR/uvicorn.log"
 cd "$MSA_ROOT"
-"$VENV/bin/uvicorn" "$API_MODULE" \
+export PYTHONPATH="$MSA_ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
+"$VENV/bin/python" -m uvicorn "$API_MODULE" \
   --host "$API_HOST" \
   --port "$API_PORT" \
   --log-level warning \

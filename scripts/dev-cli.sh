@@ -38,6 +38,7 @@ if [[ $# -eq 0 ]]; then
 # Ensure a clean MSA environment — clear any vars from end-user install
 unset MSA_CONFIG_PATH MSA_DATA_DIR MSA_LOG_DIR MSA_CACHE_DIR MSA_VENV_DIR
 export MSA_DEV=1
+export PYTHONPATH="$MSA_ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
 export VIRTUAL_ENV_DISABLE_PROMPT=1
 if [[ -f "\$HOME/.bashrc" ]]; then
   source "\$HOME/.bashrc"
@@ -59,5 +60,6 @@ fi
 export VIRTUAL_ENV_DISABLE_PROMPT=1
 source "$ACTIVATE"
 export MSA_DEV=1
+export PYTHONPATH="$MSA_ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
 
 exec "$@"

@@ -233,14 +233,14 @@ def show_example_config():
 media_sources:
   # Example 1: OneDrive (Windows via WSL)
   - name: "onedrive_photos"
-    path: "/mnt/c/Users/Kumar/OneDrive/Pictures"
-    url_base: "file:///C:/Users/Kumar/OneDrive/Pictures"
+    path: "/mnt/c/Users/<username>/OneDrive/Pictures"
+    url_base: "file:///C:/Users/<username>/OneDrive/Pictures"
     read_only: true
     description: "iPhone auto-upload to OneDrive"
   
   # Example 2: Local storage
   - name: "local_photos"
-    path: "/home/kumar/Pictures"
+    path: "/path/to/photos"
     url_base: null  # Serve via API
     read_only: false
     description: "Edited photos on local disk"
@@ -255,7 +255,7 @@ media_sources:
   
   # Example 4: External drive
   - name: "backup_drive"
-    path: "/media/kumar/Backup/Photos"
+    path: "/media/<username>/Backup/Photos"
     url_base: "file:///media/kumar/Backup/Photos"
     read_only: true
     description: "Backup of 2023 photos"
@@ -273,7 +273,7 @@ media_sources:
     print("="*70 + "\n")
     
     print("URL Base Examples:")
-    print("  • Local Windows files:  file:///C:/Users/Kumar/Pictures")
+    print("  • Local Windows files:  file:///C:/Users/<username>/Pictures")
     print("  • Network share (SMB):  smb://nas.local/photos")
     print("  • Network share (NFS):  nfs://server/export/photos")
     print("  • Web server:           https://photos.example.com/media")

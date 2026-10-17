@@ -187,10 +187,14 @@ else
 
     if [[ -d "$VENV" ]]; then
         VENV_PYTHON=$("$VENV/bin/python" --version 2>/dev/null | awk '{print $2}' || echo "unknown")
-        if [[ "$VENV_PYTHON" == "$PYTHON_VERSION" ]]; then
+        VENV_MOVED=0
+        if [[ ! -f "$VENV/bin/activate" ]] || ! grep -Fq "$VENV" "$VENV/bin/activate"; then
+            VENV_MOVED=1
+        fi
+        if [[ "$VENV_PYTHON" == "$PYTHON_VERSION" && $VENV_MOVED -eq 0 ]]; then
             log_skip "venv exists with Python $VENV_PYTHON"
         else
-            log_warn "venv Python $VENV_PYTHON != $PYTHON_VERSION — recreating..."
+            log_warn "venv is stale or uses Python $VENV_PYTHON (expected $PYTHON_VERSION) — recreating..."
             rm -rf "$VENV"
             "$UV_BIN" venv "$VENV" --python "$PYTHON_VERSION"
             log_ok "venv recreated with Python $PYTHON_VERSION"
