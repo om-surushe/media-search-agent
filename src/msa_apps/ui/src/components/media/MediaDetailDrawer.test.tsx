@@ -370,6 +370,12 @@ describe('MediaDetailDrawer', () => {
       expect(navigator.clipboard.writeText).toHaveBeenCalledWith('/photos/vacation/beach.jpg')
     })
 
+    it('reveals the indexed original by media ID', async () => {
+      wrap(<MediaDetailDrawer item={baseItem} onClose={vi.fn()} />)
+      await userEvent.click(screen.getByRole('button', { name: 'Reveal original in Finder or Explorer' }))
+      await waitFor(() => expect(fetch).toHaveBeenCalledWith('/media/img-01/reveal', { method: 'POST' }))
+    })
+
     it('handles paths with backslashes (Windows)', () => {
       wrap(<MediaDetailDrawer item={{ ...baseItem, path: 'C:\\Users\\Photos\\beach.jpg' }} onClose={vi.fn()} />)
       expect(screen.getByText('beach.jpg')).toBeInTheDocument()

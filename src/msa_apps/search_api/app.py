@@ -1029,6 +1029,53 @@ def list_media(
         raise HTTPException(status_code=500, detail="Internal server error")
 
 # --- Reusable asset intelligence inspector ---
+@app.post("/media/{media_id}/reveal")
+def reveal_media_in_file_manager(media_id: str, request: Request):
+    """Reveal a database-indexed original in the host file manager."""
+    import subprocess as _sp
+    import sys as _sys
+
+    host = (request.headers.get("host") or "").split(":")[0].lower()
+    if host not in ("localhost", "127.0.0.1", "::1", ""):
+        raise HTTPException(status_code=403, detail="Only available from localhost")
+
+    S = _get_config(request)
+    db_path = Path(S.sqlite_path)
+    if not db_path.exists():
+        raise HTTPException(status_code=500, detail="SQLite database not found")
+    conn = connect_readonly(db_path)
+    try:
+        row = conn.execute(
+            "SELECT path, source_name, rel_path FROM media WHERE media_id=? AND deleted=0",
+            (media_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Media not found")
+
+    db_path_str, source_name, rel_path = row
+    resolved_path = _resolve_path(db_path_str, source_name, rel_path)
+    file_path = Path(resolve_for_access(resolved_path or db_path_str)).resolve()
+    if not file_path.exists() and db_path_str and str(file_path) != str(Path(resolve_for_access(db_path_str)).resolve()):
+        file_path = Path(resolve_for_access(db_path_str)).resolve()
+    if not file_path.is_file():
+        raise HTTPException(status_code=404, detail="Original file not found on disk")
+
+    if _sys.platform == "darwin":
+        command = ["open", "-R", str(file_path)]
+    elif _sys.platform == "win32":
+        command = ["explorer.exe", f"/select,{file_path}"]
+    else:
+        command = ["xdg-open", str(file_path.parent)]
+    try:
+        _sp.Popen(command, stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
+    except OSError:
+        logger.exception("Could not open file manager for indexed media")
+        raise HTTPException(status_code=500, detail="Could not open the file manager")
+    return {"status": "revealed"}
+
+
 @app.get("/media/{media_id}/intelligence", response_model=AssetIntelligenceResponse)
 def get_asset_intelligence(media_id: str, request: Request):
     """Read canonical asset metadata and stored pipeline outputs; never returns vectors."""

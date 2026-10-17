@@ -678,6 +678,40 @@ def test_read_only_query_engine_skips_encoder_when_clip_is_missing(monkeypatch, 
         deps.reset_query_engine()
 
 
+def test_reveal_media_opens_indexed_original_in_finder(client, db, tmp_path, monkeypatch):
+    import subprocess
+    import sys
+
+    original = tmp_path / "original photo.jpg"
+    original.write_bytes(b"fixture")
+    with sqlite3.connect(db) as conn:
+        conn.execute("UPDATE media SET path=? WHERE media_id=?", (str(original), "id_img_01"))
+    monkeypatch.setattr(sys, "platform", "darwin")
+    launch = MagicMock()
+    monkeypatch.setattr(subprocess, "Popen", launch)
+
+    response = client.post("/media/id_img_01/reveal", headers={"host": "localhost"})
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "revealed"}
+    launch.assert_called_once()
+    assert launch.call_args.args[0] == ["open", "-R", str(original)]
+    assert launch.call_args.kwargs["stdout"] == subprocess.DEVNULL
+    assert launch.call_args.kwargs["stderr"] == subprocess.DEVNULL
+
+
+def test_reveal_media_rejects_non_local_host(client, monkeypatch):
+    import subprocess
+
+    launch = MagicMock()
+    monkeypatch.setattr(subprocess, "Popen", launch)
+
+    response = client.post("/media/id_img_01/reveal", headers={"host": "example.com"})
+
+    assert response.status_code == 403
+    launch.assert_not_called()
+
+
 def test_normal_runtime_resumes_persistent_setup_job(client, monkeypatch):
     import msa_apps.search_api.app as api_module
 

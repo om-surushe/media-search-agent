@@ -24,6 +24,11 @@ export async function getMedia(
   return res.json()
 }
 
+export async function revealMedia(mediaId: string): Promise<void> {
+  const res = await fetch(apiUrl(`/media/${encodeURIComponent(mediaId)}/reveal`), { method: 'POST' })
+  if (!res.ok) throw new Error(`Could not reveal original file: ${res.status}`)
+}
+
 export async function getAssetIntelligence(mediaId: string): Promise<AssetIntelligence> {
   const res = await fetch(apiUrl(`/media/${encodeURIComponent(mediaId)}/intelligence`))
   if (!res.ok) throw new Error(`Asset intelligence fetch failed: ${res.status}`)

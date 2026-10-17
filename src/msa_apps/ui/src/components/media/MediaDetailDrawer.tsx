@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
-import { X, MapPin, Calendar, Tag, Expand, Copy, Check } from 'lucide-react'
+import { X, MapPin, Calendar, Tag, Expand, Copy, Check, FolderOpen } from 'lucide-react'
 import { useQuery } from '@tanstack/react-query'
-import { faceThumbnailUrl, getAssetIntelligence, imageUrl, videoUrl } from '../../api/media'
+import { faceThumbnailUrl, getAssetIntelligence, imageUrl, revealMedia, videoUrl } from '../../api/media'
 import { trackOpen } from '../../api/search'
 import { FaceStrip } from './FaceStrip'
 import { MediaOrganizationControls } from './MediaOrganizationControls'
@@ -48,8 +48,9 @@ function formatDate(iso: string | null | undefined): string {
   } catch { return iso }
 }
 
-function PathRow({ path }: { path: string }) {
+function PathRow({ path, mediaId }: { path: string; mediaId: string }) {
   const [copied, setCopied] = useState(false)
+  const [revealError, setRevealError] = useState<string | null>(null)
   const slash = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'))
   const filename = slash >= 0 ? path.slice(slash + 1) : path
 
@@ -60,16 +61,37 @@ function PathRow({ path }: { path: string }) {
     }).catch(() => {})
   }
 
+  const reveal = async () => {
+    setRevealError(null)
+    try {
+      await revealMedia(mediaId)
+    } catch {
+      setRevealError('Could not reveal the original file. Check that it is still available.')
+    }
+  }
+
   return (
-    <div className="group relative flex items-center gap-2">
+    <div className="group relative flex flex-wrap items-center gap-2">
       <span className="text-xs text-zinc-400 dark:text-zinc-500 truncate min-w-0 flex-1">{filename}</span>
       <button
+        type="button"
+        onClick={() => void reveal()}
+        aria-label="Reveal original in Finder or Explorer"
+        title="Reveal original in Finder or Explorer"
+        className="inline-flex items-center gap-1 shrink-0 rounded px-2 py-1 text-xs text-indigo-600 dark:text-indigo-300 hover:bg-indigo-50 dark:hover:bg-indigo-950"
+      >
+        <FolderOpen size={13} /> Reveal in Finder / Explorer
+      </button>
+      <button
+        type="button"
         onClick={copy}
         title={path}
+        aria-label="Copy original file path"
         className="shrink-0 opacity-0 group-hover:opacity-100 transition-opacity text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200"
       >
         {copied ? <Check size={13} className="text-emerald-500" /> : <Copy size={13} />}
       </button>
+      {revealError && <p role="alert" className="basis-full text-xs text-rose-600">{revealError}</p>}
       {/* Full path on hover */}
       <div className="absolute bottom-full left-0 mb-1 hidden group-hover:block z-10 max-w-xs">
         <div className="bg-zinc-800 text-zinc-200 text-xs font-mono px-2 py-1.5 rounded shadow-lg break-all">
@@ -287,7 +309,7 @@ export function MediaDetailDrawer({ item, onClose, searchId }: MediaDetailDrawer
               )}
 
               {/* File path — hover to reveal full path + copy */}
-              {item.path && <PathRow path={item.path} />}
+              {item.path && <PathRow path={item.path} mediaId={item.id} />}
               <MediaOrganizationControls mediaId={item.id} />
 
               {/* Date */}
